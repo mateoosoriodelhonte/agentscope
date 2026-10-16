@@ -1,55 +1,118 @@
-/* Semantic design tokens. Colors are only referenced through these variables. */
+/*
+ * Semantic design tokens. Components reference colours only through these variables.
+ *
+ * Colours are hex so src/styles/__tests__/contrast.spec.ts can parse this file and assert
+ * WCAG AA contrast for each text and status token against each surface (6-digit hex; the
+ * 8-digit overlay and shadow tokens carry alpha and are not text).
+ * The theme is chosen before first paint by public/theme-init.js (data-theme on <html>).
+ */
+
+:root {
+  --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  --radius-sm: 3px;
+  --radius: 6px;
+  --sidebar-w: 212px;
+  --topbar-h: 44px;
+}
+
 :root,
-[data-theme='light'] {
-  --surface-0: #f7f8fa;
+:root[data-theme='light'] {
+  /* surfaces */
+  --surface-0: #f5f6f8;
   --surface-1: #ffffff;
-  --surface-2: #f0f2f5;
-  --border: #dde1e7;
-  --border-strong: #c3c9d2;
-  --text: #15191f;
-  --text-muted: #555e6b;
-  --text-faint: #6b7380;
-  --accent: #0f6f68;
-  --accent-soft: #e2f3f1;
-  --ok: #17723a;
-  --ok-soft: #e4f4e9;
-  --fail: #b42318;
-  --fail-soft: #fdecea;
-  --warn: #8a5300;
-  --warn-soft: #fdf3e1;
-  --na: #5d6673;
-  --na-soft: #eef0f3;
-  --kind-node: #6b7380;
-  --kind-llm: #2e5fb8;
-  --kind-tool: #0f6f68;
-  --kind-guardrail: #9a5b00;
-  --focus: #2e5fb8;
+  --surface-2: #eef0f3;
+  --hover: #f1f3f6;
+  --selected: #e6edf8;
+  --border: #dde1e6;
+  --border-strong: #c3c9d1;
+
+  /* text */
+  --text: #141820;
+  --text-muted: #4b5462;
+  --text-faint: #5f6876;
+  --accent: #1a5bbf;
+  --accent-soft: #e5edf9;
+  --accent-contrast: #ffffff;
+  --focus: #1a5bbf;
+
+  /* status: always paired with an icon and a text label */
+  --ok: #146c37;
+  --ok-soft: #e2f2e7;
+  --fail: #b0241c;
+  --fail-soft: #fbe9e8;
+  --warn: #7d5200;
+  --warn-soft: #f9efd9;
+  --na: #565f6c;
+  --na-soft: #eceef2;
+  --neutral: #2f5788;
+  --neutral-soft: #e6edf6;
+
+  /* injected faults are always drawn with a hatch pattern as well */
+  --injected: #a3420c;
+  --injected-soft: #fcebdf;
+  --redacted: #475263;
+  --redacted-soft: #e8ebf0;
+
+  /* exactly four span-kind hues, used only in the tree's row gutter */
+  --kind-node: #77818f;
+  --kind-llm: #2e6bd1;
+  --kind-tool: #0b7f75;
+  --kind-guardrail: #a86a00;
+
+  /* duration bars */
+  --bar: #76818f;
+  --bar-track: #eef0f3;
+
+  --overlay: #0d10158c;
+  --shadow: #0d101540;
+
   color-scheme: light;
 }
 
-[data-theme='dark'] {
-  --surface-0: #0f1216;
-  --surface-1: #161a20;
-  --surface-2: #1d2229;
-  --border: #2a3039;
-  --border-strong: #3a424d;
-  --text: #e6e9ee;
-  --text-muted: #a3abb7;
-  --text-faint: #8b94a1;
-  --accent: #4fc1b6;
-  --accent-soft: #15302d;
-  --ok: #5cc98a;
-  --ok-soft: #13291c;
-  --fail: #f28b82;
+:root[data-theme='dark'] {
+  --surface-0: #0d1015;
+  --surface-1: #141920;
+  --surface-2: #1a2028;
+  --hover: #1b222b;
+  --selected: #1c2a3e;
+  --border: #29303a;
+  --border-strong: #3a434f;
+
+  --text: #e6e9ed;
+  --text-muted: #a4adb9;
+  --text-faint: #8f99a6;
+  --accent: #74a9f7;
+  --accent-soft: #172a44;
+  --accent-contrast: #0d1015;
+  --focus: #74a9f7;
+
+  --ok: #56c487;
+  --ok-soft: #11281a;
+  --fail: #ff8f85;
   --fail-soft: #3a1714;
-  --warn: #e3b05c;
-  --warn-soft: #33260f;
-  --na: #a3abb7;
-  --na-soft: #22272e;
-  --kind-node: #8b94a1;
-  --kind-llm: #82a9f0;
-  --kind-tool: #4fc1b6;
-  --kind-guardrail: #e3b05c;
-  --focus: #82a9f0;
+  --warn: #e2b356;
+  --warn-soft: #31260f;
+  --na: #a4adb9;
+  --na-soft: #222830;
+  --neutral: #94b8e6;
+  --neutral-soft: #192536;
+
+  --injected: #ffa268;
+  --injected-soft: #381e0e;
+  --redacted: #b6bfcb;
+  --redacted-soft: #252b34;
+
+  --kind-node: #87919e;
+  --kind-llm: #6fa3f2;
+  --kind-tool: #3dbcab;
+  --kind-guardrail: #dca23c;
+
+  --bar: #7a8594;
+  --bar-track: #1f262f;
+
+  --overlay: #000000a6;
+  --shadow: #00000080;
+
   color-scheme: dark;
 }
