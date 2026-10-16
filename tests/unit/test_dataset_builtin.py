@@ -69,21 +69,30 @@ EXPECTED_FAILURES = {
 
 
 def test_builtin_datasets_are_listed_and_loadable() -> None:
-    assert [d.name for d in builtin_datasets()] == [RESEARCH]
+    names = [d.name for d in builtin_datasets()]
+    assert RESEARCH in names
+    assert names == sorted(names)
     research = load_builtin_dataset(RESEARCH)
     assert research.agent == "research_assistant"
     assert 14 <= len(research.cases) <= 20
-    with pytest.raises(UnknownDatasetError, match="available: \\['research-assistant'\\]"):
+    with pytest.raises(UnknownDatasetError, match="available: "):
         load_builtin_dataset("nope")
 
 
-@pytest.mark.parametrize("ref", [None, *(f"research_assistant@{v}" for v in VERSIONS)])
-def test_builtin_datasets_lint_clean(
-    catalog: AgentCatalog, registry: ToolRegistry, ref: str | None
-) -> None:
-    config = catalog.resolve(ref) if ref else None
+def _lint_targets(catalog: AgentCatalog) -> list[tuple[Dataset, str | None]]:
+    """Every packaged dataset, linted without a config and against each of its agent's versions."""
+    targets: list[tuple[Dataset, str | None]] = []
     for dataset in builtin_datasets():
-        assert lint(dataset, catalog, registry, config=config) == []
+        targets.append((dataset, None))
+        assert dataset.agent is not None
+        targets += [(dataset, v.ref) for v in catalog.get(dataset.agent).versions]
+    return targets
+
+
+def test_builtin_datasets_lint_clean(catalog: AgentCatalog, registry: ToolRegistry) -> None:
+    for dataset, ref in _lint_targets(catalog):
+        config = catalog.resolve(ref) if ref else None
+        assert lint(dataset, catalog, registry, config=config) == [], (dataset.name, ref)
 
 
 def test_fixture_dataset_is_the_builtin_research_dataset() -> None:
