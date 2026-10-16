@@ -1,0 +1,126 @@
+[project]
+name = "agentscope"
+version = "0.1.0"
+description = "Local-first platform to debug, evaluate, and compare AI agents."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "mateoosoriodelhonte" }]
+keywords = ["ai-agents", "evaluation", "observability", "opentelemetry", "langgraph", "prompt-injection"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Web Environment",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+  "Typing :: Typed",
+]
+dependencies = [
+  "fastapi>=0.135,<1",
+  "uvicorn>=0.40,<1",
+  "pydantic>=2.12,<3",
+  "pydantic-settings>=2.11,<3",
+  "langgraph>=1.2,<2",
+  "opentelemetry-api>=1.40,<2",
+  "opentelemetry-sdk>=1.40,<2",
+  "sqlalchemy>=2.1,<2.2",
+  "alembic>=1.18,<2",
+  "httpx>=0.28,<0.29",
+  "typer>=0.20,<1",
+  "rich>=14",
+  "jsonschema>=4.25,<5",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.3,<4"]
+otlp = ["opentelemetry-exporter-otlp-proto-http>=1.40,<2"]
+
+[project.scripts]
+agentscope = "agentscope.cli.main:main"
+
+[project.urls]
+Repository = "https://github.com/mateoosoriodelhonte/agentscope"
+Issues = "https://github.com/mateoosoriodelhonte/agentscope/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0",
+  "pytest-asyncio>=1.3",
+  "pytest-cov>=7.0",
+  "hypothesis>=6.150",
+  "ruff>=0.15",
+  "mypy>=2.0",
+  "types-jsonschema>=4.25",
+  "psycopg[binary]>=3.3,<4",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentscope"]
+# The built dashboard (frontend/dist copied to src/agentscope/web/dist) is git-ignored
+# but must ship inside the wheel when present.
+artifacts = ["src/agentscope/web/dist/**"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["frontend/node_modules", ".agentscope"]
+
+[tool.uv]
+# Supply-chain cool-off: never resolve packages published in the last few days.
+# Bump deliberately when updating the lockfile.
+exclude-newer = "2026-10-09T00:00:00Z"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PT", "ASYNC", "C4", "PIE", "RET", "TID"]
+ignore = [
+  "S101",   # assert is fine in tests and for type narrowing
+  "RUF012", # mutable class attrs are idiomatic for Pydantic/SQLAlchemy
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B011", "PT011"]
+"src/agentscope/storage/migrations/versions/*" = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+files = ["src/agentscope"]
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "opentelemetry.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "postgres: requires AGENTSCOPE_TEST_POSTGRES_URL pointing at a disposable PostgreSQL database",
+  "slow: slower tests (real timeouts, full suites)",
+]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.coverage.run]
+source = ["agentscope"]
+branch = true
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
