@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api, ApiError } from '@/api/client'
 import type { CheckName, RunDetail } from '@/api/types'
@@ -27,7 +27,22 @@ const props = defineProps<{ runId: string }>()
 
 const detail = shallowRef<RunDetail | null>(null)
 const error = ref<{ status: number | null; message: string } | null>(null)
+const page = ref<HTMLElement | null>(null)
 let controller: AbortController | null = null
+
+/**
+ * The loading, error and loaded states each render their own h1. When the router has moved
+ * focus to the loading heading, keep it on the page heading across the swap instead of
+ * dropping it to <body>.
+ */
+async function keepHeadingFocus(swap: () => void): Promise<void> {
+  const heading = page.value?.querySelector('h1')
+  const focused = heading != null && heading === document.activeElement
+  swap()
+  if (!focused) return
+  await nextTick()
+  page.value?.querySelector<HTMLElement>('h1')?.focus()
+}
 
 async function load(): Promise<void> {
   controller?.abort()
@@ -38,17 +53,20 @@ async function load(): Promise<void> {
   expanded.value = []
   try {
     const result = await api.getRun(props.runId, current.signal)
-    detail.value = result
+    await keepHeadingFocus(() => (detail.value = result))
+    if (current.signal.aborted) return
     setPageDetail(`${result.trace.agent}@${result.trace.agent_version} · ${shortId(result.trace.run_id)}`)
     // A deep link to a check (e.g. printed by the CLI for a failed case) opens its evidence.
     const first = evidenceOf(query.value.check)[0]
     if (first && !query.value.span) void set({ span: first })
   } catch (e) {
     if (current.signal.aborted) return
-    error.value = {
-      status: e instanceof ApiError ? e.status : null,
-      message: e instanceof Error ? e.message : String(e),
-    }
+    await keepHeadingFocus(() => {
+      error.value = {
+        status: e instanceof ApiError ? e.status : null,
+        message: e instanceof Error ? e.message : String(e),
+      }
+    })
   }
 }
 const model = computed(() => (detail.value ? useTraceModel(detail.value.trace) : null))
@@ -187,7 +205,7 @@ function onKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <div class="trace-page">
+  <div ref="page" class="trace-page">
     <template v-if="error">
       <h1 tabindex="-1" class="pad">Run {{ shortId(runId) }}</h1>
       <EmptyState v-if="error.status === 404" title="Run not found" variant="error">

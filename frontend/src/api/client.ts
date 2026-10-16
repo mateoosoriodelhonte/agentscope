@@ -69,7 +69,16 @@ function post<T>(path: string, body: unknown = {}, signal?: AbortSignal): Promis
   return request<T>(path, { method: 'POST', body: JSON.stringify(body), signal })
 }
 
-const seg = encodeURIComponent
+/**
+ * One encoded path segment. "." and ".." survive encodeURIComponent (and their %2E forms are
+ * still dot segments to the URL parser), so they would climb out of the intended route.
+ */
+function seg(value: string): string {
+  if (value === '' || value === '.' || value === '..') {
+    throw new ApiError(400, `invalid path segment: ${JSON.stringify(value)}`)
+  }
+  return encodeURIComponent(value)
+}
 
 export type Verdict = 'passed' | 'failed' | 'none'
 
@@ -96,18 +105,20 @@ function queryString(params: object): string {
   return text ? `?${text}` : ''
 }
 
+// Functions that take path segments are async so an invalid segment rejects like any other
+// request failure instead of throwing synchronously.
 export const api = {
   health: (signal?: AbortSignal) => request<Health>('/api/health', { signal }),
   overview: (signal?: AbortSignal) => request<Overview>('/api/overview', { signal }),
   agents: (signal?: AbortSignal) => request<AgentsResponse>('/api/agents', { signal }),
   providers: (signal?: AbortSignal) => request<ProviderStatus[]>('/api/providers', { signal }),
-  job: (jobId: string, signal?: AbortSignal) =>
+  job: async (jobId: string, signal?: AbortSignal) =>
     request<JobStatus>(`/api/jobs/${seg(jobId)}`, { signal }),
 
   listRuns: (query: RunListQuery = {}, signal?: AbortSignal) =>
     request<RunList>(`/api/runs${queryString(query)}`, { signal }),
   createRun: (body: RunCreate) => post<JobAccepted>('/api/runs', body),
-  getRun: (runId: string, signal?: AbortSignal) =>
+  getRun: async (runId: string, signal?: AbortSignal) =>
     request<RunDetail>(`/api/runs/${seg(runId)}`, { signal }),
   runExportUrl: (runId: string) => `/api/runs/${seg(runId)}/export`,
 
@@ -116,7 +127,7 @@ export const api = {
   /** Lints an untrusted document without importing it. */
   validateDataset: (document: unknown) =>
     post<DatasetValidation>('/api/datasets/validate', document),
-  getDataset: (name: string, version: string, signal?: AbortSignal) =>
+  getDataset: async (name: string, version: string, signal?: AbortSignal) =>
     request<DatasetDetail>(`/api/datasets/${seg(name)}/${seg(version)}`, { signal }),
   datasetExportUrl: (name: string, version: string) =>
     `/api/datasets/${seg(name)}/${seg(version)}/export`,
@@ -124,14 +135,14 @@ export const api = {
   listEvaluations: (signal?: AbortSignal) =>
     request<SuiteListItem[]>('/api/evaluations', { signal }),
   createEvaluation: (body: EvaluationCreate) => post<JobAccepted>('/api/evaluations', body),
-  getEvaluation: (suiteId: string, signal?: AbortSignal) =>
+  getEvaluation: async (suiteId: string, signal?: AbortSignal) =>
     request<SuiteResult>(`/api/evaluations/${seg(suiteId)}`, { signal }),
   evaluationExportUrl: (suiteId: string) => `/api/evaluations/${seg(suiteId)}/export`,
 
   listExperiments: (signal?: AbortSignal) =>
     request<ExperimentListItem[]>('/api/experiments', { signal }),
   createExperiment: (body: ExperimentCreate) => post<JobAccepted>('/api/experiments', body),
-  getExperiment: (experimentId: string, signal?: AbortSignal) =>
+  getExperiment: async (experimentId: string, signal?: AbortSignal) =>
     request<Comparison>(`/api/experiments/${seg(experimentId)}`, { signal }),
 
   failures: (signal?: AbortSignal) => request<FailureAnalysis>('/api/failures', { signal }),

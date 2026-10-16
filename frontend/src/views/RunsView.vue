@@ -31,6 +31,7 @@ const loading = ref(true)
 const agentRefs = shallowRef<string[]>([])
 const seeding = ref<string | null>(null)
 let controller: AbortController | null = null
+let seedController: AbortController | null = null
 
 const filtered = computed(() => {
   const f = filters.value
@@ -85,7 +86,10 @@ async function load(): Promise<void> {
 }
 
 watch(filters, load, { immediate: true })
-onBeforeUnmount(() => controller?.abort())
+onBeforeUnmount(() => {
+  controller?.abort()
+  seedController?.abort()
+})
 
 onMounted(async () => {
   try {
@@ -103,11 +107,17 @@ const agentOptions = computed(() => {
   return [...seen].sort()
 })
 
+const lastPage = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+/** Positions in the server's result set (before any rows the client had to hide). */
 const range = computed(() => {
   const start = (filters.value.page - 1) * PAGE_SIZE
-  return { from: start + 1, to: start + runs.value.length + dropped.value }
+  const count = runs.value.length + dropped.value
+  return count ? `${start + 1}–${start + count} of ${total.value}` : `page ${filters.value.page} of ${lastPage.value}`
 })
-const lastPage = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+// When the server ignored a filter its total counts runs that do not match, so say so.
+const countLabel = computed(() =>
+  dropped.value ? `${plural(total.value, 'run')} before client-side filtering` : plural(total.value, 'run'),
+)
 
 function update(patch: Parameters<typeof set>[0]): void {
   void set({ ...patch, page: 1 })
@@ -128,10 +138,14 @@ function clearFilters(): void {
 }
 
 async function loadDemo(): Promise<void> {
+  seedController?.abort()
+  const current = new AbortController()
+  seedController = current
   seeding.value = 'Seeding demo data…'
   try {
     const job = await api.seedDemo()
     await pollJob(job.job_id, {
+      signal: current.signal,
       onProgress: (status) => {
         if (status.total) seeding.value = `Seeding demo data… ${status.progress}/${status.total}`
       },
@@ -139,6 +153,7 @@ async function loadDemo(): Promise<void> {
     seeding.value = null
     await load()
   } catch (e) {
+    if (current.signal.aborted) return
     seeding.value = `Could not load the demo: ${e instanceof Error ? e.message : String(e)}`
   }
 }
@@ -150,7 +165,7 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
   <div class="page">
     <header class="head">
       <h1 tabindex="-1">Runs</h1>
-      <span v-if="!error && !loading" class="count muted">{{ plural(total, 'run') }}</span>
+      <span v-if="!error && !loading" class="count muted">{{ countLabel }}</span>
     </header>
 
     <form class="filters" aria-label="Filter runs" @submit.prevent>
@@ -206,14 +221,17 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
 
     <Skeleton v-else-if="loading && runs.length === 0" :rows="8" />
 
-    <EmptyState v-else-if="runs.length === 0 && filtered" title="No runs match these filters" variant="filtered">
+    <!-- Empty states only when the server found nothing at all: an empty page of a non-empty
+         result (past the last page, or every row hidden by a filter the server ignored) is not
+         "no runs". -->
+    <EmptyState v-else-if="total === 0 && filtered" title="No runs match these filters" variant="filtered">
       <p>Try removing a filter.</p>
       <template #actions>
         <button type="button" class="btn" @click="clearFilters">Clear filters</button>
       </template>
     </EmptyState>
 
-    <EmptyState v-else-if="runs.length === 0" title="No runs yet" variant="first-run">
+    <EmptyState v-else-if="total === 0" title="No runs yet" variant="first-run">
       <p>Run an agent from the command line, then come back here to explore its trace:</p>
       <p>
         <code>agentscope run --agent research_assistant@v2 --task "In what year did the Meridian Footbridge open?" --expect 1987</code>
@@ -229,7 +247,12 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
         The server did not apply every filter; {{ plural(dropped, 'non-matching run') }} on this page
         {{ dropped === 1 ? 'is' : 'are' }} hidden.
       </p>
-      <div class="table-wrap panel" :aria-busy="loading">
+      <p v-if="runs.length === 0" class="notice empty-page" role="status">
+        <template v-if="dropped">No run on this page matches every filter; other pages may.</template>
+        <template v-else>No runs on this page.</template>
+        <button v-if="filters.page > 1" type="button" class="btn ghost" @click="set({ page: 1 })">First page</button>
+      </p>
+      <div v-else class="table-wrap panel" :aria-busy="loading">
         <table class="runs">
           <thead>
             <tr>
@@ -248,7 +271,7 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
             <tr v-for="run in runs" :key="run.run_id">
               <td><StatusBadge :status="run.status" /></td>
               <td class="task">
-                <RouterLink :to="`/runs/${run.run_id}`" class="task-link">{{ run.task }}</RouterLink>
+                <RouterLink :to="`/runs/${encodeURIComponent(run.run_id)}`" class="task-link">{{ run.task }}</RouterLink>
                 <span class="run-id mono">{{ shortId(run.run_id) }}</span>
               </td>
               <td>
@@ -279,7 +302,7 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
         </table>
       </div>
       <nav class="pager" aria-label="Pagination">
-        <span class="muted">{{ range.from }}–{{ range.to }} of {{ total }}</span>
+        <span class="muted">{{ range }}</span>
         <button type="button" class="btn" :disabled="filters.page <= 1" @click="set({ page: filters.page - 1 })">
           Previous
         </button>
@@ -404,6 +427,12 @@ tbody tr:last-child td {
   margin: 0 0 10px;
   font-size: 12.5px;
   color: var(--warn);
+}
+.empty-page {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
 }
 .pager {
   display: flex;

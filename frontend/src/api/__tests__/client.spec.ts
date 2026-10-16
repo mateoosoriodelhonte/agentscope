@@ -73,6 +73,17 @@ describe('api reads', () => {
     expect(api.evaluationExportUrl('s1')).toBe('/api/evaluations/s1/export')
   })
 
+  it('refuses dot segments that would climb out of the route', async () => {
+    await expect(api.getRun('..')).rejects.toBeInstanceOf(ApiError)
+    await expect(api.getDataset('qa', '.')).rejects.toMatchObject({ status: 400 })
+    await expect(api.job('')).rejects.toBeInstanceOf(ApiError)
+    expect(() => api.datasetExportUrl('..', '1')).toThrow(ApiError)
+    expect(fetchMock).not.toHaveBeenCalled()
+    // Dots inside a segment are fine.
+    await api.getDataset('qa', '1.0')
+    expect(lastCall().url).toBe('/api/datasets/qa/1.0')
+  })
+
   it('passes the abort signal through', async () => {
     const controller = new AbortController()
     await api.getRun('r1', controller.signal)

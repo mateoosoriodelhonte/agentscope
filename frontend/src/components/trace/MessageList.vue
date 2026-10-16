@@ -46,7 +46,8 @@ const list = computed<Message[]>(() =>
         const record = m && typeof m === 'object' && !Array.isArray(m) ? m : {}
         return {
           role: typeof record.role === 'string' ? record.role : 'unknown',
-          content: typeof record.content === 'string' ? record.content : JSON.stringify(record.content),
+          content:
+            typeof record.content === 'string' ? record.content : (JSON.stringify(record.content) ?? '(no content)'),
         }
       })
     : [],

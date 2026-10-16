@@ -111,17 +111,28 @@ const citations = computed(() =>
   ),
 )
 
+/** Python's html.escape(text, quote=True), used by the runtime for frame attributes. */
+const escapeAttr = (text: string) =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;')
+
 /** The tool message the model saw for this step's call, found in later model inputs. */
 const observation = computed(() => {
-  const callId = stepInvocation.value?.call_id
-  if (!callId) return null
+  const inv = stepInvocation.value
+  if (!inv) return null
+  // Match the exact header the runtime writes (src/agentscope/runtime/prompts.py), so tool
+  // output that merely mentions this call id cannot be mistaken for its observation.
+  const headers = [
+    `Result of ${inv.tool} (call ${inv.call_id}): `,
+    `<tool_output tool="${escapeAttr(inv.tool)}" call_id="${escapeAttr(inv.call_id)}" `,
+  ]
   for (const s of props.trace.spans) {
     if (s.kind !== 'llm') continue
     const messages = asRecord(s.input).messages
     if (!Array.isArray(messages)) continue
     const found = messages.find((m) => {
       const record = asRecord(m)
-      return record.role === 'tool' && typeof record.content === 'string' && record.content.includes(callId)
+      const content = record.content
+      return record.role === 'tool' && typeof content === 'string' && headers.some((h) => content.startsWith(h))
     })
     if (found) return found
   }

@@ -1,15 +1,39 @@
 <script lang="ts">
-import type { EvalCase, TraceRecord } from '@/api/types'
+import type { CheckName, EvalCase, TraceRecord } from '@/api/types'
 
 export type SequenceOp =
   | { kind: 'match'; tool: string }
   | { kind: 'missing'; tool: string }
   | { kind: 'extra'; tool: string }
 
-/** The tools a case expects, in order: `tool_order`, else each expected call × min_calls. */
-export function expectedTools(evalCase: EvalCase): string[] {
-  if (evalCase.tool_order.length) return [...evalCase.tool_order]
-  return evalCase.expected_tool_calls.flatMap((call) => Array<string>(call.min_calls).fill(call.tool))
+/** Only `tool_order` judges the order of calls; the other checks count them. */
+export function judgesOrder(check: CheckName): boolean {
+  return check === 'tool_order'
+}
+
+/**
+ * The tools a check expects. For `tool_order` that is the declared order. Otherwise it is
+ * each expected call × min_calls; those checks count calls and ignore their order, so the
+ * expected tools are laid out in the order they actually executed (with the shortfall at the
+ * end). Aligning against the declaration order instead would report calls that did happen
+ * as missing.
+ */
+export function expectedTools(evalCase: EvalCase, check: CheckName, executed: string[]): string[] {
+  if (judgesOrder(check)) return [...evalCase.tool_order]
+  const remaining = new Map<string, number>()
+  for (const call of evalCase.expected_tool_calls) {
+    remaining.set(call.tool, (remaining.get(call.tool) ?? 0) + call.min_calls)
+  }
+  const ordered: string[] = []
+  for (const tool of executed) {
+    const left = remaining.get(tool) ?? 0
+    if (left > 0) {
+      ordered.push(tool)
+      remaining.set(tool, left - 1)
+    }
+  }
+  for (const [tool, left] of remaining) ordered.push(...Array<string>(left).fill(tool))
+  return ordered
 }
 
 export function executedTools(trace: TraceRecord): string[] {
@@ -52,9 +76,14 @@ import { computed } from 'vue'
 
 /*
  * Expected vs executed tools for failures caused by something missing: missing calls are
- * dashed ghost chips in the executed row, unexpected extra calls are marked in the same row.
+ * dashed ghost chips in the executed row. When the check judges order (`ordered`), calls
+ * outside the expected sequence are marked as extra; otherwise they are shown plainly,
+ * because executing other tools is not what such a check penalises.
  */
-const props = defineProps<{ expected: string[]; actual: string[]; blocked?: number }>()
+const props = withDefaults(
+  defineProps<{ expected: string[]; actual: string[]; blocked?: number; ordered?: boolean }>(),
+  { blocked: 0, ordered: true },
+)
 const ops = computed(() => diffToolSequence(props.expected, props.actual))
 const missing = computed(() => ops.value.filter((op) => op.kind === 'missing').length)
 </script>
@@ -78,8 +107,8 @@ const missing = computed(() => ops.value.filter((op) => op.kind === 'missing').l
           <span v-if="op.kind === 'missing'" class="chip ghost" :title="`${op.tool} was expected here but never executed`">
             <span class="visually-hidden">missing:</span>{{ op.tool }}
           </span>
-          <span v-else class="chip" :class="{ extra: op.kind === 'extra' }" :title="op.tool">
-            <span v-if="op.kind === 'extra'" class="visually-hidden">extra:</span>{{ op.tool }}
+          <span v-else class="chip" :class="{ extra: ordered && op.kind === 'extra' }" :title="op.tool">
+            <span v-if="ordered && op.kind === 'extra'" class="visually-hidden">extra:</span>{{ op.tool }}
           </span>
         </span>
       </div>

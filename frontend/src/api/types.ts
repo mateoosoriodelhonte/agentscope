@@ -60,6 +60,23 @@ export interface ModelFaultSpec {
   times: number
 }
 
+export interface ToolCall {
+  call_id: string
+  tool: string
+  arguments: Record<string, JsonValue>
+}
+
+export interface ToolResult {
+  call_id: string
+  tool: string
+  attempt: number
+  outcome: ToolOutcome
+  output: JsonValue
+  error: string | null
+  duration_ms: number
+  fault: FaultKind | null
+}
+
 // --- domain/agents.py --------------------------------------------------------------------
 
 export type ProviderName = 'fake' | 'ollama' | 'openai_compatible'

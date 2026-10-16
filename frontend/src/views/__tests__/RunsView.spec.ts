@@ -117,6 +117,28 @@ describe('RunsView', () => {
     expect(page.find('.notice').text()).toContain('1 non-matching run on this page is hidden')
   })
 
+  it('keeps paging when every row on a page was hidden by a filter the server ignored', async () => {
+    // 120 runs exist; the server ignored ?verdict, so this page holds only passed runs.
+    const items = Array.from({ length: 50 }, (_, i) => summary({ run_id: `run-${i}`, passed: true }))
+    const { page, router } = await open({ items, total: 120 }, '?verdict=failed')
+    expect(page.text()).not.toContain('No runs match these filters')
+    expect(page.find('.empty-page').text()).toContain('No run on this page matches every filter')
+    expect(page.find('.count').text()).toBe('120 runs before client-side filtering')
+    expect(page.find('.pager').text()).toContain('1–50 of 120')
+    const next = page.findAll('.pager button').find((b) => b.text() === 'Next')!
+    expect(next.attributes('disabled')).toBeUndefined()
+    await next.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query).toMatchObject({ verdict: 'failed', page: '2' })
+  })
+
+  it('does not call a page past the end "no runs yet"', async () => {
+    const { page } = await open({ items: [], total: 3 }, '?page=4')
+    expect(page.text()).not.toContain('No runs yet')
+    expect(page.find('.empty-page').text()).toContain('No runs on this page')
+    expect(page.find('.pager').text()).toContain('page 4 of 1')
+  })
+
   it('distinguishes a first run, an empty filter and an error', async () => {
     let { page } = await open({ items: [], total: 0 })
     expect(page.text()).toContain('No runs yet')

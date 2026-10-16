@@ -2,13 +2,15 @@ import type { JsonValue } from '@/api/types'
 
 /** Durations keep sub-millisecond precision: fake-provider spans are often under 1 ms. */
 export function formatDuration(ms: number): string {
-  if (ms < 1) return `${ms.toFixed(2)} ms`
-  if (ms < 100) return `${ms.toFixed(1)} ms`
-  if (ms < 1000) return `${Math.round(ms)} ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`
-  const minutes = Math.floor(ms / 60_000)
-  const seconds = Math.round((ms % 60_000) / 1000)
-  return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  // Each branch is chosen on the value as it will be rounded, so 999.6 ms reads "1.00 s"
+  // rather than "1000 ms", and 119.7 s reads "2m 00s" rather than "1m 60s".
+  if (ms < 0.995) return `${ms.toFixed(2)} ms`
+  if (ms < 99.95) return `${ms.toFixed(1)} ms`
+  if (ms < 999.5) return `${Math.round(ms)} ms`
+  if (ms < 59_995) return `${(ms / 1000).toFixed(2)} s`
+  const totalSeconds = Math.round(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  return `${minutes}m ${String(totalSeconds % 60).padStart(2, '0')}s`
 }
 
 export function formatTimestamp(iso: string): string {

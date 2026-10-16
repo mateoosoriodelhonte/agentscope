@@ -143,6 +143,67 @@ describe('TraceView', () => {
     expect(page.find('.messages').text()).toContain('Result of search_documents')
   })
 
+  it('keeps focus on the page heading when the loading heading is replaced', async () => {
+    let resolve: (value: RunDetail) => void = () => undefined
+    vi.spyOn(api, 'getRun').mockReturnValue(new Promise((r) => (resolve = r)))
+    const { page } = await mountAt(ROUTES, `/runs/${strict.trace.run_id}`)
+    wrapper = page
+    ;(page.find('h1').element as HTMLElement).focus()
+    expect(document.activeElement?.textContent).toContain('Run ')
+    resolve(strict)
+    await flushPromises()
+    expect(document.activeElement?.tagName).toBe('H1')
+    expect(document.activeElement?.textContent).toBe(strict.trace.task)
+  })
+
+  it('describes the scope of each injected fault exactly', async () => {
+    const detail = structuredClone(loadFixture('run-v2-timeout'))
+    detail.trace.faults = [
+      { tool: 'search_documents', kind: 'timeout', on_call: 1, times: 1, payload: null },
+      { tool: 'search_documents', kind: 'error', on_call: 2, times: null, payload: null },
+      { tool: 'retrieve_document', kind: 'malformed', on_call: null, times: 1, payload: null },
+      { tool: 'retrieve_document', kind: 'error', on_call: 2, times: 3, payload: null },
+    ]
+    const { page } = await open(detail)
+    expect(page.findAll('.faults .fault').map((f) => f.text())).toEqual([
+      'search_documents: timeout on call 1',
+      'search_documents: error from call 2 onward',
+      'retrieve_document: malformed on every call',
+      'retrieve_document: error on calls 2–4',
+    ])
+  })
+
+  it('labels a configured cost as an estimate', async () => {
+    const detail = structuredClone(strict)
+    detail.trace.cost = {
+      amount: 0.01234,
+      currency: 'USD',
+      input_per_1k_tokens: 0.1,
+      output_per_1k_tokens: 0.2,
+      partial: false,
+      source: 'estimate_from_configured_rates',
+    }
+    const { page } = await open(detail)
+    expect(page.find('.run-header').text()).toMatch(/Cost\s*\$0\.0123 est\./)
+  })
+
+  it('finds the observation by its exact header, not by a call id mentioned in tool output', async () => {
+    const detail = structuredClone(loadFixture('run-v1'))
+    // Hostile tool output on call_001 that mentions call_003.
+    for (const span of detail.trace.spans) {
+      const messages = (span.input as { messages?: { role: string; content: string }[] } | null)?.messages ?? []
+      for (const m of messages) {
+        if (m.role === 'tool' && m.content.startsWith('Result of search_documents (call call_001)')) {
+          m.content += ' see call_003'
+        }
+      }
+    }
+    const step3Observe = detail.trace.spans.filter((s) => s.name === 'node observe')[2]!
+    const { page } = await open(detail, `?span=${step3Observe.span_id}&tab=observation`)
+    expect(page.find('.messages').text()).toContain('Result of retrieve_document (call call_003)')
+    expect(page.find('.messages').text()).not.toContain('search_documents')
+  })
+
   it('explains a missing run', async () => {
     vi.spyOn(api, 'getRun').mockRejectedValue(new ApiError(404, 'run not found'))
     const { page } = await mountAt(ROUTES, '/runs/nope')

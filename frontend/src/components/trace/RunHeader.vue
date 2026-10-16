@@ -20,10 +20,12 @@ const tokens = computed(() => {
   return `${usage.input_tokens.toLocaleString()} in · ${usage.output_tokens.toLocaleString()} out${coverage}`
 })
 
+/** Only ever an estimate from configured per-model rates; labelled as one. */
 const cost = computed(() => {
   const estimate = props.trace.cost
   if (!estimate) return null
-  return `$${estimate.amount.toFixed(4)}${estimate.partial ? ' (partial)' : ''}`
+  const amount = estimate.amount > 0 && estimate.amount < 0.0001 ? '< $0.0001' : `$${estimate.amount.toFixed(4)}`
+  return `${amount} est.${estimate.partial ? ' (partial)' : ''}`
 })
 
 const toolCalls = computed(() => {
@@ -32,11 +34,19 @@ const toolCalls = computed(() => {
   return `${invocations.length - blocked} executed${blocked ? ` · ${blocked} blocked` : ''}`
 })
 
+/** FaultSpec: on_call null = every call; times null = every call from on_call onward. */
+function toolFaultScope(onCall: number | null, times: number | null): string {
+  if (onCall === null) return 'on every call'
+  if (times === null) return `from call ${onCall} onward`
+  if (times === 1) return `on call ${onCall}`
+  return `on calls ${onCall}–${onCall + times - 1}`
+}
+
 const faults = computed(() => [
-  ...props.trace.faults.map(
-    (f) => `${f.tool}: ${f.kind}${f.on_call ? ` on call ${f.on_call}` : ' on every call'}${f.times && f.times > 1 ? ` ×${f.times}` : ''}`,
+  ...props.trace.faults.map((f) => `${f.tool}: ${f.kind} ${toolFaultScope(f.on_call, f.times)}`),
+  ...props.trace.model_faults.map(
+    (f) => `model: ${f.kind} ${f.times > 1 ? `on responses ${f.on_call}–${f.on_call + f.times - 1}` : `on response ${f.on_call}`}`,
   ),
-  ...props.trace.model_faults.map((f) => `model: ${f.kind} on response ${f.on_call}${f.times > 1 ? ` ×${f.times}` : ''}`),
 ])
 </script>
 
@@ -74,7 +84,7 @@ const faults = computed(() => [
         label="Cost"
         :value="cost"
         missing="not configured"
-        hint="Cost is shown only when per-model rates are configured and the provider reports tokens."
+        hint="Estimate from configured per-model rates; shown only when rates are configured and the provider reports tokens."
       />
       <div v-if="faults.length" class="faults">
         <dt>Injected faults</dt>

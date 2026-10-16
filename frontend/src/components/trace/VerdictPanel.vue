@@ -7,7 +7,7 @@ import Kbd from '@/components/ui/Kbd.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import type { Outcome } from '@/composables/useTraceModel'
 import { expectedVsActual } from './checkSummary'
-import ToolSequenceDiff, { executedTools, expectedTools } from './ToolSequenceDiff.vue'
+import ToolSequenceDiff, { executedTools, expectedTools, judgesOrder } from './ToolSequenceDiff.vue'
 
 /*
  * Check results, failures first. Activating a check links it to the trace: the parent
@@ -46,11 +46,10 @@ function hasToolAbsence(check: CheckResult): boolean {
   return check.evidence.some((e) => e.role === 'absent' && e.tool !== null)
 }
 
-const sequence = computed(() => ({
-  expected: props.evalCase ? expectedTools(props.evalCase) : [],
-  actual: executedTools(props.trace),
-  blocked: props.trace.tool_invocations.filter((i) => !i.executed).length,
-}))
+const executed = computed(() => executedTools(props.trace))
+const blockedCalls = computed(() => props.trace.tool_invocations.filter((i) => !i.executed).length)
+const expectedFor = (check: CheckResult) =>
+  props.evalCase ? expectedTools(props.evalCase, check.name, executed.value) : []
 
 function toggle(check: CheckResult): void {
   emit('activate', props.activeCheck === check.name ? null : check.name)
@@ -106,7 +105,7 @@ const caseSnippet = computed(() => {
             type="button"
             class="check"
             :aria-expanded="activeCheck === check.name"
-            :aria-controls="`check-${check.name}`"
+            :aria-controls="activeCheck === check.name ? `check-${check.name}` : undefined"
             @click="toggle(check)"
           >
             <StatusBadge :status="check.status" variant="plain" class="status" />
@@ -137,12 +136,13 @@ const caseSnippet = computed(() => {
             </ul>
             <p v-else class="faint">No evidence recorded for this check.</p>
             <ToolSequenceDiff
-              v-if="hasToolAbsence(check)"
-              :expected="sequence.expected"
-              :actual="sequence.actual"
-              :blocked="sequence.blocked"
+              v-if="hasToolAbsence(check) && evalCase"
+              :expected="expectedFor(check)"
+              :actual="executed"
+              :blocked="blockedCalls"
+              :ordered="judgesOrder(check.name)"
             />
-            <p v-if="hasToolAbsence(check) && !evalCase" class="faint">
+            <p v-else-if="hasToolAbsence(check)" class="faint">
               The test case is not available, so the expected sequence cannot be shown.
             </p>
           </div>

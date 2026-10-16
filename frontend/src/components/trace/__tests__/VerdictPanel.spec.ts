@@ -89,6 +89,14 @@ describe('VerdictPanel', () => {
     expect(diff.text()).toContain('1 blocked call is not shown')
   })
 
+  it('does not draw a sequence diff without the test case', () => {
+    const required = strict.evaluation!.checks.find((c) => c.name === 'required_tool_calls')!
+    const supportSpan = required.evidence.find((e) => e.role === 'support')!.span_id!
+    const panel = mountPanel({ ...strict, case: null }, 'required_tool_calls', [supportSpan])
+    expect(panel.findComponent(ToolSequenceDiff).exists()).toBe(false)
+    expect(panel.text()).toContain('The test case is not available')
+  })
+
   it('offers an unevaluated run as a test case snippet', () => {
     const detail = { ...loadFixture('run-v2'), evaluation: null, case: null }
     const panel = mountPanel(detail)
@@ -117,8 +125,42 @@ describe('diffToolSequence', () => {
 
   it('derives the sequences from the case and the executed calls', () => {
     const strict = loadFixture('run-v1-strict')
-    expect(expectedTools(strict.case!)).toEqual(['search_documents', 'retrieve_document', 'retrieve_document'])
-    expect(executedTools(strict.trace)).toEqual(['search_documents', 'retrieve_document'])
-    expect(expectedTools({ ...strict.case!, tool_order: ['retrieve_document'] })).toEqual(['retrieve_document'])
+    const executed = executedTools(strict.trace)
+    expect(executed).toEqual(['search_documents', 'retrieve_document'])
+    expect(expectedTools(strict.case!, 'required_tool_calls', executed)).toEqual([
+      'search_documents',
+      'retrieve_document',
+      'retrieve_document',
+    ])
+    // Only tool_order judges order, so only it uses the declared sequence.
+    const ordered = { ...strict.case!, tool_order: ['retrieve_document', 'search_documents'] }
+    expect(expectedTools(ordered, 'tool_order', executed)).toEqual(['retrieve_document', 'search_documents'])
+  })
+
+  it('never reports an executed call as missing for a count-based check', () => {
+    // Declared retrieve ×2 then search; executed search then retrieve. Aligning against the
+    // declaration order would claim search_documents is missing although it ran.
+    const strict = loadFixture('run-v1-strict')
+    const reordered = {
+      ...strict.case!,
+      expected_tool_calls: [...strict.case!.expected_tool_calls].reverse(),
+    }
+    const executed = executedTools(strict.trace)
+    const ops = diffToolSequence(expectedTools(reordered, 'required_tool_calls', executed), executed)
+    expect(ops).toEqual([
+      { kind: 'match', tool: 'search_documents' },
+      { kind: 'match', tool: 'retrieve_document' },
+      { kind: 'missing', tool: 'retrieve_document' },
+    ])
+  })
+})
+
+describe('ToolSequenceDiff', () => {
+  it('marks calls outside the sequence as extra only when the check judges order', async () => {
+    const diff = mount(ToolSequenceDiff, { props: { expected: ['a'], actual: ['x', 'a'] } })
+    expect(diff.find('.chip.extra').text()).toBe('extra:x')
+    await diff.setProps({ ordered: false })
+    expect(diff.find('.chip.extra').exists()).toBe(false)
+    expect(diff.text()).not.toContain('extra:')
   })
 })
