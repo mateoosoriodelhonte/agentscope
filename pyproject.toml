@@ -55,6 +55,7 @@ dev = [
   "mypy>=2.0",
   "types-jsonschema>=4.25",
   "psycopg[binary]>=3.3,<4",
+  "pytest-socket>=0.7",
 ]
 
 [build-system]
@@ -109,7 +110,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config --disable-socket --allow-unix-socket --allow-hosts=127.0.0.1,::1,localhost"
 markers = [
   "postgres: requires AGENTSCOPE_TEST_POSTGRES_URL pointing at a disposable PostgreSQL database",
   "slow: slower tests (real timeouts, full suites)",

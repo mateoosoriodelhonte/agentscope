@@ -1,0 +1,55 @@
+/* Semantic design tokens. Colors are only referenced through these variables. */
+:root,
+[data-theme='light'] {
+  --surface-0: #f7f8fa;
+  --surface-1: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #dde1e7;
+  --border-strong: #c3c9d2;
+  --text: #15191f;
+  --text-muted: #555e6b;
+  --text-faint: #6b7380;
+  --accent: #0f6f68;
+  --accent-soft: #e2f3f1;
+  --ok: #17723a;
+  --ok-soft: #e4f4e9;
+  --fail: #b42318;
+  --fail-soft: #fdecea;
+  --warn: #8a5300;
+  --warn-soft: #fdf3e1;
+  --na: #5d6673;
+  --na-soft: #eef0f3;
+  --kind-node: #6b7380;
+  --kind-llm: #2e5fb8;
+  --kind-tool: #0f6f68;
+  --kind-guardrail: #9a5b00;
+  --focus: #2e5fb8;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --surface-0: #0f1216;
+  --surface-1: #161a20;
+  --surface-2: #1d2229;
+  --border: #2a3039;
+  --border-strong: #3a424d;
+  --text: #e6e9ee;
+  --text-muted: #a3abb7;
+  --text-faint: #8b94a1;
+  --accent: #4fc1b6;
+  --accent-soft: #15302d;
+  --ok: #5cc98a;
+  --ok-soft: #13291c;
+  --fail: #f28b82;
+  --fail-soft: #3a1714;
+  --warn: #e3b05c;
+  --warn-soft: #33260f;
+  --na: #a3abb7;
+  --na-soft: #22272e;
+  --kind-node: #8b94a1;
+  --kind-llm: #82a9f0;
+  --kind-tool: #4fc1b6;
+  --kind-guardrail: #e3b05c;
+  --focus: #82a9f0;
+  color-scheme: dark;
+}

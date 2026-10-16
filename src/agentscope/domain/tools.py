@@ -36,6 +36,12 @@ class FaultKind(StrEnum):
     PERMISSION_DENIED = "permission_denied"
 
 
+# Faults whose purpose is to make a tool fail (as opposed to returning bad content).
+FAILURE_FAULTS = frozenset(
+    {FaultKind.TIMEOUT, FaultKind.ERROR, FaultKind.MALFORMED, FaultKind.PERMISSION_DENIED}
+)
+
+
 class ToolSpec(StrictModel):
     """What a model is told about a tool. `parameters` is a JSON Schema object."""
 
@@ -49,15 +55,31 @@ class ToolSpec(StrictModel):
 class FaultSpec(StrictModel):
     """A controlled failure applied to a tool during a run.
 
-    `on_call` targets the n-th call (1-based) of that tool; `None` means every call.
-    `times` bounds how many calls are affected starting at `on_call`.
+    `on_call` targets the n-th call (1-based, counting retries) of that tool; `None` means
+    every call. `times` bounds how many consecutive calls are affected from `on_call`
+    (`None` = all subsequent calls).
     """
 
     tool: Identifier
     kind: FaultKind
-    on_call: int | None = Field(default=1, ge=1, le=100)
-    times: int | None = Field(default=1, ge=1, le=100)
-    payload: str | None = Field(default=None, max_length=4000)
+    on_call: int | None = Field(default=1, ge=1, le=50)
+    times: int | None = Field(default=1, ge=1, le=50)
+    payload: str | None = Field(default=None, min_length=1, max_length=8000)
+
+
+class ModelFaultKind(StrEnum):
+    INVALID_JSON = "invalid_json"  # response text is not JSON
+    EMPTY = "empty"  # empty response
+    SCHEMA_VIOLATION = "schema_violation"  # a final output missing required fields
+    UNKNOWN_TOOL = "unknown_tool"  # requests a tool that does not exist
+
+
+class ModelFaultSpec(StrictModel):
+    """A controlled corruption of the model's n-th response (1-based)."""
+
+    kind: ModelFaultKind
+    on_call: int = Field(default=1, ge=1, le=50)
+    times: int = Field(default=1, ge=1, le=50)
 
 
 class ToolCall(StrictModel):
