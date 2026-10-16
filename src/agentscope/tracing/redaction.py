@@ -11,6 +11,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from pydantic import BaseModel, SecretStr
+
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY = re.compile(
@@ -83,3 +85,28 @@ class Redactor:
         if isinstance(value, list | tuple):
             return [self.redact(item, _depth + 1) for item in value]
         return value
+
+
+def settings_secrets(settings: BaseModel) -> list[str]:
+    """Every SecretStr value held by `settings`, including those inside dicts, lists and
+    nested models (for example each AGENTSCOPE_OTLP_HEADERS value), for
+    `Redactor(secret_values=...)`. New secret settings are covered without listing them."""
+    found: list[str] = []
+
+    def walk(value: object, depth: int) -> None:
+        if depth > _MAX_DEPTH:
+            return
+        if isinstance(value, SecretStr):
+            found.append(value.get_secret_value())
+        elif isinstance(value, BaseModel):
+            for name in type(value).model_fields:
+                walk(getattr(value, name), depth + 1)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item, depth + 1)
+        elif isinstance(value, list | tuple | set | frozenset):
+            for item in value:
+                walk(item, depth + 1)
+
+    walk(settings, 0)
+    return found

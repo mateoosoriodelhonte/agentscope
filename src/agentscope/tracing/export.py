@@ -4,11 +4,16 @@ Nothing is exported unless AGENTSCOPE_OTLP_ENDPOINT is set and the egress policy
 (loopback, or a host listed in AGENTSCOPE_ALLOWED_EGRESS_HOSTS). What leaves the process:
 
 - Spans are already redacted: payloads, attributes, events and status messages pass through
-  the Redactor when they are written to a span (see recorder.py), so the exporter never sees
-  raw secrets, whatever the settings below.
+  the Redactor when they are written to a span (see recorder.py), so the exporter only ever
+  sees redacted data, whatever the settings below. Build that Redactor with
+  `redaction.settings_secrets(settings)` so configured secrets, AGENTSCOPE_OTLP_HEADERS
+  values included, are redacted wherever they appear.
 - By default `ContentFilteringExporter` also drops payload attributes (semconv.
   PAYLOAD_ATTRIBUTES: task, prompts, tool arguments and results), so only span structure
   and GenAI metadata are exported. AGENTSCOPE_OTLP_EXPORT_CONTENT=true opts in to payloads.
+  Span names and status descriptions are structure and are always exported: error types,
+  synthetic fault messages and short tool or provider error summaries (at most 500
+  characters, redacted).
 - OTEL_* variables are removed before anything is built, because the exporter library
   reads them during construction and merges OTEL_EXPORTER_OTLP_HEADERS into explicitly
   passed headers. The HTTP session ignores proxy, CA-bundle and netrc settings from the
@@ -176,7 +181,11 @@ def _otlp_exporter(target: EgressTarget, headers: dict[str, str]) -> SpanExporte
         return None
     session = requests.Session()
     session.trust_env = False  # no proxy, CA-bundle or netrc settings from the environment
-    session.max_redirects = 0  # a redirect would carry the headers to another origin
+    # Never follow a redirect: it would carry the headers to another origin. The exporter
+    # already passes allow_redirects=False, but then counts a 3xx answer as a successful
+    # export, silently dropping the batch; with max_redirects=0 requests raises on any
+    # redirect instead, so it is counted and reported as a failure.
+    session.max_redirects = 0
     # The library logs every failed batch; ContentFilteringExporter logs the first one.
     logging.getLogger("opentelemetry.exporter.otlp.proto.http").setLevel(logging.CRITICAL)
     exporter: SpanExporter = OTLPSpanExporter(

@@ -4,6 +4,7 @@ secrets, deaf to OTEL_* environment variables, and unable to affect a run."""
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
@@ -30,7 +31,7 @@ from agentscope.tracing.export import (
     without_payloads,
 )
 from agentscope.tracing.recorder import TraceRecorder, TracingPipeline
-from agentscope.tracing.redaction import Redactor
+from agentscope.tracing.redaction import Redactor, settings_secrets
 
 TASK = "How many visitors did Kestrel Hill Observatory have in 2025?"
 LONG_PAYLOAD = "observatory " * 200
@@ -492,12 +493,66 @@ def test_otlp_exporter_uses_only_settings(
 
 
 def test_otlp_export_never_follows_redirects(
-    collector: FakeCollector, built: Callable[[Settings], TracingPipeline]
+    collector: FakeCollector,
+    built: Callable[[Settings], TracingPipeline],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     collector.status = 307
     collector.headers = {"Location": "http://203.0.113.9:4318/v1/traces"}
     pipeline = built(
         Settings(otlp_endpoint="http://127.0.0.1:4318", otlp_headers={"x-collector-key": "k"})
     )
-    record_sample(pipeline)
+    with caplog.at_level(logging.WARNING, logger="agentscope.tracing"):
+        record_sample(pipeline)
     assert [request.url for request, _ in collector.sent] == ["http://127.0.0.1:4318/v1/traces"]
+    # The batch did not reach a collector: that is a failure, not a silent success.
+    assert isinstance(pipeline.exporter, ContentFilteringExporter)
+    assert pipeline.exporter.failures == 1
+    assert "Exporting spans to 127.0.0.1:4318 failed" in caplog.text
+
+
+@pytest.mark.usefixtures("otel_env")
+def test_tracing_pipeline_options_ignore_otel_environment_without_clean_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # default_pipeline() builds TracingPipeline() directly, without build_pipeline's clean-up,
+    # so every SDK option must be explicit. OTEL_SDK_DISABLED has no constructor override;
+    # the import-time bootstrap removes it.
+    monkeypatch.delenv("OTEL_SDK_DISABLED")
+    pipeline = TracingPipeline()
+    try:
+        assert dict(pipeline.provider.resource.attributes) == {
+            "service.name": "agentscope",
+            "service.version": __version__,
+        }
+        records = {r.name: r for r in record_sample(pipeline)}  # not sampled out
+    finally:
+        pipeline.shutdown()
+    # No length limit cut the payload JSON and no event limit dropped the event.
+    assert records["invoke_agent demo"].input == {"task": TASK, "notes": LONG_PAYLOAD}
+    [event] = records["chat demo-model"].events
+    assert event.attributes["tool"] == "search_documents"
+    assert os.environ["OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT"] == "8"  # really was set
+
+
+def test_settings_secrets_cover_otlp_headers() -> None:
+    settings = Settings(
+        enable_openai_compatible=True,
+        openai_compatible_api_key="openai-compatible-key-1234",
+        otlp_headers={
+            "authorization": "Bearer collector-token-5678",
+            "x-api-key": "collector-api-key-9012",
+        },
+    )
+    secrets = settings_secrets(settings)
+    assert sorted(secrets) == [
+        "Bearer collector-token-5678",
+        "collector-api-key-9012",
+        "openai-compatible-key-1234",
+    ]
+    redacted = Redactor(secret_values=secrets).redact_text(
+        "echoed collector-api-key-9012 and openai-compatible-key-1234"
+    )
+    assert "collector-api-key-9012" not in redacted
+    assert "openai-compatible-key-1234" not in redacted
+    assert settings_secrets(Settings()) == []
