@@ -1,5 +1,5 @@
 {
-  "min_pass_rate": 0.636,
+  "min_pass_rate": 0.724,
   "max_new_regressions": 0,
   "max_invalid_outputs": 0,
   "max_policy_violation_cases": 0,

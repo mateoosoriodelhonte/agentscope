@@ -180,9 +180,9 @@ class ResearchBrain:
             )
 
         last = view.observations[-1]
-        # Only the brain's own lookups are worth retrying: a call that tool output talked it
-        # into, or one the runtime refused (a tool that does not exist or is not permitted),
-        # fails the same way every time.
+        # Only the brain's own lookups are worth retrying. A call that tool output talked it
+        # into, or a call to a tool outside its toolset (which the runtime refuses as unknown
+        # or unpermitted, e.g. a corrupted model response), fails the same way every time.
         if (
             not last.ok
             and last.tool in _TOOLS

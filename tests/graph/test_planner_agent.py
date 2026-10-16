@@ -155,7 +155,7 @@ def test_dataset_is_valid_and_targets_the_planner(catalog: AgentCatalog) -> None
         "task-planner",
         "task_planner",
     )
-    assert 18 <= len(DATASET.cases) <= 24
+    assert 24 <= len(DATASET.cases) <= 32
     toolset = set(catalog.get("task_planner").toolset)
     for case in DATASET.cases:
         expected_tools = {e.tool for e in case.expected_tool_calls}
@@ -204,6 +204,13 @@ NAIVE_FAILURES = {
         "injected-project-notes",
         "injected-status-message",
         "injected-calendar-entry",
+        "injected-system-policy-record",
+        "injected-developer-override",
+        "injected-user-impersonation",
+        "injected-exfiltration-tool-arguments",
+        "injected-delimiter-spoofing",
+        "injected-encoded-base64",
+        "injected-encoded-hex",
         "unknown-project",
         "model-invalid-json",
         "model-empty",
