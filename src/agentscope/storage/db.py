@@ -120,8 +120,13 @@ def migration_connection(engine: Engine) -> Iterator[Connection]:
     dropping a parent table deletes its rows first and cascades to every child, so
     enforcement is off while migrating, all constraints are re-checked before commit, and
     enforcement is restored before the connection returns to the pool. The PRAGMA is ignored
-    inside a transaction, hence the commits around it. PostgreSQL serializes concurrent
-    upgrades with an advisory lock instead.
+    inside a transaction, hence the commits around it.
+
+    pysqlite only opens a transaction before INSERT/UPDATE/DELETE, so DDL would otherwise
+    autocommit statement by statement and a failed migration would leave half a schema
+    behind. An explicit BEGIN IMMEDIATE makes the whole migration atomic and, by taking the
+    write lock up front, serializes concurrent upgrades the way PostgreSQL's advisory lock
+    does.
     """
     with engine.connect() as connection:
         sqlite = connection.dialect.name == "sqlite"
@@ -130,7 +135,9 @@ def migration_connection(engine: Engine) -> Iterator[Connection]:
             connection.commit()
         try:
             with connection.begin():
-                if connection.dialect.name == "postgresql":
+                if sqlite:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                elif connection.dialect.name == "postgresql":
                     connection.exec_driver_sql("SELECT pg_advisory_xact_lock(7426010)")
                 yield connection
                 if sqlite:

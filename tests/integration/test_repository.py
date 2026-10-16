@@ -4,13 +4,14 @@ configured) PostgreSQL."""
 from __future__ import annotations
 
 import os
+import sqlite3
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.datasets import Dataset, EvalCase, ExpectedAnswer
@@ -44,6 +45,7 @@ from agentscope.storage.models import SuiteRunRow
 from agentscope.storage.repository import (
     DatasetConflict,
     EvaluatedCase,
+    PurgeIncomplete,
     Repository,
     SuiteHeader,
 )
@@ -431,6 +433,32 @@ def test_suite_errors(repo: Repository) -> None:
         )
     assert repo.get_suite("not-a-uuid") is None
     assert repo.get_suite(missing) is None
+    assert repo.list_runs(suite_id="not-a-uuid") == ([], 0)
+
+
+def test_finished_suite_accepts_no_more_cases(repo: Repository) -> None:
+    result = run_suite(repo)
+    with pytest.raises(ValueError, match="already finished"):
+        repo.record_case(result.suite_id, make_case("ferry", None))
+    assert repo.get_suite(result.suite_id) == result
+    item = repo.list_suites()[0][0]
+    assert (item.total, item.passed) == (1, 1)
+
+
+def test_record_case_counts_stored_rows(repo: Repository) -> None:
+    """Totals come from the stored verdicts, so a stale in-memory count cannot win."""
+    header = make_header()
+    repo.create_suite(header)
+    repo.record_case(header.suite_id, make_case("ferry", None))
+    with repo.session() as session, session.begin():  # simulate a lost update
+        row = session.get(SuiteRunRow, uuid.UUID(header.suite_id))
+        assert row is not None
+        row.total, row.passed = 0, 0
+    trace = make_trace()
+    repo.save_trace(trace, suite_id=header.suite_id)
+    repo.record_case(header.suite_id, make_case("bridge", trace))
+    item = repo.list_suites()[0][0]
+    assert (item.total, item.passed, item.pass_rate) == (2, 1, 0.5)
 
 
 def test_fail_suite_stores_a_redacted_error(repo: Repository) -> None:
@@ -678,4 +706,35 @@ def test_purge_leaves_no_trace_in_sqlite_files(tmp_path: Path) -> None:
     assert result.size_bytes_before is not None
     assert result.size_bytes_after is not None
     assert result.size_bytes_after < result.size_bytes_before
+    engine.dispose()
+
+
+def test_purge_reports_content_a_reader_kept_on_disk(tmp_path: Path) -> None:
+    """A reader blocks the WAL truncation; purge must say so instead of claiming success."""
+    path = tmp_path / "private.db"
+    engine = create_db_engine(f"sqlite:///{path}")
+    # Fail fast instead of waiting the default five seconds for the reader.
+    event.listen(engine, "connect", lambda dbapi, _: dbapi.execute("PRAGMA busy_timeout=100"))
+    upgrade(engine)
+    repo = Repository(engine)
+    planted = f"PLANTED-{uuid.uuid4().hex}"
+
+    def files_contain_planted() -> bool:
+        files = (path, path.with_name(path.name + "-wal"))
+        return any(planted.encode() in f.read_bytes() for f in files if f.exists())
+
+    repo.save_trace(make_trace(task=f"{planted} in a run"))
+    reader = sqlite3.connect(path)
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT count(*) FROM runs").fetchone() == (1,)
+        with pytest.raises(PurgeIncomplete, match="purge again") as raised:
+            repo.purge("runs")
+        assert raised.value.result.deleted["runs"] == 1
+        assert files_contain_planted()
+    finally:
+        reader.close()
+
+    assert repo.purge("runs").deleted["runs"] == 0  # nothing left to delete, but it compacts
+    assert not files_contain_planted()
     engine.dispose()

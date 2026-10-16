@@ -11,7 +11,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
-from sqlalchemy import Connection, Engine, Select, delete, func, select, text, update
+from sqlalchemy import (
+    Connection,
+    Engine,
+    Integer,
+    Select,
+    cast,
+    delete,
+    func,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import InstrumentedAttribute, Session, defer, selectinload, sessionmaker
 
 from agentscope.api.schemas import (
@@ -94,6 +106,18 @@ _SUITE_DOCUMENTS = (
 
 class DatasetConflict(Exception):
     """The name@version already exists with different content. Versions are immutable."""
+
+
+class PurgeIncomplete(RuntimeError):
+    """Rows were deleted, but their old contents could not be erased from disk yet.
+
+    Another connection kept reading, so SQLite could not fold the write-ahead log back into
+    the database and truncate it. Purging again once it is gone finishes the job.
+    """
+
+    def __init__(self, message: str, result: PurgeResult) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 class SuiteHeader(StrictModel):
@@ -265,7 +289,10 @@ class Repository:
         if case_id:
             query = query.where(RunRow.case_id == case_id)
         if suite_id:
-            query = query.where(RunRow.suite_id == uuid.UUID(suite_id))
+            suite_key = _uuid(suite_id)
+            if suite_key is None:  # no suite can have this id
+                return [], 0
+            query = query.where(RunRow.suite_id == suite_key)
         with self.session() as session:
             total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
             rows = session.scalars(
@@ -302,6 +329,13 @@ class Repository:
         """
         clean = self._scrub(dataset)
         digest = clean.content_hash()
+        try:
+            return self._insert_dataset(clean, digest)
+        except IntegrityError:
+            # Another writer stored this name@version between the lookup and the insert.
+            return self._insert_dataset(clean, digest)
+
+    def _insert_dataset(self, clean: Dataset, digest: str) -> DatasetSummary:
         with self.session() as session, session.begin():
             row = session.scalar(
                 select(DatasetRow).where(
@@ -393,16 +427,28 @@ class Repository:
     def record_case(self, suite_id: str, result: CaseResult) -> None:
         """Persist one verdict as soon as it is known, so a crash keeps finished cases.
 
-        The case's run (if any) must already be saved.
+        The case's run (if any) must already be saved, and the suite must not be finished.
         """
         clean = self._scrub(result)
         key = uuid.UUID(suite_id)
         with self.session() as session, session.begin():
             suite = _locked_suite(session, key)
+            if suite.finished_at is not None:
+                raise ValueError(f"suite {key} is already finished; cannot record more cases")
             session.add(_case_row(key, clean))
-            suite.total += 1
-            suite.passed += int(clean.passed)
-            suite.pass_rate = suite.passed / suite.total
+            session.flush()
+            # Counted from the stored rows inside the write transaction rather than
+            # incremented in Python: SQLite ignores FOR UPDATE, so a read-modify-write
+            # could lose a concurrent update.
+            total, passed = session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(cast(CaseResultRow.passed, Integer)), 0),
+                ).where(CaseResultRow.suite_id == key)
+            ).one()
+            suite.total = total
+            suite.passed = passed
+            suite.pass_rate = passed / total
 
     def finish_suite(self, result: SuiteResult) -> None:
         """Store the final status, metrics and gate of a suite created with create_suite.
@@ -646,12 +692,20 @@ class Repository:
         takes its case results, runs and experiments with it; purging runs keeps verdicts but
         unlinks them. SQLite overwrites deleted cells (secure_delete), VACUUM rebuilds the
         file and the WAL is truncated; PostgreSQL rewrites the affected tables (VACUUM FULL).
+
+        Raises PurgeIncomplete (carrying the result) when SQLite could not truncate the WAL
+        because another connection was reading: the rows are gone, but old copies of their
+        pages are still on disk until a later purge succeeds.
         """
         if before is not None and before.tzinfo is None:
             raise ValueError("before must be timezone-aware")
         targets = list(_PURGE_TARGETS.values()) if scope == "all" else [_PURGE_TARGETS[scope]]
         size_before = self._size_bytes()
         with self.engine.begin() as connection:
+            if connection.dialect.name == "sqlite":
+                # pysqlite would run the first counts outside the transaction; take the write
+                # lock first so the counts and the deletes see the same rows.
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
             counts_before = _row_counts(connection)
             for model, moment in targets:
                 statement = delete(model)
@@ -660,21 +714,33 @@ class Repository:
                 connection.execute(statement)
             counts_after = _row_counts(connection)
         deleted = {name: max(0, counts_before[name] - counts_after[name]) for name in counts_before}
-        self._compact([name for name, count in deleted.items() if count])
-        return PurgeResult(
+        erased = self._compact([name for name, count in deleted.items() if count])
+        result = PurgeResult(
             deleted=deleted, size_bytes_before=size_before, size_bytes_after=self._size_bytes()
         )
+        if not erased:
+            raise PurgeIncomplete(
+                "rows were deleted, but another connection is reading the database, so the "
+                "write-ahead log still holds old copies of them; close other AgentScope "
+                "processes and purge again",
+                result,
+            )
+        return result
 
-    def _compact(self, tables: list[str]) -> None:
+    def _compact(self, tables: list[str]) -> bool:
+        """Rewrite storage so deleted content is gone from disk. False if SQLite could not."""
         # Both statements refuse to run inside a transaction.
         with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             if connection.dialect.name == "sqlite":
                 connection.exec_driver_sql("VACUUM")
-                connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
-                return
+                # Returns (busy, wal frames, checkpointed frames). busy=1 means a reader kept
+                # the WAL from being folded back and truncated; SQLite reports it, not raises.
+                busy = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()[0]
+                return not busy
             quote = connection.dialect.identifier_preparer.quote
             for table in tables:
                 connection.exec_driver_sql(f"VACUUM FULL {quote(table)}")
+            return True
 
     def _size_bytes(self) -> int | None:
         """The SQLite file plus its WAL, or the PostgreSQL tables with their indexes."""

@@ -136,6 +136,28 @@ def test_upgrade_keeps_runs_and_spans(engine: Engine) -> None:
     assert stored is not None
     assert len(stored.spans) == 1
 
+    # Downgrading rebuilds `runs` again on SQLite; the spans must survive that too.
+    _migrate(engine, command.downgrade, "0001")
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(SpanRow)) == 1
+
+
+def test_failed_sqlite_migration_leaves_no_partial_schema(tmp_path: Path) -> None:
+    """pysqlite autocommits DDL unless a transaction is opened explicitly."""
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'm.db'}")
+
+    def half_a_migration() -> None:
+        with migration_connection(engine) as connection:
+            connection.exec_driver_sql("CREATE TABLE half_done (id INTEGER)")
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        half_a_migration()
+    assert "half_done" not in inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
+    engine.dispose()
+
 
 def test_sqlite_connection_settings_survive_migrations(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{tmp_path / 'm.db'}")
