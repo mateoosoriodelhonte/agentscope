@@ -20,7 +20,7 @@ from agentscope.tracing.redaction import Redactor
 
 
 def build_redactor(settings: Settings) -> Redactor:
-    secrets = [s for s in (settings.openai_compatible_api_key,) if s]
+    secrets = [s.get_secret_value() for s in (settings.openai_compatible_api_key,) if s]
     return Redactor(extra_keys=settings.redact_keys, secret_values=secrets)
 
 

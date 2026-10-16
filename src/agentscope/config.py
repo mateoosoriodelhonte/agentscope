@@ -1,7 +1,9 @@
 """Runtime settings, read from AGENTSCOPE_* environment variables.
 
 Defaults are local-first: loopback binding, a SQLite file under ./.agentscope, no OTLP
-export, no external model hosts.
+export, no external model hosts. Settings are the only source of network destinations
+(see providers/http.py), and no `.env` file is ever loaded implicitly: a project-local
+file could otherwise redirect a base URL while the API key comes from the user's shell.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -24,7 +26,7 @@ class ModelRate(BaseSettings):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="AGENTSCOPE_", env_nested_delimiter="__", extra="ignore"
+        env_prefix="AGENTSCOPE_", env_nested_delimiter="__", extra="ignore", env_file=None
     )
 
     data_dir: Path = Path(".agentscope")
@@ -39,12 +41,19 @@ class Settings(BaseSettings):
     )
     max_request_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
 
+    # Ollama is local, so it is selectable by default; it is contacted only when a run selects
+    # provider=ollama or the provider status is probed.
+    enable_ollama: bool = True
     ollama_url: str = "http://127.0.0.1:11434"
-    # Hostnames (besides loopback) that model providers may contact. Empty = loopback only.
+    # Non-loopback hostnames (or IP addresses) that may be contacted: model providers and the
+    # OTLP endpoint. Exact matches only. Empty = loopback only.
+    allowed_egress_hosts: list[str] = Field(default_factory=list)
+    # Earlier name for allowed_egress_hosts; still honoured.
     allowed_model_hosts: list[str] = Field(default_factory=list)
+    # Sends prompts and tool outputs to the configured server: off unless enabled explicitly.
     enable_openai_compatible: bool = False
-    openai_compatible_url: str | None = None
-    openai_compatible_api_key: str | None = Field(default=None, repr=False)
+    openai_compatible_url: str | None = None  # base URL, e.g. http://127.0.0.1:8080/v1
+    openai_compatible_api_key: SecretStr | None = Field(default=None, repr=False)
 
     # Optional OpenTelemetry export (OTLP/HTTP). Off unless explicitly configured.
     otlp_endpoint: str | None = None
