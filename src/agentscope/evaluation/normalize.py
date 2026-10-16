@@ -7,20 +7,34 @@ import re
 import unicodedata
 from typing import Any
 
-NORMALIZER_VERSION = "1"
+NORMALIZER_VERSION = "2"
 
 _WHITESPACE = re.compile(r"\s+")
 _EDGE_PUNCT = re.compile(r"^[\W_]+|[\W_]+$", re.UNICODE)
 _NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
+def strip_format_chars(text: str) -> str:
+    """Remove Unicode format characters (Cf: zero-width spaces, joiners, bidi controls),
+    which are invisible and would otherwise let a string hide inside another."""
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+
+def fold(text: str) -> str:
+    """Cf removed, NFKC, case-folded, whitespace collapsed and trimmed.
+
+    Format characters go first so that removing them cannot create a new composable
+    sequence, and NFKC runs again after case folding, so `fold` is idempotent.
+    """
+    text = unicodedata.normalize("NFKC", strip_format_chars(text))
+    text = unicodedata.normalize("NFKC", text.casefold())
+    return _WHITESPACE.sub(" ", text).strip()
+
+
 def normalize(text: str) -> str:
-    """NFKC, case-folded, Cf characters removed, whitespace collapsed, edge punctuation
-    stripped. Versioned as NORMALIZER_VERSION because results depend on it."""
-    text = unicodedata.normalize("NFKC", text)
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-    text = _WHITESPACE.sub(" ", text.casefold()).strip()
-    return _EDGE_PUNCT.sub("", text)
+    """`fold` plus edge punctuation stripped. Versioned as NORMALIZER_VERSION because
+    results depend on it."""
+    return _EDGE_PUNCT.sub("", fold(text))
 
 
 def is_number(value: Any) -> bool:
