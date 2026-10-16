@@ -20,6 +20,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // Never inline assets as data: URIs; the CSP allows fonts from 'self' only.
+    assetsInlineLimit: 0,
     chunkSizeWarningLimit: 600,
   },
   test: {
