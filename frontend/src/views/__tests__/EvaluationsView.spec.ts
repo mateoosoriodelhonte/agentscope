@@ -107,6 +107,22 @@ describe('EvaluationsView', () => {
     })
     expect(router.currentRoute.value.fullPath).toBe('/evaluations/suite-new?job=job-e')
   })
+
+  it('sends the minimum pass rate as the decimal that was typed', async () => {
+    const { page, fetchMock } = await open('/evaluations?start=true', {
+      'GET /api/evaluations': SUITES,
+      'GET /api/datasets': [datasetSummary()],
+      'GET /api/agents': agentsResponse(),
+      'POST /api/evaluations': () => never(),
+    })
+    await page.find('[role="dialog"] input[type="checkbox"]').setValue(true)
+    await page.find('[role="dialog"] .grid').findAll('input.input')[0]!.setValue('1.1')
+    await page.find('[role="dialog"] form').trigger('submit')
+    await flushPromises()
+    const body = calls(fetchMock, 'POST', '/api/evaluations')[0]!.body as { thresholds: { min_pass_rate: number } }
+    // 1.1 / 100 is 0.011000000000000001 in floating point: a stricter gate than asked for.
+    expect(body.thresholds.min_pass_rate).toBe(0.011)
+  })
 })
 
 describe('EvaluationView', () => {
@@ -170,6 +186,27 @@ describe('EvaluationView', () => {
     expect(page.find('[role="status"]').exists()).toBe(false)
     await vi.advanceTimersByTimeAsync(10_000)
     expect(calls(fetchMock, 'GET', '/api/evaluations/suite-v1')).toHaveLength(3)
+  })
+
+  it('keeps refreshing a running evaluation after one refresh fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let loads = 0
+    const { page } = await open('/evaluations/suite-v1', {
+      'GET /api/evaluations/suite-v1': () => {
+        loads += 1
+        if (loads === 2) return json({ detail: 'database is locked' }, 500)
+        return suiteResult({ status: loads < 3 ? 'running' : 'completed', cases: suiteResult().cases.slice(0, loads) })
+      },
+    })
+    expect(page.find('[role="status"]').text()).toContain('Still running: 1 case recorded so far')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    // The failed refresh keeps the last result on screen and schedules another.
+    expect(page.find('[role="status"]').text()).toContain('1 case recorded so far')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(loads).toBe(3)
+    expect(page.find('[role="status"]').exists()).toBe(false)
   })
 
   it('reports a missing evaluation', async () => {

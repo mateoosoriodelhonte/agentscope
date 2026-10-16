@@ -128,7 +128,7 @@ function onTag(event: Event): void {
               <td><span class="chips"><span v-for="tag in c.tags" :key="tag" class="tag">{{ tag }}</span></span></td>
               <td>
                 <span v-if="faultLabels(c).length" class="chips">
-                  <span v-for="f in faultLabels(c)" :key="f" class="tag fault">{{ f }}</span>
+                  <span v-for="(f, i) in faultLabels(c)" :key="i" class="tag fault">{{ f }}</span>
                 </span>
                 <span v-else class="faint">—</span>
               </td>
@@ -144,7 +144,7 @@ function onTag(event: Event): void {
       <div v-if="openCase" class="case-detail">
         <p class="task-full">{{ openCase.task }}</p>
         <ul class="expect-list">
-          <li v-for="line in expectationSummary(openCase)" :key="line">{{ line }}</li>
+          <li v-for="(line, i) in expectationSummary(openCase)" :key="i">{{ line }}</li>
         </ul>
         <JsonView :value="asJson(openCase)" :label="`Case ${openCase.id} as JSON`" />
       </div>

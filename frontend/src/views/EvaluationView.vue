@@ -41,11 +41,12 @@ watch(
 )
 
 // A suite still running without a job to follow (opened from the list) refreshes itself:
-// every reload delivers a new result, which schedules the next one until it finishes.
+// every reload delivers a new result (or a new error, which keeps the last result on
+// screen), and each schedules the next reload until the suite finishes.
 let refresh: ReturnType<typeof setTimeout> | undefined
 watch(
-  () => suite.data.value,
-  (value) => {
+  [() => suite.data.value, () => suite.error.value],
+  ([value]) => {
     clearTimeout(refresh)
     if (value?.status === 'running' && !query.value.job) refresh = setTimeout(() => void suite.reload(), 2000)
   },

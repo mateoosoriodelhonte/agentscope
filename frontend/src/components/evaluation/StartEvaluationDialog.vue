@@ -86,7 +86,9 @@ function thresholds(found: FieldIssue[]): GateThresholds | null {
     if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
       found.push({ path: '/thresholds/min_pass_rate', message: 'must be a percentage from 0 to 100' })
     } else {
-      rate = percent / 100
+      // The gate reads the threshold through str() as an exact decimal, so send the decimal
+      // that was typed: 1.1 / 100 is 0.011000000000000001 in floating point.
+      rate = Number((percent / 100).toPrecision(15))
     }
   }
   return {

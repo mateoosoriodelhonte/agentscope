@@ -1,6 +1,7 @@
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentsResponse, runSummary } from '@/__tests__/builders'
+import { loadFixture } from '@/__tests__/fixtures'
 import { json, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import { closeNewRun, newRun } from '@/composables/newRun'
@@ -61,6 +62,8 @@ describe('AgentVersionView', () => {
   const routes = {
     'GET /api/agents': agentsResponse(),
     'GET /api/runs': { items: [runSummary({ agent_version: 'v2', config_hash: 'sha256:abc123' })], total: 1 },
+    // The recorded run used exactly the built-in v2 configuration.
+    'GET /api/runs/run-1': loadFixture('run-v2'),
   }
 
   it('shows the configuration, prompt, tools with their schemas, and the recorded config hash', async () => {
@@ -89,6 +92,35 @@ describe('AgentVersionView', () => {
     await flushPromises()
     expect(router.currentRoute.value.query.graph).toBe('table')
     expect(page.find('.topology table').text()).toContain('request a repair')
+  })
+
+  it('never shows the hash of a hand-edited config that kept the version name', async () => {
+    const edited = loadFixture('run-v2')
+    edited.trace.config = { ...edited.trace.config, model: { ...edited.trace.config.model, temperature: 0.7 } }
+    const original = loadFixture('run-v2')
+    const { page } = await open('/agents/research_assistant/v2', {
+      ...routes,
+      'GET /api/runs': {
+        items: [
+          runSummary({ run_id: 'run-edited', agent_version: 'v2', config_hash: 'sha256:edited' }),
+          runSummary({ run_id: 'run-edited-2', agent_version: 'v2', config_hash: 'sha256:edited' }),
+          runSummary({ run_id: 'run-builtin', agent_version: 'v2', config_hash: 'sha256:builtin' }),
+        ],
+        total: 3,
+      },
+      'GET /api/runs/run-edited': edited,
+      'GET /api/runs/run-builtin': original,
+    })
+    expect(page.find('.hash').text()).toContain('builtin')
+    expect(page.find('.hash').text()).not.toContain('edited')
+
+    page.unmount()
+    const { page: again } = await open('/agents/research_assistant/v2', {
+      ...routes,
+      'GET /api/runs': { items: [runSummary({ run_id: 'run-edited', agent_version: 'v2', config_hash: 'sha256:edited' })], total: 1 },
+      'GET /api/runs/run-edited': edited,
+    })
+    expect(again.find('.hash').text()).toContain('not recorded yet')
   })
 
   it('says when the config hash is not recorded yet', async () => {

@@ -6,14 +6,27 @@ import PurgeDialog from '@/components/settings/PurgeDialog.vue'
 import ErrorState from '@/components/ui/ErrorState.vue'
 import RedactedValue from '@/components/ui/RedactedValue.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
-import { compact, formatBytes } from '@/composables/format'
+import { compact, formatBytes, truncate } from '@/composables/format'
 import { useResource } from '@/composables/useResource'
 
 const settings = useResource((signal) => api.settings(signal))
 const purging = ref(false)
 
 /** Names that hold credentials. The API already redacts them; this never shows one anyway. */
-const SECRET = /(api_?key|token|secret|password|credential)/i
+const SECRET = /(api_?key|private_?key|token|secret|password|passwd|credential|authorization)/i
+/** The user-info part of a URL (postgresql://user:password@host/db). */
+const URL_CREDENTIALS = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@"]+@/gi
+
+/** Masks credentials embedded in URLs, again in case the API did not. */
+function maskCredentials(text: string): string {
+  return text.replace(URL_CREDENTIALS, '$1[REDACTED]@')
+}
+
+/** One line per value; credentials are masked before anything is truncated. */
+function display(value: JsonValue): string {
+  if (value === null || (typeof value !== 'string' && typeof value !== 'object')) return compact(value)
+  return truncate(maskCredentials(JSON.stringify(value)), 200)
+}
 
 interface Setting {
   key: string
@@ -57,7 +70,7 @@ const totalRows = computed(() => data.value?.storage.tables.reduce((sum, t) => s
           <h2 id="egress-title" class="section-title">Network destinations</h2>
           <p class="muted note">Every destination AgentScope may contact. Nothing else leaves this machine.</p>
           <ul v-if="data.egress.length" class="list panel">
-            <li v-for="destination in data.egress" :key="destination" class="mono">{{ destination }}</li>
+            <li v-for="destination in data.egress" :key="destination" class="mono">{{ maskCredentials(destination) }}</li>
           </ul>
           <p v-else class="callout ok">None: AgentScope contacts no network destination.</p>
         </section>
@@ -77,7 +90,7 @@ const totalRows = computed(() => data.value?.storage.tables.reduce((sum, t) => s
           </div>
         </div>
         <p class="muted note">
-          <span class="mono">{{ data.storage.backend }}</span> at <span class="mono">{{ data.storage.location }}</span>
+          <span class="mono">{{ data.storage.backend }}</span> at <span class="mono">{{ maskCredentials(data.storage.location) }}</span>
         </p>
         <div class="table-wrap panel">
           <table class="data-table">
@@ -121,7 +134,7 @@ const totalRows = computed(() => data.value?.storage.tables.reduce((sum, t) => s
                 <th scope="row" class="mono key">{{ setting.key }}</th>
                 <td class="mono value">
                   <RedactedValue v-if="setting.secret" marker="[REDACTED]" />
-                  <template v-else>{{ compact(setting.value, 200) }}</template>
+                  <template v-else>{{ display(setting.value) }}</template>
                 </td>
               </tr>
             </tbody>

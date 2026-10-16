@@ -250,6 +250,18 @@ export interface ExpectedDraft {
   /** The value as typed: JSON for exact (type-strict), one accepted value per line for one_of. */
   value: string
   tolerance: string
+  /** For contains: the longest answer accepted (blank = no bound). */
+  maxChars?: string
+  /**
+   * For one_of: each line is a JSON value rather than plain text. Set when a prefilled
+   * expectation lists non-string values, which one_of compares type-strictly, so they are
+   * not silently turned into strings.
+   */
+  valuesJson?: boolean
+}
+
+export function emptyExpectedDraft(): ExpectedDraft {
+  return { field: 'answer', match: 'normalized', value: '', tolerance: '', maxChars: '', valuesJson: false }
 }
 
 function scalarText(value: JsonValue): string {
@@ -257,8 +269,10 @@ function scalarText(value: JsonValue): string {
 }
 
 export function expectedDraft(expected: ExpectedAnswer): ExpectedDraft {
+  const values = expected.values ?? []
+  const valuesJson = expected.match === 'one_of' && values.some((v) => typeof v !== 'string')
   let value: string
-  if (expected.match === 'one_of') value = (expected.values ?? []).map(scalarText).join('\n')
+  if (expected.match === 'one_of') value = values.map((v) => (valuesJson ? JSON.stringify(v) : scalarText(v))).join('\n')
   else if (expected.match === 'exact') value = JSON.stringify(expected.value)
   else value = scalarText(expected.value)
   return {
@@ -266,6 +280,8 @@ export function expectedDraft(expected: ExpectedAnswer): ExpectedDraft {
     match: expected.match,
     value,
     tolerance: expected.tolerance === null ? '' : String(expected.tolerance),
+    maxChars: expected.max_chars === null ? '' : String(expected.max_chars),
+    valuesJson,
   }
 }
 
@@ -283,12 +299,21 @@ export function buildExpected(draft: ExpectedDraft, issues: FieldIssue[]): Expec
     issues.push({ path: '/expected/field', message: 'must be a dotted field name such as answer' })
   }
   if (draft.match === 'one_of') {
-    const values = draft.value
+    const lines = draft.value
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
-    if (!values.length) issues.push({ path: '/expected/values', message: 'list at least one accepted value' })
-    expected.values = values
+    if (!lines.length) issues.push({ path: '/expected/values', message: 'list at least one accepted value' })
+    expected.values = draft.valuesJson
+      ? lines.map((line, i) => {
+          const parsed = parseJson(line)
+          if (parsed.issues.length) {
+            issues.push({ path: `/expected/values/${i}`, message: 'must be JSON, e.g. "Sept" or 1987' })
+            return null
+          }
+          return parsed.value as JsonValue
+        })
+      : lines
   } else if (draft.match === 'numeric') {
     const value = Number(draft.value.trim())
     if (draft.value.trim() === '' || !Number.isFinite(value)) {
@@ -313,6 +338,16 @@ export function buildExpected(draft: ExpectedDraft, issues: FieldIssue[]): Expec
   } else {
     if (draft.value === '') issues.push({ path: '/expected/value', message: 'is required' })
     expected.value = draft.value
+    // Without a bound, an answer that lists every candidate passes a contains match.
+    const maxChars = (draft.maxChars ?? '').trim()
+    if (draft.match === 'contains' && maxChars !== '') {
+      const bound = Number(maxChars)
+      if (!Number.isInteger(bound) || bound < 1 || bound > 5000) {
+        issues.push({ path: '/expected/max_chars', message: 'must be a whole number from 1 to 5000' })
+      } else {
+        expected.max_chars = bound
+      }
+    }
   }
   return expected
 }

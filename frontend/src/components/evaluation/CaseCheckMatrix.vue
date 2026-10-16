@@ -58,13 +58,21 @@ const cursor = ref({ row: 0, col: 0 })
 const grid = ref<HTMLElement | null>(null)
 const COLS = CHECK_NAMES.length + 1
 
+/** Whether a cell has a link: the case column always does, a check column when the check ran. */
+function linked(row: number, col: number): boolean {
+  const r = rows.value[row]
+  return r !== undefined && (col === 0 || (col > 0 && col < COLS && r.cells[col - 1]!.status !== null))
+}
+/** The cursor, or the first cell when the rows changed under it (e.g. a filter), so the grid keeps its tab stop. */
+const active = computed(() => (linked(cursor.value.row, cursor.value.col) ? cursor.value : { row: 0, col: 0 }))
+
 function cellAt(row: number, col: number): HTMLElement | null {
   return grid.value?.querySelector<HTMLElement>(`[data-cell="${row}:${col}"]`) ?? null
 }
 
 /** Moves along the row or column, skipping cells with no link (checks that did not run). */
 function move(dRow: number, dCol: number, to?: { row: number; col: number }): void {
-  let { row, col } = to ?? cursor.value
+  let { row, col } = to ?? active.value
   if (!to) {
     do {
       row += dRow
@@ -82,10 +90,10 @@ function onKeydown(event: KeyboardEvent): void {
     ArrowLeft: () => move(0, -1),
     ArrowDown: () => move(1, 0),
     ArrowUp: () => move(-1, 0),
-    Home: () => move(0, 0, { row: cursor.value.row, col: 0 }),
+    Home: () => move(0, 0, { row: active.value.row, col: 0 }),
     End: () => {
       for (let col = COLS - 1; col >= 0; col--) {
-        if (cellAt(cursor.value.row, col)) return move(0, 0, { row: cursor.value.row, col })
+        if (cellAt(active.value.row, col)) return move(0, 0, { row: active.value.row, col })
       }
     },
   }
@@ -95,7 +103,7 @@ function onKeydown(event: KeyboardEvent): void {
   action()
 }
 
-const tabIndex = (row: number, col: number) => (cursor.value.row === row && cursor.value.col === col ? 0 : -1)
+const tabIndex = (row: number, col: number) => (active.value.row === row && active.value.col === col ? 0 : -1)
 </script>
 
 <template>

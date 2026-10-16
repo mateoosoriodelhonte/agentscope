@@ -1,10 +1,20 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { GateResult } from '@/api/types'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { formatActual, formatThreshold, gateOutcome, ruleLabel } from './gate'
 
 // One row per gate rule: what was required, what was measured, and whether it held.
-withDefaults(defineProps<{ gate: GateResult | null; heading?: string }>(), { heading: 'Gate' })
+const props = withDefaults(defineProps<{ gate: GateResult | null; heading?: string }>(), { heading: 'Gate' })
+
+/** Rules measured against a baseline; without one they cannot pass. */
+const BASELINE_RULES = new Set(['max_new_regressions', 'max_pass_rate_drop_pp'])
+const baselineNote = computed(() => {
+  const gate = props.gate
+  if (!gate) return null
+  if (gate.baseline_used) return 'compared with a baseline'
+  return gate.rules.some((r) => BASELINE_RULES.has(r.name)) ? 'no baseline: regression rules cannot be measured' : null
+})
 </script>
 
 <template>
@@ -12,9 +22,7 @@ withDefaults(defineProps<{ gate: GateResult | null; heading?: string }>(), { hea
     <div class="section-head">
       <h2 class="section-title">{{ heading }}</h2>
       <StatusBadge :outcome="gateOutcome(gate?.passed)" />
-      <span v-if="gate" class="faint baseline">
-        {{ gate.baseline_used ? 'compared with a baseline' : 'no baseline: regression rules cannot be measured' }}
-      </span>
+      <span v-if="baselineNote" class="faint baseline">{{ baselineNote }}</span>
     </div>
     <p v-if="!gate" class="faint none">No gate thresholds were configured for this evaluation.</p>
     <p v-else-if="!gate.rules.length" class="faint none">The gate has no rules.</p>

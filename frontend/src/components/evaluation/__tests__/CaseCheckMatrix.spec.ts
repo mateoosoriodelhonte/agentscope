@@ -100,4 +100,17 @@ describe('CaseCheckMatrix', () => {
     await flushPromises()
     expect(document.activeElement?.getAttribute('data-cell')).toBe('1:0')
   })
+
+  it('keeps its tab stop when the rows change under the cursor', async () => {
+    const matrix = await render()
+    const grid = matrix.find('table')
+    await grid.trigger('keydown', { key: 'ArrowDown' })
+    await grid.trigger('keydown', { key: 'ArrowDown' })
+    await flushPromises()
+    expect(document.activeElement?.getAttribute('data-cell')).toBe('2:0')
+    // e.g. "Only failing cases" leaves one row.
+    await matrix.setProps({ cases: [caseResult('case/2', ['answer_correctness'])] })
+    const focusable = matrix.findAll('a').filter((a) => a.attributes('tabindex') === '0')
+    expect(focusable.map((a) => a.attributes('data-cell'))).toEqual(['0:0'])
+  })
 })

@@ -301,7 +301,11 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
               </RouterLink>
             </div>
           </div>
-          <ErrorState v-if="diffRuns.error.value && !diffRuns.data.value" :error="diffRuns.error.value" title="Could not load the two runs" compact @retry="diffRuns.reload" />
+          <p v-if="!selected.a_run_id || !selected.b_run_id" class="callout info" role="note">
+            There is no trace diff for this case: {{ !selected.a_run_id && !selected.b_run_id ? 'neither side has' : `side ${selected.a_run_id ? 'B' : 'A'} has no` }}
+            recorded run (the case was not run there, the harness could not run it, or the run was purged).
+          </p>
+          <ErrorState v-else-if="diffRuns.error.value && !diffRuns.data.value" :error="diffRuns.error.value" title="Could not load the two runs" compact @retry="diffRuns.reload" />
           <Skeleton v-else-if="!diffRuns.data.value" :rows="6" />
           <TraceDiff
             v-else

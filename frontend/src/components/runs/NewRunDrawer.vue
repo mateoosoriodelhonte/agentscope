@@ -19,6 +19,7 @@ import {
   buildExpected,
   buildFaults,
   buildModelFaults,
+  emptyExpectedDraft,
   expectedDraft,
   faultDraft,
   modelFaultDraft,
@@ -48,7 +49,7 @@ const task = ref('')
 const faults = ref<FaultDraft[]>([])
 const modelFaults = ref<ModelFaultDraft[]>([])
 const expectOn = ref(false)
-const expected = ref<ExpectedDraft>({ field: 'answer', match: 'normalized', value: '', tolerance: '' })
+const expected = ref<ExpectedDraft>(emptyExpectedDraft())
 const issues = ref<FieldIssue[]>([])
 const issueList = ref<HTMLElement | null>(null)
 
@@ -95,9 +96,7 @@ function reset(): void {
   faults.value = (prefill.faults ?? []).map(faultDraft)
   modelFaults.value = (prefill.modelFaults ?? []).map(modelFaultDraft)
   expectOn.value = Boolean(prefill.expected)
-  expected.value = prefill.expected
-    ? expectedDraft(prefill.expected)
-    : { field: 'answer', match: 'normalized', value: '', tolerance: '' }
+  expected.value = prefill.expected ? expectedDraft(prefill.expected) : emptyExpectedDraft()
   issues.value = []
   job.error.value = null
   if (catalog.value) applyAgentDefault()
@@ -162,6 +161,13 @@ async function submit(): Promise<void> {
   closeNewRun()
   await router.push(`/runs/${encodeURIComponent(done.resource_id)}`)
 }
+
+const valueLabel = computed(() => {
+  if (expected.value.match === 'one_of') {
+    return expected.value.valuesJson ? 'Accepted values (one JSON value per line)' : 'Accepted values (one per line)'
+  }
+  return expected.value.match === 'exact' ? 'Value (JSON)' : 'Value'
+})
 
 const submitError = computed(() => (job.error.value ? describeError(job.error.value).message : null))
 const progress = computed(() => {
@@ -315,8 +321,12 @@ const progress = computed(() => {
             <span>Tolerance</span>
             <input v-model="expected.tolerance" class="input" inputmode="decimal" :aria-invalid="issueFor('/expected/tolerance') ? 'true' : undefined" />
           </label>
+          <label v-if="expected.match === 'contains'" class="field">
+            <span>Max characters (optional)</span>
+            <input v-model="expected.maxChars" class="input" inputmode="numeric" :aria-invalid="issueFor('/expected/max_chars') ? 'true' : undefined" />
+          </label>
           <label class="field full">
-            <span>{{ expected.match === 'one_of' ? 'Accepted values (one per line)' : expected.match === 'exact' ? 'Value (JSON)' : 'Value' }}</span>
+            <span>{{ valueLabel }}</span>
             <textarea
               v-model="expected.value"
               class="textarea"
@@ -325,8 +335,9 @@ const progress = computed(() => {
             ></textarea>
           </label>
         </div>
-        <p v-if="expectOn && newRun.prefill.source" class="hint">
-          An ad-hoc run checks the expected answer only; a dataset's tool expectations apply when the dataset is evaluated.
+        <p v-if="newRun.prefill.source" class="hint">
+          An ad-hoc run checks the expected answer only. The case's tool expectations, permitted tools and limit
+          overrides apply when the dataset is evaluated.
         </p>
       </fieldset>
 

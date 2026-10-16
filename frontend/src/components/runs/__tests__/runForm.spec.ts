@@ -66,6 +66,23 @@ describe('buildExpected', () => {
     const expected = { field: 'answer', match: 'exact' as const, value: 1987, values: null, tolerance: null, max_chars: null }
     expect(build(expectedDraft(expected)).expected).toEqual(expected)
   })
+
+  it('keeps the max_chars bound of a contains expectation, so "Run this case" grades as strictly', () => {
+    const expected = { field: 'answer', match: 'contains' as const, value: '09:00-19:00', values: null, tolerance: null, max_chars: 40 }
+    expect(build(expectedDraft(expected)).expected).toEqual(expected)
+    const draft = { ...expectedDraft(expected), maxChars: '0' }
+    expect(build(draft).issues).toEqual([{ path: '/expected/max_chars', message: 'must be a whole number from 1 to 5000' }])
+  })
+
+  it('keeps non-string one_of values typed, since one_of compares them type-strictly', () => {
+    const expected = { field: 'year', match: 'one_of' as const, value: null, values: [1987, 'nineteen eighty-seven'], tolerance: null, max_chars: null }
+    const draft = expectedDraft(expected)
+    expect(draft.valuesJson).toBe(true)
+    expect(build(draft).expected).toEqual(expected)
+    expect(build({ ...draft, value: '1987\nnot json' }).issues[0]!.path).toBe('/expected/values/1')
+    // Plain-text lines stay strings when every prefilled value was a string.
+    expect(expectedDraft({ ...expected, values: ['September', 'Sept'] }).valuesJson).toBe(false)
+  })
 })
 
 describe('buildFaults', () => {

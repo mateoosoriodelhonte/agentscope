@@ -43,6 +43,15 @@ describe('GateChecklist', () => {
     expect(rows[2]!.find('.badge svg').exists()).toBe(true)
   })
 
+  it('mentions a missing baseline only when a rule needs one', () => {
+    const without = (rules: GateRule[]) =>
+      mount(GateChecklist, { props: { gate: { passed: false, baseline_used: false, rules } } }).find('.section-head').text()
+    expect(without([rule({})])).not.toContain('baseline')
+    expect(without([rule({}), rule({ name: 'max_new_regressions', threshold: 0, actual: null })])).toContain(
+      'no baseline: regression rules cannot be measured',
+    )
+  })
+
   it('says when no gate was configured', () => {
     const wrapper = mount(GateChecklist, { props: { gate: null } })
     expect(wrapper.text()).toContain('no gate')

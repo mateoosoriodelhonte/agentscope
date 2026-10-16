@@ -38,6 +38,25 @@ describe('SettingsView', () => {
     expect(storage.find('tfoot').text()).toContain('2.5 MiB')
   })
 
+  it('masks credentials embedded in URLs even if the API sent them', async () => {
+    const view = settingsView({
+      storage: { ...settingsView().storage, backend: 'postgresql', location: 'postgresql://scope:hunter2@db:5432/agentscope' },
+      egress: ['https://bot:t0ken@collector.example:4318 (OTLP)'],
+    })
+    view.effective = {
+      ...view.effective,
+      database_url: 'postgresql+psycopg://scope:hunter2@db:5432/agentscope',
+      mirrors: ['http://a:b@one', 'http://two'],
+    }
+    const { page } = await open({ 'GET /api/settings': view })
+    expect(page.text()).not.toContain('hunter2')
+    expect(page.text()).not.toContain('t0ken')
+    expect(page.text()).not.toContain('a:b@')
+    expect(page.text()).toContain('postgresql+psycopg://[REDACTED]@db:5432/agentscope')
+    expect(page.text()).toContain('https://[REDACTED]@collector.example:4318 (OTLP)')
+    expect(page.text()).toContain('http://two')
+  })
+
   it('says when nothing may leave the machine', async () => {
     const { page } = await open({ 'GET /api/settings': settingsView({ egress: [] }) })
     expect(page.text()).toContain('None: AgentScope contacts no network destination.')

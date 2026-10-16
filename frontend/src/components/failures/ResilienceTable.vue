@@ -65,7 +65,7 @@ const totals = computed(() =>
       </tbody>
       <tfoot>
         <tr>
-          <th scope="row">Total</th>
+          <th scope="row">Total over fault kinds</th>
           <template v-for="(total, i) in totals" :key="agents[i]">
             <td class="num mono first">{{ total.recovered }}</td>
             <td class="num mono">{{ total.degraded }}</td>
@@ -76,6 +76,7 @@ const totals = computed(() =>
       </tfoot>
     </table>
   </div>
+  <p class="faint note">A case with several fault kinds is counted once under each kind, so totals count case and fault-kind pairs.</p>
 </template>
 
 <style scoped>
@@ -94,5 +95,9 @@ const totals = computed(() =>
   text-align: center;
   font-size: 12px;
   color: var(--text-faint);
+}
+.note {
+  margin: 0;
+  font-size: 12px;
 }
 </style>

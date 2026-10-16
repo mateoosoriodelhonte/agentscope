@@ -85,6 +85,18 @@ describe('CompareView', () => {
     )
   })
 
+  it('explains a deep-linked case that has no run on one side instead of loading forever', async () => {
+    const data = comparison()
+    const target = data.cases.find((c) => c.change === 'regression')!
+    target.b_run_id = null
+    const { page, fetchMock } = await open(`/compare?experiment=exp-1&case=${target.case_id}`, {
+      'GET /api/experiments/exp-1': data,
+    })
+    expect(page.find('#trace-diff').text()).toContain('side B has no recorded run')
+    expect(page.find('#trace-diff .skeleton').exists()).toBe(false)
+    expect(calls(fetchMock, 'GET', `/api/runs/${target.a_run_id}`)).toHaveLength(0)
+  })
+
   it('warns when the dataset content differs and when flips may be noise', async () => {
     const data = comparison({ dataset_mismatch: true, deterministic: false })
     data.b = { ...data.b, dataset_hash: `sha256:${'9'.repeat(64)}` }
