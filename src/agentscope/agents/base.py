@@ -111,6 +111,7 @@ class AgentCatalog:
 
 
 def default_catalog() -> AgentCatalog:
+    from agentscope.agents.planner import TASK_PLANNER
     from agentscope.agents.research import RESEARCH_ASSISTANT
 
-    return AgentCatalog([RESEARCH_ASSISTANT])
+    return AgentCatalog([RESEARCH_ASSISTANT, TASK_PLANNER])
