@@ -92,6 +92,15 @@ def test_export_paths_stay_inside_the_output_directory(tmp_path: Path) -> None:
         export_path(out, sample())
 
 
+def test_export_paths_never_write_through_a_symlink(tmp_path: Path) -> None:
+    # Even a link to another file in the same directory would overwrite that file.
+    other = tmp_path / "other.dataset.json"
+    other.write_text("{}")
+    (tmp_path / "demo@2026.1.dataset.json").symlink_to(other)
+    with pytest.raises(ValueError, match="through a symlink"):
+        export_path(tmp_path, sample())
+
+
 @pytest.mark.parametrize("name", ["../escape", "a/b", ".hidden", ""])
 def test_unvalidated_names_never_become_paths(tmp_path: Path, name: str) -> None:
     forged = sample().model_copy(update={"name": name})  # bypasses validation

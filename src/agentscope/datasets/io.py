@@ -50,10 +50,15 @@ def export_filename(dataset: Dataset) -> str:
 
 
 def export_path(output_dir: Path, dataset: Dataset) -> Path:
-    """Where to write `dataset` inside `output_dir`; refuses anything that resolves elsewhere
-    (for example an existing symlink with the same name)."""
+    """Where to write `dataset` inside `output_dir`; refuses anything that resolves elsewhere.
+
+    An existing symlink with the export's name is refused even when it points at another
+    file in the same directory, since writing through it would overwrite that file instead.
+    """
     root = output_dir.resolve()
-    target = (root / export_filename(dataset)).resolve()
-    if target.parent != root:
-        raise ValueError(f"export path for {dataset.name!r} resolves outside {root}")
+    target = root / export_filename(dataset)
+    if target.resolve() != target:
+        raise ValueError(
+            f"export path {target.name!r} resolves outside {root} or through a symlink"
+        )
     return target

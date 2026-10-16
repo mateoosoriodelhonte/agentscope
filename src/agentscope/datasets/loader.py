@@ -7,7 +7,8 @@ and refuses JSON that different parsers (or reviewers) could read differently:
 - at most 5 MiB per file, never reading more than that plus one byte, and at most 200 JSON
   files per directory; symlinks that resolve outside the directory are skipped;
 - UTF-8 only; duplicate object keys, NaN/Infinity (including numbers that overflow to
-  infinity), unpaired surrogates, and nesting deeper than 32 levels are rejected;
+  infinity), integers outside the I-JSON range of +/-(2**53 - 1) (RFC 7493), unpaired
+  surrogates, and nesting deeper than 32 levels are rejected;
 - validation is strict, so "5" is never coerced to 5.
 
 Every failure is a `DatasetError` whose issues carry JSON pointers to the offending field.
@@ -20,12 +21,14 @@ Directory convention (`agentscope eval --dataset DIR` relies on it; see tests/fi
 - ``gate.json``: regression-gate thresholds (`GateThresholds`).
 - ``*.baseline.json``: baselines, written only by ``agentscope eval --write-baseline``.
 
-Any other ``*.json`` file is an error rather than being ignored, so a misnamed dataset file
-cannot silently shrink a gated suite. Subdirectories are not scanned.
+Any other ``*.json`` file (matched case-insensitively, so ``extra.JSON`` counts) is an error
+rather than being ignored, so a misnamed dataset file cannot silently shrink a gated suite.
+Subdirectories are not scanned.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import math
@@ -47,6 +50,9 @@ from agentscope.domain.evaluation import GateThresholds
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_DIR_JSON_FILES = 200
 MAX_DEPTH = 32
+# RFC 7493 (I-JSON): larger integers are read differently by parsers that use doubles (the
+# dashboard, jq, JavaScript), and past float range they cannot be compared numerically at all.
+MAX_SAFE_INTEGER = 2**53 - 1
 DATASET_SUFFIX = ".dataset.json"
 BASELINE_SUFFIX = ".baseline.json"
 GATE_FILE = "gate.json"
@@ -158,7 +164,9 @@ def _json_files(root: Path) -> list[Path]:
     try:
         with os.scandir(root) as entries:
             for entry in entries:
-                if entry.name.endswith(".json"):
+                # Case-insensitive: on case-insensitive file systems "x.JSON" is just as much a
+                # JSON file, and must be reported rather than silently left out.
+                if entry.name.lower().endswith(".json"):
                     names.append(entry.name)
                     if len(names) > MAX_DIR_JSON_FILES:
                         raise DatasetError(
@@ -271,12 +279,22 @@ def _inspect(document: Any) -> list[Issue]:
             issues.append(
                 Issue(_pointer(link), f"non-finite number {value.literal} is not allowed")
             )
+        elif type(value) is int and not -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
+            issues.append(
+                Issue(
+                    _pointer(link),
+                    f"integer outside +/-{MAX_SAFE_INTEGER} is not portable JSON; "
+                    "write it as a string or a float",
+                )
+            )
 
     def entries(node: dict[str, Any] | list[Any], link: _Link) -> Iterator[tuple[Any, Any]]:
         if isinstance(node, list):
             return enumerate(node)
         if isinstance(node, _RepeatedKeys):
-            issues.extend(Issue(_pointer((link, k)), "duplicate key") for k in node.repeated)
+            # Bounded: one object may repeat a key hundreds of thousands of times.
+            repeated = itertools.islice(node.repeated, _MAX_ISSUES)
+            issues.extend(Issue(_pointer((link, k)), "duplicate key") for k in repeated)
         for key in node:
             if _SURROGATE.search(key):
                 issues.append(Issue(_pointer((link, key)), "key contains an unpaired surrogate"))

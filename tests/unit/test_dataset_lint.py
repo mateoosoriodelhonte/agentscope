@@ -292,3 +292,100 @@ def test_datasets_without_an_agent_are_only_structurally_checked(check: Any) -> 
 def test_issues_come_out_in_document_order(check: Any) -> None:
     found = check(dataset({}, {**ANSWER, "tool_order": ["search_documents"]}, {}))
     assert [path for _, path, _ in found] == ["/cases/0", "/cases/1/tool_order/0", "/cases/2"]
+
+
+def test_canary_length_is_measured_on_the_folded_text(check: Any) -> None:
+    # 13 characters as written, but only 10 once spaces are folded away.
+    found = check(dataset({**ANSWER, "forbidden_output_substrings": ["AS CANARY 1 2"]}))
+    assert found == [
+        ("error", "/cases/0/forbidden_output_substrings/0", "canary shorter than 12 characters")
+    ]
+
+
+def test_forbidden_substrings_that_fold_to_nothing_are_errors(check: Any) -> None:
+    found = check(dataset({**ANSWER, "forbidden_output_substrings": [" \t", "​"]}))
+    assert paths(found) == [
+        "/cases/0/forbidden_output_substrings/0",
+        "/cases/0/forbidden_output_substrings/1",
+    ]
+    assert all("is empty" in message for _, _, message in found)
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        {"match": "exact", "value": "Halden & Roe"},
+        {"match": "normalized", "value": "  HALDEN & Roe."},
+        {"match": "contains", "value": "Halden", "max_chars": 40},
+        {"match": "one_of", "values": ["Halden & Roe", "Halden and Roe"]},
+    ],
+)
+def test_a_forbidden_substring_in_every_correct_answer_is_a_contradiction(
+    check: Any, expected: dict[str, Any]
+) -> None:
+    found = check(dataset({"expected": expected, "forbidden_output_substrings": ["halden"]}))
+    assert found == [
+        (
+            "error",
+            "/cases/0/forbidden_output_substrings/0",
+            "every correct answer contains it, so the case can never pass",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        {"match": "one_of", "values": ["Halden & Roe", "the cooperative"]},
+        {"match": "one_of", "values": ["Halden & Roe", 7]},
+        {"match": "numeric", "value": 1987},
+    ],
+)
+def test_a_forbidden_substring_some_correct_answer_avoids_is_fine(
+    check: Any, expected: dict[str, Any]
+) -> None:
+    case = {"expected": expected, "forbidden_output_substrings": ["halden", "1987"]}
+    assert check(dataset(case)) == []
+
+
+def test_expectations_the_output_schema_rules_out_are_errors(check: Any) -> None:
+    found = check(
+        dataset(
+            {"expected": {"field": "anwser", "value": "Halden & Roe"}},
+            {"success_criteria": {"expected_output_status": "cannot_complete"}},
+            {"expected": {"field": "citations.0", "value": "doc-meridian-footbridge"}},
+        )
+    )
+    assert [(sev, path) for sev, path, _ in found] == [
+        ("error", "/cases/0/expected/field"),
+        ("error", "/cases/1/success_criteria/expected_output_status"),
+    ]
+    assert "no field 'anwser'" in found[0][2]
+    assert "cannot report status 'cannot_complete'" in found[1][2]
+
+
+def test_faults_beyond_the_reachable_calls_never_fire(check: Any) -> None:
+    # v1 makes at most 8 calls to a tool (8 steps, no retries); v2 and v3 retry once, so 16.
+    case = {**ANSWER, "faults": [{"tool": "retrieve_document", "kind": "error", "on_call": 9}]}
+    assert paths(check(dataset(case), "research_assistant@v1")) == ["/cases/0/faults/0/on_call"]
+    assert check(dataset(case), "research_assistant@v2") == []
+    found = check(dataset(case))
+    assert [(sev, path) for sev, path, _ in found] == [("warning", "/cases/0/faults/0/on_call")]
+    assert found[0][2].endswith("(only for research_assistant@v1)")
+
+
+def test_required_calls_must_fit_the_step_limit_and_the_budgets(check: Any) -> None:
+    calls = [{"tool": "search_documents", "min_calls": 5}, {"tool": "retrieve_document"}]
+    found = check(
+        dataset(
+            {"expected_tool_calls": calls, "limits": {"max_steps": 5}},
+            {"expected_tool_calls": calls, "success_criteria": {"max_tool_calls": 5}},
+            {"expected_tool_calls": calls, "success_criteria": {"max_steps_budget": 5}},
+            {"expected_tool_calls": calls, "success_criteria": {"max_tool_calls": 6}},
+        )
+    )
+    assert paths(found) == [
+        "/cases/0/expected_tool_calls",
+        "/cases/1/success_criteria/max_tool_calls",
+        "/cases/2/success_criteria/max_steps_budget",
+    ]

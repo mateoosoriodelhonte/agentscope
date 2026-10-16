@@ -25,6 +25,7 @@ from agentscope.agents.base import AgentCatalog
 from agentscope.datasets.issues import Issue
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.datasets import DEGRADED_STATUSES, Dataset, EvalCase, MatchMode
+from agentscope.evaluation.normalize import normalize
 from agentscope.runtime.runner import effective_limits, effective_tools
 from agentscope.tools.registry import ToolRegistry
 
@@ -84,14 +85,28 @@ def lint(
             configs = catalog.get(agent).versions
         else:
             continue
-        issues += _across_versions(case, base, configs, registry)
+        issues += _across_versions(case, base, configs, registry, catalog)
     return issues
 
 
 def _across_versions(
-    case: EvalCase, base: str, configs: Sequence[AgentConfig], registry: ToolRegistry
+    case: EvalCase,
+    base: str,
+    configs: Sequence[AgentConfig],
+    registry: ToolRegistry,
+    catalog: AgentCatalog,
 ) -> list[Issue]:
-    found = [_agent_rules(case, base, config, registry) for config in configs]
+    known = set(catalog.names())
+    found = [
+        _agent_rules(
+            case,
+            base,
+            config,
+            registry,
+            catalog.get(config.agent).output_schema() if config.agent in known else None,
+        )
+        for config in configs
+    ]
     merged: list[Issue] = []
     seen: set[Issue] = set()
     for issues in found:
@@ -165,16 +180,36 @@ def _case_rules(case: EvalCase, base: str) -> list[Issue]:
             issues.append(
                 Issue(f"{base}/tool_order/{j}", f"{tool!r} is not in expected_tool_calls")
             )
+    needed = sum(call.min_calls for call in case.expected_tool_calls)
+    for budget in ("max_tool_calls", "max_steps_budget"):
+        limit = getattr(criteria, budget)
+        # Every executed call is also an attempted call and takes one step.
+        if limit is not None and needed > limit:
+            issues.append(
+                Issue(
+                    f"{base}/success_criteria/{budget}",
+                    f"expected_tool_calls need at least {needed} calls, more than this budget",
+                )
+            )
     task = _fold(case.task)
+    answers = _answer_texts(case)
     for j, substring in enumerate(case.forbidden_output_substrings):
         path = f"{base}/forbidden_output_substrings/{j}"
         folded = _fold(substring)
+        if not folded:
+            issues.append(Issue(path, "is empty once whitespace and format characters are removed"))
+            continue
         if folded in task:
             issues.append(
                 Issue(path, "occurs in the task text, so an agent quoting the task would fail")
             )
+        if answers and all(folded in answer for answer in answers):
+            issues.append(
+                Issue(path, "every correct answer contains it, so the case can never pass")
+            )
         if CANARY_MARKER in folded:
-            if len(substring) < MIN_CANARY_CHARS:
+            # Length after folding: that is the text policy_compliance actually searches for.
+            if len(folded) < MIN_CANARY_CHARS:
                 issues.append(Issue(path, f"canary shorter than {MIN_CANARY_CHARS} characters"))
             if folded in _corpus():
                 issues.append(
@@ -183,13 +218,62 @@ def _case_rules(case: EvalCase, base: str) -> list[Issue]:
     return issues
 
 
+def _answer_texts(case: EvalCase) -> list[str]:
+    """The folded minimal text of every acceptable answer, or [] when some acceptable answer
+    need not be a string (numeric matches, non-string options)."""
+    expected = case.expected
+    if expected is None or expected.match is MatchMode.NUMERIC:
+        return []
+    options = expected.values if expected.match is MatchMode.ONE_OF else [expected.value]
+    if not options or not all(isinstance(option, str) for option in options):
+        return []
+    # normalize() is what the matchers compare, so a correct answer contains at least this.
+    return [_fold(normalize(str(option))) for option in options]
+
+
 # --- rules that depend on the agent configuration ---------------------------------------
 
 
+def _output_rules(case: EvalCase, base: str, agent: str, schema: dict[str, Any]) -> list[Issue]:
+    """Expectations the agent's output schema makes impossible: an output carrying them would
+    fail schema_validity, which always applies."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or schema.get("additionalProperties") is not False:
+        return []
+    issues: list[Issue] = []
+    if case.expected is not None:
+        head = case.expected.field.split(".", 1)[0]
+        if head not in properties:
+            issues.append(
+                Issue(
+                    f"{base}/expected/field",
+                    f"the output of {agent} has no field {head!r}, so the answer can never match",
+                )
+            )
+    status = case.success_criteria.expected_output_status
+    declared = properties.get("status")
+    allowed = declared.get("enum") if isinstance(declared, dict) else None
+    if status is not None and isinstance(allowed, list) and status not in allowed:
+        choices = ", ".join(map(str, allowed))
+        issues.append(
+            Issue(
+                f"{base}/success_criteria/expected_output_status",
+                f"{agent} cannot report status {status!r} (allowed: {choices})",
+            )
+        )
+    return issues
+
+
 def _agent_rules(
-    case: EvalCase, base: str, config: AgentConfig, registry: ToolRegistry
+    case: EvalCase,
+    base: str,
+    config: AgentConfig,
+    registry: ToolRegistry,
+    output_schema: dict[str, Any] | None,
 ) -> list[Issue]:
     issues: list[Issue] = []
+    if output_schema is not None:
+        issues += _output_rules(case, base, config.agent, output_schema)
     schema_version = config.tool_schema_version
     permitted = effective_tools(config.tools, case.permitted_tools, case.forbidden_tools)
 
@@ -229,10 +313,29 @@ def _agent_rules(
                 )
     for j, name in enumerate(case.tool_order):
         check(f"{base}/tool_order/{j}", name, "the order can never be observed")
-    for k, fault in enumerate(case.faults):
-        check(f"{base}/faults/{k}/tool", fault.tool, "the fault can never fire")
 
     limits = effective_limits(config.limits, case.limits)
+    # One tool call per step; the fault plan counts runtime retries as calls too.
+    reachable = limits.max_steps * (config.retry.max_tool_retries + 1)
+    for k, fault in enumerate(case.faults):
+        if not check(f"{base}/faults/{k}/tool", fault.tool, "the fault can never fire"):
+            continue
+        if fault.on_call is not None and fault.on_call > reachable:
+            issues.append(
+                Issue(
+                    f"{base}/faults/{k}/on_call",
+                    f"a run makes at most {reachable} calls to {fault.tool!r}, so the fault can "
+                    "never fire",
+                )
+            )
+    needed = sum(call.min_calls for call in case.expected_tool_calls)
+    if needed > limits.max_steps:
+        issues.append(
+            Issue(
+                f"{base}/expected_tool_calls",
+                f"expects at least {needed} tool calls, but max_steps is {limits.max_steps}",
+            )
+        )
     worst = limits.tool_timeout_s * (config.retry.max_tool_retries + 1) * limits.max_steps
     if worst >= limits.run_timeout_s:
         issues.append(

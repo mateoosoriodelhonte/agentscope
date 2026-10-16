@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from fractions import Fraction
 from importlib import resources
 from pathlib import Path
 
@@ -192,3 +193,32 @@ def test_injections_compromise_v1_only_and_are_always_contained(
         assert _violations(case, traces[case.id, "v3"]) == [], case.id
     for trace in traces.values():
         assert all(i.tool in trace.permitted_tools for i in trace.tool_invocations if i.executed)
+
+
+def test_the_provisional_gate_admits_v2_and_rejects_v1(
+    research: Dataset, traces: dict[tuple[str, str], TraceRecord]
+) -> None:
+    """The thresholds in tests/fixtures/gate.json are calibrated on real results, not guessed:
+    research_assistant@v2 meets every rule the current engine can judge, v1 does not."""
+    gate = load_gate_file(FIXTURES / GATE_FILE)
+    assert gate.min_pass_rate is not None
+    assert gate.max_invalid_outputs is not None
+    schema = default_catalog().get("research_assistant").output_schema()
+
+    def meets_gate(version: str) -> bool:
+        results = [
+            evaluate_case(case, traces[case.id, version], schema, CURRENT_CHECKS)
+            for case in research.cases
+        ]
+        passed = sum(r.passed for r in results)
+        policy_cases = sum(bool(_violations(c, traces[c.id, version])) for c in research.cases)
+        return (
+            Fraction(passed, len(results)) >= Fraction(gate.min_pass_rate)
+            and sum(r.invalid_output for r in results) <= gate.max_invalid_outputs
+            and policy_cases <= (gate.max_policy_violation_cases or 0)
+            and sum(r.unauthorized_tool_executions for r in results)
+            <= (gate.max_unauthorized_tool_executions or 0)
+        )
+
+    assert meets_gate("v2")
+    assert not meets_gate("v1")

@@ -14,6 +14,7 @@ from agentscope.datasets.loader import (
     MAX_DEPTH,
     MAX_DIR_JSON_FILES,
     MAX_FILE_BYTES,
+    MAX_SAFE_INTEGER,
     classify,
     load_dataset_bytes,
     load_dataset_dir,
@@ -130,6 +131,34 @@ def test_non_finite_numbers_are_refused(literal: str) -> None:
     issue = only_issue(data)
     assert issue.path == "/cases/0/expected/tolerance"
     assert "non-finite" in issue.message
+
+
+@pytest.mark.parametrize("number", [2**53, -(2**53), 10**400])
+def test_integers_beyond_the_i_json_range_are_refused(number: int) -> None:
+    # Past 2**53 parsers that use doubles read another number; past float range numeric
+    # matching cannot even convert it.
+    data = (
+        b'{"name": "demo", "cases": [{"id": "c1", "task": "t", "expected": '
+        b'{"match": "numeric", "value": ' + str(number).encode() + b"}}]}"
+    )
+    issue = only_issue(data)
+    assert issue.path == "/cases/0/expected/value"
+    assert "not portable JSON" in issue.message
+
+
+def test_the_largest_safe_integer_loads() -> None:
+    dataset = load_dataset_bytes(
+        encode(with_case(expected={"match": "numeric", "value": MAX_SAFE_INTEGER}))
+    )
+    assert dataset.cases[0].expected is not None
+    assert dataset.cases[0].expected.value == MAX_SAFE_INTEGER
+
+
+def test_issue_lists_stay_bounded_for_floods_of_duplicate_keys() -> None:
+    flood = b",".join(b'"a": 1' for _ in range(10_000))
+    issues = issues_of(b'{"name": "demo", "description": {' + flood + b'}, "cases": []}')
+    assert 1 <= len(issues) <= 50
+    assert {i.message for i in issues} == {"duplicate key"}
 
 
 def test_unpaired_surrogates_are_refused_in_values_and_keys() -> None:
@@ -281,6 +310,20 @@ def test_unrecognized_json_files_are_errors(tmp_path: Path) -> None:
     with pytest.raises(DatasetError) as info:
         load_dataset_dir(tmp_path)
     assert info.value.issues[0].source == "extra-cases.json"
+
+
+@pytest.mark.parametrize("name", ["more.dataset.JSON", "Gate.json", "cases.Json"])
+def test_json_files_are_recognised_whatever_the_case_of_their_extension(
+    tmp_path: Path, name: str
+) -> None:
+    # Only the exact lower-case names are accepted; anything else that is JSON is reported
+    # instead of being silently left out of the suite.
+    two_case_files(tmp_path)
+    write(tmp_path, name, document(cases=[{"id": "x1", "task": "t"}]))
+    with pytest.raises(DatasetError) as info:
+        load_dataset_dir(tmp_path)
+    assert [i.source for i in info.value.issues] == [name]
+    assert "unrecognized JSON file" in info.value.issues[0].message
 
 
 def test_dataset_files_must_share_a_header(tmp_path: Path) -> None:

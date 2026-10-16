@@ -17,11 +17,12 @@ Only the top level of a dataset directory is read (subdirectories are ignored). 
 | `gate.json` | Regression-gate thresholds (`GateThresholds` in `agentscope.domain.evaluation`). |
 | `*.baseline.json` | Baselines for per-case regression checks. Written only by `agentscope eval --write-baseline`, never by hand, so every change shows up as a reviewable diff. |
 
-Any other `*.json` file is an error, so a misnamed dataset file cannot silently shrink the
-gated suite. The loader (`agentscope.datasets.loader`) also enforces its input limits here:
-at most 200 JSON files, 5 MiB per file, UTF-8 only, no duplicate keys, no NaN or Infinity,
-nesting depth at most 32, strict types, and symlinks that resolve outside the directory are
-skipped.
+Any other `*.json` file is an error (the extension is matched case-insensitively, so
+`extra.JSON` is reported too), so a misnamed dataset file cannot silently shrink the gated
+suite. The loader (`agentscope.datasets.loader`) also enforces its input limits here: at most
+200 JSON files, 5 MiB per file, UTF-8 only, no duplicate keys, no NaN or Infinity, integers
+within +/-(2**53 - 1), nesting depth at most 32, strict types, and symlinks that resolve
+outside the directory are skipped.
 
 ## Contents
 
@@ -29,7 +30,8 @@ skipped.
   `src/agentscope/datasets/builtin/research_assistant.json` (a test fails if they drift).
   Edit the built-in file, then copy it here.
 - `gate.json` holds **provisional** thresholds for `research_assistant@v2`. Final values are
-  set once the evaluation engine ships all ten checks.
+  set once the evaluation engine ships all ten checks. `tests/unit/test_dataset_builtin.py`
+  checks that v2 meets them and v1 does not, so they cannot drift away from real results.
 
 ### Why the provisional thresholds look like this
 
