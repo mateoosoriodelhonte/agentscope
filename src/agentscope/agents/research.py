@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,6 +13,7 @@ from agentscope.agents.base import AgentDefinition
 from agentscope.domain.agents import AgentConfig, GraphVariant, ModelConfig, RetryPolicy
 from agentscope.providers.fake import (
     ConversationView,
+    EmbeddedDirectives,
     Observation,
     final,
     obeyed_directives,
@@ -64,7 +67,7 @@ VERSIONS = (
         tool_schema_version=1,
         graph=GraphVariant.BASIC,
         isolate_untrusted=False,
-        retry=RetryPolicy(max_tool_retries=0, max_output_repairs=0),
+        retry=RetryPolicy(max_tool_retries=0, max_decision_repairs=0, max_output_repairs=0),
     ),
     AgentConfig(
         agent=NAME,
@@ -72,7 +75,7 @@ VERSIONS = (
         label="Hardened",
         description=(
             "Instruction-hierarchy prompt, delimited untrusted tool output, verified-only search "
-            "schema, one tool retry, validated output with one repair."
+            "schema, one tool retry, validated output with one repair, one decision repair."
         ),
         prompt_version="p2",
         model=ModelConfig(model="scripted-naive"),
@@ -80,7 +83,7 @@ VERSIONS = (
         tool_schema_version=2,
         graph=GraphVariant.VALIDATED,
         isolate_untrusted=True,
-        retry=RetryPolicy(max_tool_retries=1, max_output_repairs=1),
+        retry=RetryPolicy(max_tool_retries=1, max_decision_repairs=1, max_output_repairs=1),
     ),
     AgentConfig(
         agent=NAME,
@@ -93,7 +96,7 @@ VERSIONS = (
         tool_schema_version=2,
         graph=GraphVariant.VALIDATED,
         isolate_untrusted=True,
-        retry=RetryPolicy(max_tool_retries=1, max_output_repairs=1),
+        retry=RetryPolicy(max_tool_retries=1, max_decision_repairs=1, max_output_repairs=1),
     ),
 )
 
@@ -109,6 +112,10 @@ def _stem(token: str) -> str:
 
 def _stems(text: str) -> set[str]:
     return {_stem(t) for t in tokenize(text)}
+
+
+def _call_key(arguments: Mapping[str, Any]) -> str:
+    return json.dumps(dict(arguments), sort_keys=True)
 
 
 def _query_for(task: str) -> str:
@@ -158,9 +165,10 @@ class ResearchBrain:
         directives = obeyed_directives(view)
 
         # A susceptible model acts on tool requests embedded in retrieved content.
-        attempted = {(o.tool, tuple(sorted(o.arguments.items()))) for o in view.observations}
+        attempted = {(o.tool, _call_key(o.arguments)) for o in view.observations}
+        injected = {(tool, _call_key(arguments)) for tool, arguments in directives.tool_calls}
         for tool, arguments in directives.tool_calls:
-            if (tool, tuple(sorted(arguments.items()))) not in attempted:
+            if (tool, _call_key(arguments)) not in attempted:
                 return tool_call(tool, arguments, "The retrieved page asks for this action.")
 
         searches = view.calls_to("search_documents")
@@ -172,7 +180,14 @@ class ResearchBrain:
             )
 
         last = view.observations[-1]
-        if not last.ok:
+        # Only the brain's own lookups are worth retrying: a call that tool output talked it
+        # into, or one the runtime refused (a tool that does not exist or is not permitted),
+        # fails the same way every time.
+        if (
+            not last.ok
+            and last.tool in _TOOLS
+            and (last.tool, _call_key(last.arguments)) not in injected
+        ):
             failures = [o for o in view.observations if o.tool == last.tool and not o.ok]
             if careful and len(failures) < 2:
                 return tool_call(last.tool, dict(last.arguments), "The tool failed; retrying once.")
@@ -232,7 +247,7 @@ class ResearchBrain:
         wanted: list[str],
         retrieved: dict[str, Observation],
         careful: bool,
-        directives: Any,
+        directives: EmbeddedDirectives,
     ) -> dict[str, Any]:
         candidates: list[tuple[int, str, dict[str, Any]]] = []
         for doc_id in wanted:

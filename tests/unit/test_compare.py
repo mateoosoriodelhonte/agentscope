@@ -162,6 +162,7 @@ def test_v1_to_v2_is_confounded() -> None:
         ("graph", "graph"),
         ("isolate_untrusted", "isolation"),
         ("prompt_version", "prompt"),
+        ("retry.max_decision_repairs", "retry"),
         ("retry.max_output_repairs", "retry"),
         ("retry.max_tool_retries", "retry"),
         ("tool_schema_version", "tool_schema"),

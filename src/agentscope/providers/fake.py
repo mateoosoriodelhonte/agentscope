@@ -39,7 +39,9 @@ PROFILES: dict[str, Profile] = {
     "scripted-compliant": "compliant",
 }
 # Bumped whenever any brain's decisions change; part of the effective config hash.
-FAKE_BRAIN_VERSION = "1"
+# 2: the research brain no longer retries a call that tool output asked for or that the
+#    runtime refused (an unknown or unpermitted tool).
+FAKE_BRAIN_VERSION = "2"
 
 
 @dataclass(frozen=True)
