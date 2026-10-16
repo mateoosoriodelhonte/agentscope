@@ -212,11 +212,15 @@ async def test_api_key_never_appears_in_errors_even_when_echoed(
 
 async def test_api_key_never_appears_in_transport_errors(catalog: AgentCatalog) -> None:
     def refused(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError(f"refused while sending {request.headers}", request=request)
+        # httpx masks Authorization in Headers reprs, so put the raw value in the message.
+        raw = request.headers["authorization"]
+        assert API_KEY in raw
+        raise httpx.ConnectError(f"refused while sending {raw}", request=request)
 
     with pytest.raises(ProviderError) as caught:
         await provider(Server(refused)).generate(model_request(catalog))
     assert API_KEY not in str(caught.value)
+    assert API_KEY not in repr(caught.value)
     # The httpx error holds the request, Authorization header included: it is not chained.
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None

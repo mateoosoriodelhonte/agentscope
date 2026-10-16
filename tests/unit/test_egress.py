@@ -148,6 +148,7 @@ def test_credentials_require_https_for_non_loopback_hosts() -> None:
         ("not a url", "http:// or https://"),
         ("http://exa mple.com:11434", "invalid host or port"),
         ("http://127.0.0.1:99999", "invalid host or port"),
+        ("http://127.0.0.1:0", "invalid host or port"),  # never silently becomes port 80
         ("http://127.0.0.1:11434/a//b", "unsupported path"),
         ("http://127.0.0.1:11434/.hidden", "unsupported path"),
     ],

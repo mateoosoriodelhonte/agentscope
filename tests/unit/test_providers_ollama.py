@@ -203,6 +203,8 @@ async def test_missing_model_tells_the_user_to_pull_it_and_never_pulls(
         (httpx.Response(200, json={"message": {"content": 42}}), "no message content"),
         (httpx.Response(500, json={"error": "out of\nmemory"}), "HTTP 500: out of memory"),
         (httpx.Response(502, content=b"Bad Gateway"), r"HTTP 502$"),
+        # Nesting deep enough to exhaust the JSON parser's recursion limit.
+        (httpx.Response(200, content=b"[" * 200_000 + b"]" * 200_000), "not a JSON object"),
         (httpx.Response(307, headers={"Location": "http://evil.example/"}), "redirect"),
     ],
 )
@@ -213,6 +215,31 @@ async def test_bad_responses_become_provider_errors(
     with pytest.raises(ProviderError, match=message):
         await provider(server).generate(model_request(catalog))
     assert len(server.requests) == 1
+
+
+async def test_undecodable_body_becomes_a_provider_error(catalog: AgentCatalog) -> None:
+    """A body whose Content-Encoding is wrong fails while httpx reads it (DecodingError,
+    which is not a TransportError); it must still become a ProviderError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A stream, so the body is decoded by the client as it would be off the network.
+        body = httpx.ByteStream(b"definitely not gzip")
+        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=body)
+
+    with pytest.raises(ProviderError) as caught:
+        await provider(Server(handler)).generate(model_request(catalog))
+    assert str(caught.value) == "request to Ollama at 127.0.0.1:11434 failed (DecodingError)"
+    assert caught.value.__context__ is None
+
+
+async def test_server_error_text_is_made_printable(catalog: AgentCatalog) -> None:
+    hostile = "model \x1b[31mmissing\x1b[0m \u202eevil\u202c\r\nnext"
+    server = Server(lambda r: httpx.Response(500, json={"error": hostile}))
+    with pytest.raises(ProviderError) as caught:
+        await provider(server).generate(model_request(catalog))
+    message = str(caught.value)
+    assert message == "Ollama returned HTTP 500: model [31mmissing[0m evil next"
+    assert not any(c in message for c in "\x1b\u202e\u202c\r\n")
 
 
 async def test_refused_target_is_never_contacted(catalog: AgentCatalog) -> None:

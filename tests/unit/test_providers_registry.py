@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 from agentscope.agents.base import AgentCatalog
 from agentscope.api.schemas import ProviderStatus
 from agentscope.config import Settings
+from agentscope.providers import status as status_module
 from agentscope.providers.base import ModelProvider, ModelRequest, ModelResponse
 from agentscope.providers.fake import FakeModelProvider
 from agentscope.providers.http import EgressPolicy
@@ -143,6 +145,24 @@ async def test_unreachable_ollama(catalog: AgentCatalog) -> None:
     ollama = result["ollama"]
     assert (ollama.reachable, ollama.target) == (False, "127.0.0.1:11434")
     assert "cannot connect" in ollama.detail
+
+
+async def test_a_stalled_probe_is_cut_off(
+    catalog: AgentCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """httpx timeouts are per operation; the whole probe also has a deadline."""
+    monkeypatch.setattr(status_module, "PROBE_DEADLINE_S", 0.05)
+
+    async def stall(request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    server = Server(stall)  # type: ignore[arg-type]
+    result = await statuses(catalog, ollama=server)
+    ollama = result["ollama"]
+    assert (ollama.reachable, ollama.target) == (False, "127.0.0.1:11434")
+    assert "did not answer the probe within 0.05s" in ollama.detail
+    assert len(server.requests) == 1
 
 
 async def test_disabled_ollama_is_not_probed(catalog: AgentCatalog) -> None:

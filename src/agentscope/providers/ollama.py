@@ -20,6 +20,7 @@ from agentscope.providers.base import ModelRequest, ModelResponse, ProviderError
 from agentscope.providers.http import (
     EgressPolicy,
     announce,
+    printable,
     reported_usage,
     response_json,
     selectable_models,
@@ -109,4 +110,4 @@ class OllamaProvider:
         version = body.get("version")
         if not isinstance(version, str):
             raise ProviderError(f"{LABEL} returned no version")
-        return version[:40]
+        return printable(version, 40)

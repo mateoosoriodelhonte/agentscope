@@ -19,6 +19,9 @@ from agentscope.providers.ollama import OllamaProvider
 from agentscope.providers.openai_compat import OpenAICompatProvider
 
 PROBE_TIMEOUT_S = 2.0
+# Bound on one provider's whole probe. httpx timeouts apply per operation, so a server that
+# trickles bytes could otherwise hold a status request open indefinitely.
+PROBE_DEADLINE_S = 5.0
 
 _ENABLE_HINTS = {
     "ollama": "AGENTSCOPE_ENABLE_OLLAMA=true",
@@ -58,34 +61,40 @@ async def _probe(name: str, provider: ModelProvider | None, policy: EgressPolicy
         target = policy.target(name)
     except EgressDenied as exc:
         return ProviderStatus(name=name, enabled=True, deterministic=False, detail=str(exc))
+    if not isinstance(provider, OllamaProvider | OpenAICompatProvider):
+        return ProviderStatus(
+            name=name,
+            enabled=True,
+            deterministic=False,
+            target=target.address,
+            detail="enabled; this provider cannot be probed",
+        )
+    failure: str | None = None
     try:
-        if isinstance(provider, OllamaProvider):
-            version = await provider.version(PROBE_TIMEOUT_S)
-            models = await provider.list_models(PROBE_TIMEOUT_S)
-            detail = f"Ollama {version}; " + (
-                f"{len(models)} model(s) installed"
-                if models
-                else "no models installed; download one yourself with 'ollama pull <model>'"
-            )
-        elif isinstance(provider, OpenAICompatProvider):
-            models = await provider.list_models(PROBE_TIMEOUT_S)
-            detail = f"{len(models)} model(s) offered"
-        else:
-            return ProviderStatus(
-                name=name,
-                enabled=True,
-                deterministic=False,
-                target=target.address,
-                detail="enabled; this provider cannot be probed",
-            )
+        async with asyncio.timeout(PROBE_DEADLINE_S):
+            if isinstance(provider, OllamaProvider):
+                version = await provider.version(PROBE_TIMEOUT_S)
+                models = await provider.list_models(PROBE_TIMEOUT_S)
+                detail = f"Ollama {version}; " + (
+                    f"{len(models)} model(s) installed"
+                    if models
+                    else "no models installed; download one yourself with 'ollama pull <model>'"
+                )
+            else:
+                models = await provider.list_models(PROBE_TIMEOUT_S)
+                detail = f"{len(models)} model(s) offered"
+    except TimeoutError:
+        failure = f"{target.address} did not answer the probe within {PROBE_DEADLINE_S:g}s"
     except ProviderError as exc:
+        failure = str(exc)
+    if failure is not None:
         return ProviderStatus(
             name=name,
             enabled=True,
             deterministic=False,
             reachable=False,
             target=target.address,
-            detail=str(exc),
+            detail=failure,
         )
     return ProviderStatus(
         name=name,

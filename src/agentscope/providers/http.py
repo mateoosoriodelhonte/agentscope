@@ -80,7 +80,7 @@ class EgressTarget:
         """Why the policy refuses `request`, or None when it is allowed."""
         url = request.url
         host = url.raw_host.decode("ascii").lower()
-        port = url.port or _DEFAULT_PORTS.get(url.scheme)
+        port = _port(url)
         if (url.scheme, host, port) != (self.scheme, self.host, self.port):
             return f"{url.scheme}://{host}:{port} is not the configured {self.name} target"
         path = url.raw_path.decode("ascii")  # includes the query string, so none is allowed
@@ -146,6 +146,12 @@ class EgressPolicy:
             raise EgressDenied(reason) from None
 
 
+def _port(url: httpx.URL) -> int | None:
+    # httpx reports the scheme's default port as None. An explicit port 0 must stay 0 (and be
+    # refused), not silently become the default port.
+    return url.port if url.port is not None else _DEFAULT_PORTS.get(url.scheme)
+
+
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
         return ipaddress.ip_address(host)
@@ -176,8 +182,8 @@ def _target(
         raise EgressDenied(f"{name}: {setting} must not have a query or fragment")
     host = url.raw_host.decode("ascii").lower()
     ip = _ip(host)
-    port = url.port or _DEFAULT_PORTS[url.scheme]
-    if not (ip or _HOSTNAME.fullmatch(host)) or not 0 < port < 65536:
+    port = _port(url)
+    if not (ip or _HOSTNAME.fullmatch(host)) or port is None or not 0 < port < 65536:
         raise EgressDenied(f"{name}: {setting} has an invalid host or port")
     base_path = url.raw_path.decode("ascii").rstrip("/")
     if not all(_PATH_SEGMENT.fullmatch(segment) for segment in base_path.split("/")[1:]):
@@ -271,7 +277,9 @@ async def send(
             failure = f"{label} at {target.address} did not respond within {timeout_s:g}s"
         except httpx.ConnectError:
             failure = f"cannot connect to {label} at {target.address}; is it running?"
-        except httpx.TransportError as exc:
+        except httpx.HTTPError as exc:
+            # Every other httpx failure, including those that are not transport errors (for
+            # example DecodingError on a body whose Content-Encoding is wrong).
             failure = f"request to {label} at {target.address} failed ({type(exc).__name__})"
     if failure is not None:
         # Raised outside the handler so the httpx error, which holds the request and its
@@ -288,8 +296,14 @@ async def send(
 def _json(response: httpx.Response) -> Any:
     try:
         return json.loads(response.content)
-    except ValueError:  # includes undecodable bytes
+    except (ValueError, RecursionError):  # undecodable bytes, bad JSON, absurd nesting
         return None
+
+
+def printable(text: str, limit: int) -> str:
+    """Server-supplied text made safe to show: whitespace runs collapsed, control and
+    format characters (terminal escapes, bidi overrides) dropped, length capped."""
+    return "".join(c for c in " ".join(text.split()) if c.isprintable())[:limit]
 
 
 def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
@@ -300,7 +314,7 @@ def response_json(response: httpx.Response, label: str) -> dict[str, Any]:
         error = body.get("error") if isinstance(body, dict) else None
         if isinstance(error, dict):
             error = error.get("message")
-        detail = ": " + " ".join(error.split())[:200] if isinstance(error, str) else ""
+        detail = ": " + printable(error, 200) if isinstance(error, str) else ""
         raise ProviderError(f"{label} returned HTTP {response.status_code}{detail}")
     if not isinstance(body, dict):
         raise ProviderError(f"{label} returned a body that is not a JSON object")
