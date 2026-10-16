@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import ValidationError
 
 from agentscope.api.deps import JobsDep, ServicesDep, accepted, download, submit
 from agentscope.api.schemas import JobAccepted, RunCreate, RunDetail, RunList
@@ -73,11 +74,22 @@ async def create_run(body: RunCreate, services: ServicesDep, jobs: JobsDep) -> J
         config = services.resolve_agent(body.agent_ref, body.config)
     except (ValueError, LookupError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    case = (
-        EvalCase(id="adhoc", task=body.task, expected=body.expected, faults=body.faults)
-        if body.expected is not None
-        else None
-    )
+    try:
+        case = (
+            EvalCase(
+                id="adhoc",
+                task=body.task,
+                expected=body.expected,
+                faults=body.faults,
+                model_faults=body.model_faults,
+            )
+            if body.expected is not None
+            else None
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail="the run cannot be evaluated as a test case"
+        ) from exc
     request = RunRequest(
         config=config, task=body.task, faults=body.faults, model_faults=body.model_faults
     )

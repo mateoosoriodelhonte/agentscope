@@ -26,7 +26,7 @@ from agentscope.api.routes import (
     runs,
     settings,
 )
-from agentscope.api.security import LocalOnlyMiddleware
+from agentscope.api.security import LocalOnlyMiddleware, security_header_dict
 from agentscope.datasets.issues import Issue
 from agentscope.jobs import JobManager
 from agentscope.services import Services, build_services
@@ -103,7 +103,10 @@ def create_app(
     async def internal_error(request: Request, exc: Exception) -> JSONResponse:
         # Never a traceback in a response: the details go to the server log only.
         _log.error("unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path)
-        return JSONResponse({"detail": "internal error"}, status_code=500)
+        # This handler runs outside LocalOnlyMiddleware, so it adds the security headers.
+        return JSONResponse(
+            {"detail": "internal error"}, status_code=500, headers=security_header_dict()
+        )
 
     @app.get("/api/health", tags=["meta"])
     def health() -> dict[str, str]:

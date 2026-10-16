@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from agentscope.cli.common import Exit, console, fail, open_services
+from agentscope.cli.common import Exit, console, err, fail, open_services
 from agentscope.cli.output import emit_json, safe, table
 
 db_app = typer.Typer(help="Database maintenance.")
@@ -109,7 +109,8 @@ def db_purge(
         result = services.repository.purge(scope.value, moment)
     except PurgeIncomplete as exc:
         result, code = exc.result, Exit.ERROR
-        console.print(safe(str(exc), "yellow"))
+        # stderr: with --json, stdout carries exactly one JSON document.
+        err.print(safe(str(exc), "yellow"))
     if as_json:
         emit_json(result.model_dump(mode="json"))
     else:

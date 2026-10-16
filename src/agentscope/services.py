@@ -94,6 +94,39 @@ def egress_destinations(settings: Settings) -> list[str]:
     return allowed + refused
 
 
+# Settings holding a URL, shown in /api/settings with any credentials masked.
+_URL_SETTINGS = ("ollama_url", "openai_compatible_url", "otlp_endpoint")
+
+
+def display_url(raw: str) -> str:
+    """A configured URL safe to show: user info masked, query and fragment dropped. Plain
+    string handling, so even a malformed value (no scheme, bad port) never leaks them."""
+    scheme, separator, rest = raw.partition("://")
+    if not separator:
+        scheme, rest = "", raw
+    end = min((i for i in map(rest.find, "/?#") if i >= 0), default=len(rest))
+    authority, path = rest[:end], rest[end:]
+    if "@" in authority:
+        authority = "***@" + authority.rsplit("@", 1)[1]
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    return f"{scheme}{separator}{authority}{path}"
+
+
+def _otlp_statement(settings: Settings) -> str:
+    """What happens to traces, from the egress policy (never the raw configured URL)."""
+    if not settings.otlp_endpoint:
+        return "Traces are not exported anywhere (no OTLP endpoint is configured)."
+    policy = EgressPolicy.from_settings(settings)
+    target = policy.targets.get("otlp")
+    if target is None:
+        reason = policy.refusals.get("otlp", "not allowed")
+        return f"An OTLP endpoint is configured but refused, so no traces go there ({reason})."
+    return (
+        f"An OTLP endpoint is configured: trace export may send span data to {target.address}, "
+        "outside this database."
+    )
+
+
 def validation_issue(issue: Issue) -> ValidationIssue:
     path = f"{issue.source}#{issue.path}" if issue.source else issue.path
     return ValidationIssue(path=path, message=issue.message, severity=issue.severity)
@@ -178,11 +211,16 @@ class Services:
 
     def settings_view(self) -> SettingsView:
         storage = self.repository.inventory()
-        otlp = self.settings.otlp_endpoint
+        # SecretStr fields dump as "**********": keys, the API token and the DSN. Configured
+        # URLs are plain strings, so credentials or a query someone embedded in one are
+        # masked too (the egress policy refuses such URLs, but would not hide them here).
+        effective = self.settings.model_dump(mode="json")
+        for key in _URL_SETTINGS:
+            if isinstance(effective.get(key), str):
+                effective[key] = self.redactor.redact_text(display_url(effective[key]))
         return SettingsView(
             version=__version__,
-            # SecretStr fields dump as "**********": keys, the API token and the DSN.
-            effective=self.settings.model_dump(mode="json"),
+            effective=effective,
             storage=storage,
             egress=egress_destinations(self.settings),
             privacy=[
@@ -198,11 +236,9 @@ class Services:
                 "are masked here.",
                 "Model calls go only to the destinations listed under egress, and only when a "
                 "run selects that provider (or its status is checked).",
-                f"Traces are exported over OTLP to {otlp}."
-                if otlp
-                else "Traces are not exported anywhere (no OTLP endpoint is configured).",
-                "Token usage is shown only when a provider reports it, and cost only from rates "
-                "you configure; nothing is estimated.",
+                _otlp_statement(self.settings),
+                "Token usage is shown only when a provider reports it, never estimated. Cost is "
+                "shown only as an estimate from rates you configure.",
                 "Purging deletes the selected rows and compacts the database, so their contents "
                 "are gone from disk, not just unlinked.",
             ],

@@ -37,8 +37,10 @@ def list_datasets(services: ServicesDep) -> list[DatasetSummary]:
     responses={409: {"description": "name@version exists"}, 422: {"description": "invalid"}},
 )
 async def import_dataset(request: Request, services: ServicesDep) -> DatasetSummary:
+    body = await request.body()
     try:
-        dataset = load_dataset_bytes(await request.body())
+        # Parsing up to max_request_bytes is CPU work: keep it off the event loop.
+        dataset = await run_in_threadpool(load_dataset_bytes, body)
         return await run_in_threadpool(services.import_dataset, dataset)
     except DatasetError as exc:
         raise InvalidInput("the dataset is invalid", exc.issues) from exc
@@ -49,8 +51,9 @@ async def import_dataset(request: Request, services: ServicesDep) -> DatasetSumm
 @router.post("/validate", openapi_extra=_RAW_DATASET_BODY)
 async def validate_dataset(request: Request, services: ServicesDep) -> DatasetValidation:
     """Lints an untrusted document without importing it: problems are reported, not raised."""
+    body = await request.body()
     try:
-        dataset = load_dataset_bytes(await request.body())
+        dataset = await run_in_threadpool(load_dataset_bytes, body)
     except DatasetError as exc:
         return validation_report(None, exc.issues)
     return validation_report(dataset, await run_in_threadpool(services.validate_dataset, dataset))

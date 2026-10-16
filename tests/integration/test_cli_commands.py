@@ -218,3 +218,54 @@ def test_serve_remote_mode_needs_a_token(
     assert "a-long-remote-token" not in started.output
     assert "remote mode" in started.stderr
     assert uvicorn.calls[0]["host"] == "0.0.0.0"
+
+
+def test_serve_remote_mode_refuses_a_short_token(
+    uvicorn: FakeUvicorn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTSCOPE_API_TOKEN", "short-token")
+    get_settings.cache_clear()
+    refused = invoke("serve", "--host", "0.0.0.0", "--allow-remote")
+    assert refused.exit_code == 2
+    assert "at least 16 characters" in refused.output
+    assert "short-token" not in refused.output
+    assert not uvicorn.calls
+
+
+def test_serve_remote_mode_hints_at_allowed_hosts(
+    uvicorn: FakeUvicorn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTSCOPE_API_TOKEN", "a-long-remote-token-0123456789")
+    get_settings.cache_clear()
+    started = invoke("serve", "--host", "0.0.0.0", "--allow-remote")
+    assert started.exit_code == 0, started.output
+    assert "--allowed-host" in started.stderr
+
+
+def test_incomplete_purge_keeps_json_output_parseable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentscope.api.schemas import PurgeResult
+    from agentscope.storage.repository import PurgeIncomplete, Repository
+
+    partial = PurgeResult(deleted={"runs": 2}, size_bytes_before=10, size_bytes_after=8)
+
+    def incomplete(*_args: object) -> PurgeResult:
+        raise PurgeIncomplete("a reader kept the WAL", partial)
+
+    monkeypatch.setattr(Repository, "purge", incomplete)
+    result = invoke("db", "purge", "--yes", "--json")
+    assert result.exit_code == 3
+    assert json.loads(result.stdout) == partial.model_dump(mode="json")
+    assert "a reader kept the WAL" in result.stderr
+
+
+def test_an_unparseable_database_url_is_never_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentscope.config import Settings
+
+    for dsn in ("not a url with secret-pw-0123", "postgresql://u:secret-pw-0123@host:abc/db"):
+        assert "secret-pw-0123" not in Settings(database_url=dsn).database_location
+    monkeypatch.setenv("AGENTSCOPE_DATABASE_URL", "not a url with secret-pw-0123")
+    get_settings.cache_clear()
+    result = invoke("datasets", "list")
+    assert result.exit_code == 3
+    assert "unparseable database URL" in result.output
+    assert "secret-pw-0123" not in result.output

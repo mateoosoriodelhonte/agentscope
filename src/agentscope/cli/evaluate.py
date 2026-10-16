@@ -102,7 +102,11 @@ def _baseline(
         return read_baseline(path)
     if check and source.directory is not None:
         candidate = source.directory / f"{config.ref}{BASELINE_SUFFIX}"
-        if candidate.is_file() and not escapes(candidate, source.directory):
+        if escapes(candidate, source.directory):
+            err.print(
+                safe(f"warning: ignoring {candidate}: symlink resolves outside the directory")
+            )
+        elif candidate.is_file():
             return read_baseline(candidate)
     return None
 

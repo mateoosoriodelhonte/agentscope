@@ -44,6 +44,10 @@ app.command("eval")(eval_command)
 app.command("compare")(compare_command)
 
 
+# Remote mode refuses shorter API tokens.
+MIN_API_TOKEN_CHARS = 16
+
+
 def _parse_fault(raw: str) -> FaultSpec:
     """`tool:kind[:on_call]`, e.g. `search_documents:timeout` or `retrieve_document:error:2`."""
     parts = raw.split(":")
@@ -244,6 +248,13 @@ def serve(
             "'Authorization: Bearer <token>'",
             Exit.INVALID,
         )
+    if remote and len(token) < MIN_API_TOKEN_CHARS:
+        # A short token on a network-exposed server can be guessed.
+        raise fail(
+            f"AGENTSCOPE_API_TOKEN must be at least {MIN_API_TOKEN_CHARS} characters for "
+            "remote mode (e.g. `python -c 'import secrets; print(secrets.token_urlsafe(32))'`)",
+            Exit.INVALID,
+        )
     services = open_services()
     err.print(safe(f"AgentScope {__version__} on http://{bind}:{bind_port}", "bold"))
     err.print(safe(f"data: {settings.database_location}", "dim"), soft_wrap=True)
@@ -260,6 +271,14 @@ def serve(
         err.print(safe(f"  {destination}", "dim"), soft_wrap=True)
     if remote:
         err.print(safe("remote mode: every request requires the API token", "yellow"))
+        if not allowed_host:
+            err.print(
+                safe(
+                    "only loopback Host headers are accepted; pass --allowed-host with the "
+                    "name or address remote clients use",
+                    "yellow",
+                )
+            )
     uvicorn.run(
         create_app(services, api_token=token if remote else None, allowed_hosts=allowed_host or ()),
         host=bind,

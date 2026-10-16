@@ -212,6 +212,37 @@ def test_gate_symlink_escaping_the_directory_is_ignored(tmp_path: Path) -> None:
     assert document(result)["gate"]["rules"][0]["threshold"] == 1.0
 
 
+def test_baseline_symlink_escaping_the_directory_is_ignored(tmp_path: Path) -> None:
+    directory = suite_dir(tmp_path, {"max_new_regressions": 0})
+    outside = tmp_path / "outside.baseline.json"
+    written = invoke(
+        "eval",
+        "--dataset",
+        directory,
+        "--agent",
+        "research_assistant@v2",
+        "--no-save",
+        "--write-baseline",
+        outside,
+    )
+    assert written.exit_code == 0, written.output
+    (directory / "research_assistant@v2.baseline.json").symlink_to(outside)
+    result = invoke(
+        "eval",
+        "--dataset",
+        directory,
+        "--agent",
+        "research_assistant@v2",
+        "--check",
+        "--json",
+        "--no-save",
+    )
+    # The baseline outside the directory was skipped, so the regression rule cannot pass.
+    assert result.exit_code == 1
+    assert "ignoring" in result.stderr
+    assert document(result)["gate"]["rules"][0]["detail"] == "requires a baseline"
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [

@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -90,7 +91,11 @@ class Settings(BaseSettings):
     @property
     def database_location(self) -> str:
         """The DSN with its password masked, safe to print."""
-        return make_url(self.effective_database_url).render_as_string(hide_password=True)
+        try:
+            return make_url(self.effective_database_url).render_as_string(hide_password=True)
+        except (ArgumentError, ValueError):
+            # Never echo a DSN that cannot be parsed: the password could not be located.
+            return "(unparseable database URL; check AGENTSCOPE_DATABASE_URL)"
 
     @property
     def is_loopback(self) -> bool:

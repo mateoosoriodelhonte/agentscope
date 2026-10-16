@@ -36,6 +36,24 @@ def test_run_lifecycle_with_adhoc_evaluation(client: TestClient) -> None:
     assert listing["items"][0]["passed"] is True
 
 
+def test_adhoc_case_records_the_injected_model_faults(client: TestClient) -> None:
+    model_faults = [{"kind": "invalid_json", "on_call": 1, "times": 1}]
+    run_id = run_job(
+        client,
+        "/api/runs",
+        {
+            "agent_ref": "research_assistant@v2",
+            "task": TASK,
+            "model_faults": model_faults,
+            "expected": {"value": "1987"},
+        },
+    )["resource_id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["trace"]["model_faults"][0]["kind"] == "invalid_json"
+    # The stored test case says what was injected, like a dataset case would.
+    assert detail["case"]["model_faults"][0]["kind"] == "invalid_json"
+
+
 def test_run_list_filters(client: TestClient) -> None:
     # The footbridge document carries an injected instruction that v1 obeys: a blocked call.
     blocked = run_job(client, "/api/runs", {"agent_ref": "research_assistant@v1", "task": TASK})[

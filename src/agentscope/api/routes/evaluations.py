@@ -5,6 +5,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from agentscope.api.deps import (
@@ -68,7 +69,10 @@ async def create_evaluation(
     body: EvaluationCreate, services: ServicesDep, jobs: JobsDep
 ) -> JobAccepted:
     """Start a suite in the background; poll the job, then GET /api/evaluations/{resource_id}."""
-    dataset, config = suite_inputs(services, body.dataset, body.agent_ref, body.config)
+    # Loading and linting a stored dataset is blocking work: keep it off the event loop.
+    dataset, config = await run_in_threadpool(
+        suite_inputs, services, body.dataset, body.agent_ref, body.config
+    )
     suite_id = str(uuid.uuid4())
 
     async def work(job: Job) -> None:

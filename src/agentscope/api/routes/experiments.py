@@ -60,8 +60,12 @@ async def create_experiment(
 
     if body.dataset is None or body.a is None or body.b is None:
         raise HTTPException(status_code=422, detail="provide dataset, a and b")
-    dataset, a_config = suite_inputs(services, body.dataset, body.a.agent_ref, body.a.config)
-    _, b_config = suite_inputs(services, body.dataset, body.b.agent_ref, body.b.config)
+    dataset, a_config = await run_in_threadpool(
+        suite_inputs, services, body.dataset, body.a.agent_ref, body.a.config
+    )
+    _, b_config = await run_in_threadpool(
+        suite_inputs, services, body.dataset, body.b.agent_ref, body.b.config
+    )
     experiment_id = str(uuid.uuid4())
 
     async def work(job: Job) -> None:

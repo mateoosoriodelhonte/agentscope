@@ -189,3 +189,19 @@ def test_agents_endpoint(client: TestClient) -> None:
     assert [v["version"] for v in research["versions"]] == ["v1", "v2", "v3"]
     assert research["output_schema"]["type"] == "object"
     assert {tool["name"] for tool in body["tools"]} >= {"search_documents", "lookup_record"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://admin:pw-0123@127.0.0.1:11434/v1", "http://***@127.0.0.1:11434/v1"),
+        ("https://host.example/v1?api_key=k-0123#frag", "https://host.example/v1"),
+        ("admin:pw-0123@host.example:8080", "***@host.example:8080"),  # no scheme
+        ("http://u:pw-0123@host:notaport/x", "http://***@host:notaport/x"),
+    ],
+)
+def test_display_url_never_shows_credentials_or_queries(raw: str, shown: str) -> None:
+    from agentscope.services import display_url
+
+    assert display_url(raw) == shown

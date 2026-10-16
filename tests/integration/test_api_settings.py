@@ -145,6 +145,8 @@ def test_errors_are_json_without_tracebacks(
         assert response.status_code == 500
         assert response.json() == {"detail": "internal error"}
         assert "Traceback" not in response.text
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert "default-src 'self'" in response.headers["content-security-policy"]
 
         invalid = c.post(
             "/api/runs",
@@ -159,3 +161,53 @@ def test_errors_are_json_without_tracebacks(
         wrong_method = c.post("/api/health", headers=MUTATION)
         assert wrong_method.status_code == 404
         assert wrong_method.json() == {"detail": "not found"}
+
+
+def test_settings_view_masks_credentials_embedded_in_urls(tmp_path: Path) -> None:
+    # Egress refuses URLs with credentials, but the settings view must not echo them either.
+    settings = Settings(
+        data_dir=tmp_path / "urls",
+        enable_ollama=True,
+        ollama_url="http://admin:ollama-pass-0123@127.0.0.1:11434",
+        otlp_endpoint="https://collector.example.com:4318/v1/traces?api_key=otlp-key-0123456",
+    )
+    svc = build_services(settings)
+    try:
+        with TestClient(create_app(svc, web_dist=tmp_path / "none"), base_url=BASE_URL) as c:
+            response = c.get("/api/settings")
+    finally:
+        svc.repository.engine.dispose()
+    assert response.status_code == 200
+    assert "ollama-pass-0123" not in response.text
+    assert "otlp-key-0123456" not in response.text
+    view = response.json()
+    assert view["effective"]["ollama_url"] == "http://***@127.0.0.1:11434"
+    assert view["effective"]["otlp_endpoint"] == "https://collector.example.com:4318/v1/traces"
+    # The OTLP endpoint is refused (not loopback, not allow-listed): nothing is exported.
+    otlp = next(line for line in view["privacy"] if "OTLP" in line)
+    assert "refused" in otlp
+    assert not any("nothing is estimated" in line for line in view["privacy"])
+
+
+def test_a_full_queue_answers_429(
+    services: Services, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentscope.jobs import JobManager
+
+    async def stall(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(60)  # cancelled when the client (and its lifespan) closes
+
+    monkeypatch.setattr(services, "run_case", stall)
+    app = create_app(
+        services,
+        web_dist=tmp_path / "none",
+        jobs_manager=JobManager(max_running=1, max_queued=1),
+    )
+    body = {"agent_ref": "research_assistant", "task": "Ferry crossing time?"}
+    with TestClient(app, base_url=BASE_URL) as c:
+        assert post(c, "/api/runs", body).status_code == 202  # running
+        assert post(c, "/api/runs", body).status_code == 202  # queued
+        full = post(c, "/api/runs", body)
+        assert full.status_code == 429
+        assert "try again" in full.json()["detail"]
+        assert post(c, "/api/demo/seed").status_code == 429
