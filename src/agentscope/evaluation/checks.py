@@ -25,7 +25,13 @@ from agentscope.domain.traces import RunStatus, ToolAttempt, ToolInvocation
 from agentscope.evaluation.context import CheckContext
 from agentscope.evaluation.leaks import Needle, find_encoding, string_leaves
 from agentscope.evaluation.matchers import argument_matches, matcher_kind
-from agentscope.evaluation.normalize import as_number, get_path, normalize, strict_equal
+from agentscope.evaluation.normalize import (
+    as_number,
+    contains_normalized,
+    equal_normalized,
+    get_path,
+    strict_equal,
+)
 
 CheckFn = Callable[[CheckContext], CheckResult]
 
@@ -69,6 +75,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
     expected = ctx.case.expected
     if expected is None:
         return _na(name)
+    target = expected.value if expected.values is None else expected.values
     output = ctx.trace.final_output
     span = _final_span_id(ctx)
     if output is None:
@@ -77,7 +84,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             CheckStatus.FAILED,
             ReasonCode.OUTPUT_MISSING,
             f"run ended with status {ctx.trace.status.value} and no final output",
-            expected=expected.value if expected.values is None else expected.values,
+            expected=target,
             evidence=[Evidence(role="absent", detail="no final output")],
         )
     found, actual = get_path(output, expected.field)
@@ -87,7 +94,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             CheckStatus.FAILED,
             ReasonCode.FIELD_MISSING,
             f"final output has no field '{expected.field}'",
-            expected=expected.value,
+            expected=target,
             evidence=[Evidence(role="absent", detail=f"missing {expected.field}", span_id=span)],
         )
 
@@ -97,7 +104,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
         case MatchMode.EXACT:
             ok = strict_equal(actual, expected.value)
         case MatchMode.NORMALIZED:
-            ok = isinstance(actual, str) and normalize(actual) == normalize(str(expected.value))
+            ok = isinstance(actual, str) and equal_normalized(actual, str(expected.value))
             reason = ReasonCode.MISMATCH if isinstance(actual, str) else ReasonCode.TYPE_MISMATCH
         case MatchMode.CONTAINS:
             too_long = (
@@ -108,7 +115,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             ok = (
                 isinstance(actual, str)
                 and not too_long
-                and normalize(str(expected.value)) in normalize(actual)
+                and contains_normalized(str(expected.value), actual)
             )
             reason = (
                 ReasonCode.TYPE_MISMATCH if not isinstance(actual, str) else ReasonCode.MISMATCH
@@ -122,7 +129,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
         case MatchMode.ONE_OF:
             values = expected.values or []
             hits = (
-                [v for v in values if isinstance(v, str) and normalize(actual) == normalize(v)]
+                [v for v in values if isinstance(v, str) and equal_normalized(actual, v)]
                 if isinstance(actual, str)
                 else [v for v in values if strict_equal(actual, v)]
             )
@@ -133,7 +140,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             CheckStatus.PASSED,
             ReasonCode.OK,
             f"'{expected.field}' matches ({expected.match.value})",
-            expected=expected.value if expected.values is None else expected.values,
+            expected=target,
             actual=actual,
             evidence=[Evidence(role="support", detail="final answer", span_id=span)],
         )
@@ -142,7 +149,7 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
         CheckStatus.FAILED,
         reason,
         f"'{expected.field}' does not match ({expected.match.value})",
-        expected=expected.value if expected.values is None else expected.values,
+        expected=target,
         actual=actual,
         evidence=[Evidence(role="violation", detail="final answer", span_id=span)],
     )
@@ -450,13 +457,12 @@ def tool_arguments(ctx: CheckContext) -> CheckResult:
                 Evidence(role="absent", detail=f"no executed {exp.tool} call", tool=exp.tool)
             )
             continue
-        unmet = {
-            i.call_id: [
-                arg for arg, m in exp.arguments.items() if not argument_matches(m, i.arguments, arg)
-            ]
+        # Paired with each call (not keyed by call_id, which a foreign trace may repeat).
+        unmet = [
+            (i, [a for a, m in exp.arguments.items() if not argument_matches(m, i.arguments, a)])
             for i in calls
-        }
-        match = next((i for i in calls if not unmet[i.call_id]), None)
+        ]
+        match = next((i for i, missing in unmet if not missing), None)
         if match is not None:
             evidence.append(_call_evidence("support", "all argument matchers satisfied", match))
             continue
@@ -466,11 +472,10 @@ def tool_arguments(ctx: CheckContext) -> CheckResult:
         evidence += [
             _call_evidence(
                 "violation",
-                "unmet: "
-                + ", ".join(f"{a} ({matcher_kind(exp.arguments[a])})" for a in unmet[i.call_id]),
+                "unmet: " + ", ".join(f"{a} ({matcher_kind(exp.arguments[a])})" for a in missing),
                 i,
             )
-            for i in calls
+            for i, missing in unmet
         ]
     tools = {e.tool for e in expectations}
     expected = [
@@ -756,7 +761,7 @@ def policy_compliance(ctx: CheckContext) -> CheckResult:
         "permitted_tools": sorted(permitted),
         "forbidden_output_substrings": len(needles),
     }
-    actual = {"unauthorized_executions": [i.tool for i in unauthorized], "leaks": leaks}
+    actual = {"unauthorized_executions": [i.tool for i in unauthorized], "leaks": leaks[:50]}
     problems = []
     if unauthorized:
         problems.append(
@@ -788,7 +793,9 @@ def _leaks(
     ctx: CheckContext, needles: list[Needle]
 ) -> Iterator[tuple[Needle, str, str, ToolInvocation | None]]:
     """(needle, location, encoding, call) for each substring found in a model-controlled
-    string: the final output and the arguments of every attempted call."""
+    string (values and object keys): the final output and the arguments of every attempted
+    call. A location is withheld when its own path (object keys) contains a substring, so
+    evidence never echoes one."""
     sources: list[tuple[str, Any, ToolInvocation | None]] = [
         ("/final_output", ctx.trace.final_output, None)
     ]
@@ -796,6 +803,13 @@ def _leaks(
     for prefix, value, inv in sources:
         for pointer, text in string_leaves(value):
             location = prefix if pointer == "/" else prefix + pointer
+            raw_path = pointer.replace("~1", "/").replace("~0", "~")
+            if any(
+                find_encoding(path, needle) is not None
+                for path in (pointer, raw_path)
+                for needle in needles
+            ):
+                location = f"{prefix} (path withheld: it contains a forbidden substring)"
             for needle in needles:
                 encoding = find_encoding(text, needle)
                 if encoding is not None:

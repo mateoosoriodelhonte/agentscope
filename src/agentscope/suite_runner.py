@@ -34,6 +34,11 @@ from agentscope.runtime.runner import AgentRunner, RunRequest
 # Called after each case with its trace (None when the run itself failed) and verdict.
 OnCase = Callable[[EvalCase, TraceRecord | None, CaseResult], Awaitable[None]]
 
+# Error codes the runtime records when AgentScope itself failed during a run (it catches
+# its own exceptions and returns a trace, so they never reach the try/except below). They
+# are harness errors, not agent failures.
+HARNESS_ERROR_CODES = frozenset({"internal_error", "internal_recursion_limit"})
+
 
 class IncompatibleDatasetError(ValueError):
     """The dataset (or some of its cases) targets a different agent."""
@@ -69,13 +74,16 @@ class SuiteRunner:
         baseline: Baseline | None = None,
         on_case: OnCase | None = None,
     ) -> SuiteResult:
-        """Input problems (wrong agent, unknown config, disabled provider, incomparable
-        baseline) raise before any case runs. Exceptions raised by `on_case` propagate: the
-        caller owns them."""
+        """Input problems (wrong agent, unknown config, disabled provider, no enabled
+        checks, incomparable baseline) raise before any case runs. Exceptions raised by
+        `on_case` propagate: the caller owns them."""
         self._catalog.validate(config)
         self._runner.provider(config.model.provider.value)
         self._check_agent(dataset, config)
         enabled = sorted(set(CHECKS) if checks is None else set(checks))
+        if not enabled:
+            # With nothing to judge, every case would pass.
+            raise ValueError("at least one check must be enabled")
         dataset_hash = dataset.content_hash()
         if baseline is not None:
             ensure_compatible(
@@ -92,9 +100,16 @@ class SuiteRunner:
             trace: TraceRecord | None = None
             try:
                 trace = await self._runner.run(run_request(case, config))
-                result = evaluate_case(case, trace, output_schema, enabled)
+                if trace.error_code in HARNESS_ERROR_CODES:
+                    result = self._harness_error(
+                        case, trace, f"{trace.error_code}: {trace.error or 'no detail'}"
+                    )
+                else:
+                    result = evaluate_case(case, trace, output_schema, enabled)
             except Exception as exc:
-                result = self._harness_error(case, trace, exc)
+                message = self._runner.redactor.redact_text(str(exc))
+                description = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+                result = self._harness_error(case, trace, description)
             if trace is not None:
                 usage[trace.run_id] = trace.usage
             results.append(result)
@@ -134,11 +149,10 @@ class SuiteRunner:
                 f"cannot run dataset {dataset.name!r} on {config.agent!r}: " + "; ".join(problems)
             )
 
-    def _harness_error(
-        self, case: EvalCase, trace: TraceRecord | None, exc: Exception
-    ) -> CaseResult:
-        """A failure of AgentScope itself, not of the agent: never counted as a pass."""
-        message = self._runner.redactor.redact_text(str(exc))[:300]
+    @staticmethod
+    def _harness_error(case: EvalCase, trace: TraceRecord | None, description: str) -> CaseResult:
+        """A failure of AgentScope itself, not of the agent: never counted as a pass, and
+        not judged by any check (so per-check rates measure only the agent)."""
         return CaseResult(
             case_id=case.id,
             case_hash=case.case_hash(),
@@ -146,7 +160,7 @@ class SuiteRunner:
             trace_id=trace.trace_id if trace else None,
             passed=False,
             status=trace.status if trace else None,
-            harness_error=f"{type(exc).__name__}: {message}" if message else type(exc).__name__,
+            harness_error=description[:300],
             steps=trace.steps if trace else 0,
             duration_ms=trace.duration_ms if trace else 0,
             tags=list(case.tags),

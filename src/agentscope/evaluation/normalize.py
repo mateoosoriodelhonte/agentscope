@@ -12,6 +12,8 @@ NORMALIZER_VERSION = "2"
 _WHITESPACE = re.compile(r"\s+")
 _EDGE_PUNCT = re.compile(r"^[\W_]+|[\W_]+$", re.UNICODE)
 _NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# Thousands separators are accepted only in groups of three ("12,500"), so "1,5" is not 15.
+_GROUPED_NUMBER = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
 
 
 def strip_format_chars(text: str) -> str:
@@ -37,16 +39,46 @@ def normalize(text: str) -> str:
     return _EDGE_PUNCT.sub("", fold(text))
 
 
+def _comparable(text: str) -> str:
+    """`normalize`, except that text made only of punctuation keeps its punctuation
+    (folded), so "/" and "?" stay distinct from each other and from ""."""
+    return normalize(text) or fold(text)
+
+
+def equal_normalized(a: str, b: str) -> bool:
+    return _comparable(a) == _comparable(b)
+
+
+def contains_normalized(needle: str, text: str) -> bool:
+    """`needle` occurs in `text`, both normalized.
+
+    Edge punctuation is trimmed from the needle only when something is left, so a
+    punctuation-only needle ("/", "?") is searched for as written instead of becoming ""
+    and matching every string. A needle that is empty after folding never matches.
+    """
+    target = _comparable(needle)
+    return bool(target) and target in fold(text)
+
+
 def is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def as_number(value: Any) -> float | None:
-    """A JSON number, or a string that is entirely a number. Booleans are never numbers."""
+    """A JSON number, or a string that is entirely a number. Booleans are never numbers,
+    and values too large for a float are not numbers either (they compare as None)."""
     if is_number(value):
-        number = float(value)
-    elif isinstance(value, str) and _NUMBER.match(value.strip().replace(",", "")):
-        number = float(value.strip().replace(",", ""))
+        try:
+            number = float(value)
+        except OverflowError:  # an int beyond the float range
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if _GROUPED_NUMBER.match(text):
+            text = text.replace(",", "")
+        if not _NUMBER.match(text):
+            return None
+        number = float(text)
     else:
         return None
     return number if math.isfinite(number) else None
@@ -57,7 +89,9 @@ def strict_equal(a: Any, b: Any) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     if is_number(a) and is_number(b):
-        return float(a) == float(b)
+        # Python compares int with float exactly: 2**53 + 1 != 2.0**53, and a huge int
+        # never overflows (converting both sides to float would do both wrong).
+        return bool(a == b)
     if type(a) is not type(b):
         return False
     if isinstance(a, dict):

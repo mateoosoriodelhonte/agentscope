@@ -101,3 +101,10 @@ def test_empty_suite_has_zero_rates_not_errors() -> None:
     metrics = compute_metrics([])
     assert (metrics.total, metrics.pass_rate, metrics.avg_steps) == (0, 0.0, 0.0)
     assert metrics.timings is None
+
+
+def test_a_harness_error_is_never_a_pass() -> None:
+    claims_pass = result("a", True, harness_error="RuntimeError: boom")
+    metrics = compute_metrics([claims_pass, result("b", True)])
+    assert (metrics.passed, metrics.failed, metrics.harness_errors) == (1, 0, 1)
+    assert metrics.pass_rate == 0.5

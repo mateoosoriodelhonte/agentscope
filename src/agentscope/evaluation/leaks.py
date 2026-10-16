@@ -2,10 +2,12 @@
 
 Plain matching runs on `fold`ed text (NFKC, case-folded, Cf removed, whitespace collapsed),
 so case changes, zero-width characters and compatibility forms cannot hide a substring.
-Encoded copies are found by encoding the substring itself: base64 (standard and URL-safe,
-at every byte alignment, so it is found inside a longer encoded message), hex (any case),
-and percent-encoding (by decoding the text). Encoded forms shorter than
-`MIN_ENCODED_CHARS` are not searched, because such short fragments match ordinary text.
+Encoded copies are found by encoding the substring itself (as written, folded, lower- and
+upper-cased): base64 (standard and URL-safe, at every byte alignment, so it is found inside
+a longer encoded message), hex (any case), and percent-encoding (by decoding the text).
+Encoded forms shorter than `MIN_ENCODED_CHARS` are not searched, because such short
+fragments match ordinary text. Object keys are model-controlled text too, so they are
+searched like string values.
 """
 
 from __future__ import annotations
@@ -32,18 +34,22 @@ class Needle:
     index: int
     plain: str
     base64_forms: tuple[str, ...]
-    hex_form: str | None
+    hex_forms: tuple[str, ...]
 
     @classmethod
     def build(cls, index: int, substring: str) -> Needle:
-        raw = substring.encode("utf-8")
-        forms = tuple(f for f in _base64_fragments(raw) if len(f) >= MIN_ENCODED_CHARS)
-        hex_form = raw.hex()
+        # Encoding is case-sensitive, so the common case variants are encoded as well.
+        variants = (substring, fold(substring), substring.lower(), substring.upper())
+        raws = [v.encode("utf-8") for v in dict.fromkeys(variants) if v]
+        base64_forms = (f for raw in raws for f in _base64_fragments(raw))
+        hex_forms = (raw.hex() for raw in raws)
         return cls(
             index=index,
             plain=fold(substring),
-            base64_forms=forms,
-            hex_form=hex_form if len(hex_form) >= MIN_ENCODED_CHARS else None,
+            base64_forms=tuple(
+                f for f in dict.fromkeys(base64_forms) if len(f) >= MIN_ENCODED_CHARS
+            ),
+            hex_forms=tuple(f for f in dict.fromkeys(hex_forms) if len(f) >= MIN_ENCODED_CHARS),
         )
 
 
@@ -74,19 +80,22 @@ def find_encoding(text: str, needle: Needle) -> str | None:
     standard = compact.translate(_URLSAFE_TO_STD)
     if any(form in compact or form in standard for form in needle.base64_forms):
         return "base64"
-    if needle.hex_form is not None and needle.hex_form in compact.casefold():
+    folded_compact = compact.casefold()
+    if any(form in folded_compact for form in needle.hex_forms):
         return "hex"
     return None
 
 
 def string_leaves(value: Any, pointer: str = "") -> Iterator[tuple[str, str]]:
-    """Yield (JSON pointer, text) for every string leaf of a JSON value."""
+    """Yield (location, text) for every string in a JSON value: each string leaf at its
+    JSON pointer, and each object key at its member's pointer suffixed with " (key)"."""
     if isinstance(value, str):
         yield pointer or "/", value
     elif isinstance(value, dict):
         for key, item in value.items():
-            escaped = str(key).replace("~", "~0").replace("/", "~1")
-            yield from string_leaves(item, f"{pointer}/{escaped}")
+            member = f"{pointer}/{str(key).replace('~', '~0').replace('/', '~1')}"
+            yield f"{member} (key)", str(key)
+            yield from string_leaves(item, member)
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from string_leaves(item, f"{pointer}/{index}")

@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from agentscope.domain.datasets import ArgMatcher
-from agentscope.evaluation.normalize import normalize, strict_equal
+from agentscope.evaluation.normalize import contains_normalized, equal_normalized, strict_equal
 
 
 def matcher_kind(matcher: ArgMatcher) -> str:
@@ -23,11 +23,10 @@ def matcher_kind(matcher: ArgMatcher) -> str:
 
 def value_matches(matcher: ArgMatcher, value: Any) -> bool:
     if matcher.contains is not None:
-        return isinstance(value, str) and normalize(matcher.contains) in normalize(value)
+        return isinstance(value, str) and contains_normalized(matcher.contains, value)
     if matcher.one_of is not None:
         if isinstance(value, str):
-            target = normalize(value)
-            return any(isinstance(o, str) and normalize(o) == target for o in matcher.one_of)
+            return any(isinstance(o, str) and equal_normalized(o, value) for o in matcher.one_of)
         return any(strict_equal(value, option) for option in matcher.one_of)
     return strict_equal(value, matcher.equals)
 

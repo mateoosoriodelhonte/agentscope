@@ -122,3 +122,39 @@ def test_missing_argument_never_matches(kind: str, arguments: dict[str, Any]) ->
     assert not argument_matches(
         matcher, {k: v for k, v in arguments.items() if k != "absent"}, "absent"
     )
+
+
+@given(
+    st.text(alphabet="/?.-_!#", min_size=1, max_size=5), st.text(alphabet="abc 123", max_size=20)
+)
+def test_punctuation_only_needles_are_not_wildcards(needle: str, text: str) -> None:
+    # Normalizing "/" would leave "", which is a substring of everything.
+    assert not value_matches(ArgMatcher(contains=needle), text)
+    assert value_matches(ArgMatcher(contains=needle), f"{text}{needle}{text}")
+
+
+@given(st.text(alphabet=" \t\n", min_size=1, max_size=3), st.text(max_size=20))
+def test_blank_needles_never_match(needle: str, text: str) -> None:
+    assert not value_matches(ArgMatcher(contains=needle), text)
+
+
+def test_punctuation_only_options_keep_their_punctuation() -> None:
+    root = ArgMatcher(one_of=["/"])
+    assert value_matches(root, "/")
+    for other in ("", "/..", "?", "-"):
+        assert not value_matches(root, other), other
+
+
+@given(st.integers(min_value=2**53, max_value=2**80))
+def test_large_integers_compare_exactly(number: int) -> None:
+    assert value_matches(ArgMatcher(equals=number), number)
+    assert not value_matches(ArgMatcher(equals=number), number + 1)
+    assert not value_matches(ArgMatcher(one_of=[number]), number + 1)
+
+
+def test_integers_beyond_the_float_range_do_not_crash() -> None:
+    huge = 10**400
+    assert not value_matches(ArgMatcher(equals=1.0), huge)
+    assert not value_matches(ArgMatcher(equals=huge), 1e308)
+    assert value_matches(ArgMatcher(equals=huge), huge)
+    assert value_matches(ArgMatcher(equals=3), 3.0)  # one JSON number type

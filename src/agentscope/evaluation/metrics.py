@@ -29,8 +29,9 @@ def compute_metrics(
 ) -> SuiteMetrics:
     """`usage` maps run ids to what the provider reported for that run (None = nothing)."""
     total = len(cases)
-    passed = sum(1 for c in cases if c.passed)
     harness_errors = sum(1 for c in cases if c.harness_error is not None)
+    # A harness error is never a pass, even on a result that claims one.
+    passed = sum(1 for c in cases if c.passed and c.harness_error is None)
     ran = [c for c in cases if c.run_id is not None]
     statuses = Counter(c.status.value for c in cases if c.status is not None)
     return SuiteMetrics(

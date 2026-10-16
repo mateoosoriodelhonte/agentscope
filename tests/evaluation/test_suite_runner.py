@@ -10,8 +10,9 @@ from agentscope.agents.base import AgentCatalog
 from agentscope.domain.agents import ProviderName
 from agentscope.domain.datasets import Dataset, EvalCase
 from agentscope.domain.evaluation import CaseResult, CheckName, GateThresholds
-from agentscope.domain.traces import TraceRecord
+from agentscope.domain.traces import RunStatus, TraceRecord
 from agentscope.evaluation.baseline import IncompatibleBaselineError, build_baseline
+from agentscope.providers.fake import ConversationView, FakeModelProvider
 from agentscope.runtime.runner import AgentRunner, RunRequest
 from agentscope.suite_runner import IncompatibleDatasetError, SuiteRunner
 
@@ -180,5 +181,49 @@ async def test_incompatible_baseline_is_rejected_before_running(
     with pytest.raises(IncompatibleBaselineError, match="dataset hash"):
         await suite_runner.run(
             changed, config, thresholds=GateThresholds(), baseline=baseline, on_case=hook
+        )
+    assert hook.calls == []
+
+
+class DefectiveBrain:
+    """A bug inside AgentScope's own fake model: the runtime catches it and records the run
+    as status error / internal_error instead of raising."""
+
+    def decide(self, view: ConversationView) -> dict[str, Any]:
+        raise RuntimeError("defect in the simulated model")
+
+
+async def test_internal_runtime_errors_are_harness_errors_not_agent_failures(
+    runner: AgentRunner, catalog: AgentCatalog
+) -> None:
+    defective = AgentRunner(
+        catalog, runner.tools, {"fake": FakeModelProvider({"research_assistant": DefectiveBrain()})}
+    )
+    hook = Recorder()
+    result = await SuiteRunner(defective, catalog).run(
+        DATASET, catalog.resolve("research_assistant@v2"), thresholds=GateThresholds(), on_case=hook
+    )
+    for case_result in result.cases:
+        assert case_result.harness_error == "internal_error: runtime error: RuntimeError"
+        assert (case_result.passed, case_result.status, case_result.checks) == (
+            False,
+            RunStatus.ERROR,
+            [],
+        )
+        assert case_result.run_id is not None
+    assert all(trace is not None for _, trace, _ in hook.calls)  # still handed over to persist
+    assert (result.metrics.harness_errors, result.metrics.failed) == (2, 0)
+    assert result.metrics.checks == {}
+    assert result.gate is not None
+    assert [r.name for r in result.gate.rules if not r.passed] == ["max_harness_errors"]
+
+
+async def test_an_empty_check_selection_is_rejected_before_running(
+    suite_runner: SuiteRunner, catalog: AgentCatalog
+) -> None:
+    hook = Recorder()
+    with pytest.raises(ValueError, match="at least one check"):
+        await suite_runner.run(
+            DATASET, catalog.resolve("research_assistant@v2"), checks=[], on_case=hook
         )
     assert hook.calls == []
