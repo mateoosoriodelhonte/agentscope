@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
@@ -20,6 +22,10 @@ from sqlalchemy.pool import ConnectionPoolEntry
 
 class DatabaseAheadError(RuntimeError):
     """The database was migrated by a newer AgentScope than the one running."""
+
+
+class MigrationIntegrityError(RuntimeError):
+    """A migration left rows that violate a foreign key; it was rolled back."""
 
 
 def normalize_url(url: str) -> str:
@@ -100,9 +106,40 @@ def upgrade(engine: Engine) -> str:
             f"database revision {current} is unknown to this AgentScope version; upgrade AgentScope"
         )
     config = alembic_config()
-    with engine.begin() as connection:
-        if connection.dialect.name == "postgresql":
-            connection.exec_driver_sql("SELECT pg_advisory_xact_lock(7426010)")
+    with migration_connection(engine) as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
     return head
+
+
+@contextmanager
+def migration_connection(engine: Engine) -> Iterator[Connection]:
+    """A connection in a transaction that Alembic can safely run on.
+
+    SQLite batch migrations rebuild a table (copy, drop, rename). With foreign keys enforced,
+    dropping a parent table deletes its rows first and cascades to every child, so
+    enforcement is off while migrating, all constraints are re-checked before commit, and
+    enforcement is restored before the connection returns to the pool. The PRAGMA is ignored
+    inside a transaction, hence the commits around it. PostgreSQL serializes concurrent
+    upgrades with an advisory lock instead.
+    """
+    with engine.connect() as connection:
+        sqlite = connection.dialect.name == "sqlite"
+        if sqlite:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
+        try:
+            with connection.begin():
+                if connection.dialect.name == "postgresql":
+                    connection.exec_driver_sql("SELECT pg_advisory_xact_lock(7426010)")
+                yield connection
+                if sqlite:
+                    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+                    if violations:
+                        raise MigrationIntegrityError(
+                            f"foreign key violations after migrating: {violations[:5]}"
+                        )
+        finally:
+            if sqlite:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
