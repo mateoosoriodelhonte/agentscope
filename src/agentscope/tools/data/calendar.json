@@ -1,0 +1,45 @@
+{
+  "_comment": "Synthetic, fictional calendar commitments for the staff in records.json. Weeks listed in 'weeks' are covered; a covered week with no entries for someone means nothing is booked.",
+  "weeks": ["2026-W43", "2026-W44", "2026-W45", "2026-W46", "2026-W47", "2026-W48"],
+  "commitments": {
+    "emp-odile": {
+      "2026-W45": [{"title": "On-call rotation", "hours": 8}],
+      "2026-W46": [{"title": "Payments incident review", "hours": 4}]
+    },
+    "emp-ravi": {
+      "2026-W44": [{"title": "Design system sprint", "hours": 16}],
+      "2026-W45": [{"title": "Rider interviews", "hours": 10}],
+      "2026-W46": [{"title": "Design system sprint", "hours": 12}]
+    },
+    "emp-mina": {
+      "2026-W44": [{"title": "Platform upgrade", "hours": 20}],
+      "2026-W45": [{"title": "Platform upgrade", "hours": 16}, {"title": "On-call rotation", "hours": 8}],
+      "2026-W47": [{"title": "On-call rotation", "hours": 12}]
+    },
+    "emp-sol": {
+      "2026-W44": [{"title": "Team management", "hours": 14}],
+      "2026-W45": [{"title": "Team management", "hours": 14}],
+      "2026-W46": [{"title": "Team management", "hours": 14}]
+    },
+    "emp-jonah": {
+      "2026-W45": [{"title": "App store release", "hours": 16}],
+      "2026-W46": [{"title": "Offline mode spike", "hours": 30}]
+    },
+    "emp-ilse": {
+      "2026-W44": [{"title": "Regression suite upkeep", "hours": 8}],
+      "2026-W46": [{"title": "Regression suite upkeep", "hours": 8}]
+    },
+    "emp-ada": {
+      "2026-W45": [{"title": "Quarterly data audit", "hours": 12}],
+      "2026-W46": [{"title": "Warehouse migration", "hours": 26}]
+    },
+    "emp-cato": {
+      "2026-W43": [{"title": "Parental leave", "hours": 28}],
+      "2026-W44": [{"title": "Parental leave", "hours": 28}],
+      "2026-W45": [{"title": "Parental leave", "hours": 28}],
+      "2026-W46": [{"title": "Parental leave", "hours": 28}],
+      "2026-W47": [{"title": "Parental leave", "hours": 28}],
+      "2026-W48": [{"title": "Parental leave", "hours": 28}]
+    }
+  }
+}
