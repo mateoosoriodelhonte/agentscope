@@ -121,7 +121,33 @@ describe('errors', () => {
 
   it('falls back to the status when the body is not JSON', async () => {
     fetchMock.mockResolvedValueOnce(new Response('<html>', { status: 502, statusText: 'Bad Gateway' }))
-    await expect(api.health()).rejects.toMatchObject({ status: 502, message: 'Bad Gateway' })
+    await expect(api.health()).rejects.toMatchObject({ status: 502, message: 'Bad Gateway', body: null })
+  })
+
+  it('summarises FastAPI validation errors by location', async () => {
+    const detail = [
+      { loc: ['body', 'task'], msg: 'String should have at least 1 character', type: 'string_too_short' },
+      { loc: ['body', 'faults', 0, 'kind'], msg: 'Input should be a fault kind', type: 'enum' },
+    ]
+    fetchMock.mockResolvedValueOnce(json({ detail }, 422))
+    await expect(api.createRun({ agent_ref: 'a@v1', task: '' })).rejects.toMatchObject({
+      status: 422,
+      message: 'task: String should have at least 1 character; faults.0.kind: Input should be a fault kind',
+    })
+  })
+
+  it('keeps a structured error body for the caller', async () => {
+    const body = { detail: { message: 'purge again', result: { deleted: { runs: 2 } } } }
+    fetchMock.mockResolvedValueOnce(json(body, 409))
+    const error = await api.purge({ confirm: 'PURGE' }).catch((e: unknown) => e)
+    expect(error).toMatchObject({ status: 409, message: 'purge again', body })
+  })
+})
+
+describe('failure analysis filters', () => {
+  it('sends only the filters that are set', async () => {
+    await api.failures({ agent_ref: 'research_assistant@v2', suite_id: undefined })
+    expect(lastCall().url).toBe('/api/failures?agent_ref=research_assistant%40v2')
   })
 })
 

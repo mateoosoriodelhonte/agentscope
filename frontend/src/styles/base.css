@@ -59,7 +59,8 @@ h1:focus {
 
 button,
 select,
-input {
+input,
+textarea {
   font: inherit;
   color: inherit;
 }
@@ -97,6 +98,29 @@ input {
 .btn.ghost:hover:not(:disabled) {
   background: var(--hover);
 }
+.btn.danger {
+  background: var(--fail);
+  border-color: var(--fail);
+  color: var(--surface-1);
+}
+/* Filled buttons keep their fill on hover, so their text keeps its contrast. */
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.1);
+}
+.btn.danger:hover:not(:disabled) {
+  background: var(--fail);
+  filter: brightness(1.1);
+}
+.btn.danger:disabled,
+.btn.primary:disabled {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-faint);
+}
+a.btn:hover {
+  text-decoration: none;
+}
 
 .select {
   height: 28px;
@@ -105,6 +129,45 @@ input {
   border-radius: var(--radius);
   background: var(--surface-1);
   font-size: 13px;
+}
+
+.input,
+.textarea {
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  font-size: 13px;
+}
+.input {
+  height: 28px;
+}
+.textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.input[aria-invalid='true'],
+.textarea[aria-invalid='true'] {
+  border-color: var(--fail);
+}
+
+/* A labelled form control: the label text sits above the control. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.field > .input,
+.field > .select,
+.field > .textarea {
+  color: var(--text);
 }
 
 .muted {
@@ -144,6 +207,161 @@ input {
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+/* Screens */
+.screen {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 18px;
+  padding: 18px 24px 32px;
+}
+.screen-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.screen-head .actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.section-head .actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Tables */
+.table-wrap {
+  overflow-x: auto;
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.data-table th,
+.data-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.data-table thead th {
+  background: var(--surface-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.data-table tbody th {
+  font-weight: 500;
+}
+.data-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.data-table tfoot td,
+.data-table tfoot th {
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 0;
+  font-weight: 500;
+}
+.data-table .num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Inline notices: always text, never colour alone. */
+.callout {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 13px;
+}
+.callout > .icon {
+  margin-top: 2px;
+}
+.callout.warn {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+.callout.warn > .icon {
+  color: var(--warn);
+}
+.callout.fail {
+  border-left-color: var(--fail);
+  background: var(--fail-soft);
+}
+.callout.fail > .icon {
+  color: var(--fail);
+}
+.callout.ok {
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
+}
+.callout.ok > .icon {
+  color: var(--ok);
+}
+.callout.info {
+  border-left-color: var(--neutral);
+  background: var(--neutral-soft);
+}
+.callout.info > .icon {
+  color: var(--neutral);
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+/* An injected fault: colour plus a hatched edge, like every other injected-fault mark. */
+.tag.fault {
+  overflow: hidden;
+  padding-left: 0;
+  border-color: var(--injected);
+  background: var(--injected-soft);
+  color: var(--injected);
+}
+.tag.fault::before {
+  content: '';
+  align-self: stretch;
+  width: 7px;
+  background: var(--hatch);
 }
 
 .section-title {

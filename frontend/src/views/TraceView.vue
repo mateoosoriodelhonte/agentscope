@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api, ApiError } from '@/api/client'
 import type { CheckName, RunDetail } from '@/api/types'
@@ -17,6 +17,7 @@ import EmptyState from '@/components/ui/EmptyState.vue'
 import Kbd from '@/components/ui/Kbd.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import SplitPane from '@/components/ui/SplitPane.vue'
+import { keepHeadingFocus } from '@/composables/focus'
 import { shortId } from '@/composables/format'
 import { matchBinding, TREE_ONLY_KEYS } from '@/composables/keybindings'
 import { setPageDetail } from '@/composables/usePageMeta'
@@ -30,20 +31,6 @@ const error = ref<{ status: number | null; message: string } | null>(null)
 const page = ref<HTMLElement | null>(null)
 let controller: AbortController | null = null
 
-/**
- * The loading, error and loaded states each render their own h1. When the router has moved
- * focus to the loading heading, keep it on the page heading across the swap instead of
- * dropping it to <body>.
- */
-async function keepHeadingFocus(swap: () => void): Promise<void> {
-  const heading = page.value?.querySelector('h1')
-  const focused = heading != null && heading === document.activeElement
-  swap()
-  if (!focused) return
-  await nextTick()
-  page.value?.querySelector<HTMLElement>('h1')?.focus()
-}
-
 async function load(): Promise<void> {
   controller?.abort()
   const current = new AbortController()
@@ -53,7 +40,7 @@ async function load(): Promise<void> {
   expanded.value = []
   try {
     const result = await api.getRun(props.runId, current.signal)
-    await keepHeadingFocus(() => (detail.value = result))
+    await keepHeadingFocus(page.value, () => (detail.value = result))
     if (current.signal.aborted) return
     setPageDetail(`${result.trace.agent}@${result.trace.agent_version} · ${shortId(result.trace.run_id)}`)
     // A deep link to a check (e.g. printed by the CLI for a failed case) opens its evidence.
@@ -61,7 +48,7 @@ async function load(): Promise<void> {
     if (first && !query.value.span) void set({ span: first })
   } catch (e) {
     if (current.signal.aborted) return
-    await keepHeadingFocus(() => {
+    await keepHeadingFocus(page.value, () => {
       error.value = {
         status: e instanceof ApiError ? e.status : null,
         message: e instanceof Error ? e.message : String(e),

@@ -15,26 +15,17 @@ declare module 'vue-router' {
     title: string
     /** The sidebar entry this route belongs to. */
     nav?: NavKey
-    /** What a not-yet-built screen will show (rendered by PlaceholderView). */
-    summary?: string
   }
 }
 
-const placeholder = () => import('./views/PlaceholderView.vue')
-
-function screen(path: string, name: string, nav: NavKey, title: string, summary: string): RouteRecordRaw {
-  return { path, name, component: placeholder, meta: { title, nav, summary } }
-}
-
 export const routes: RouteRecordRaw[] = [
-  { path: '/', redirect: '/runs' },
-  screen(
-    '/overview',
-    'overview',
-    'overview',
-    'Overview',
-    'Pass rate per agent across suite runs, the latest gate result, and recent activity.',
-  ),
+  { path: '/', redirect: '/overview' },
+  {
+    path: '/overview',
+    name: 'overview',
+    component: () => import('./views/OverviewView.vue'),
+    meta: { title: 'Overview', nav: 'overview' },
+  },
   {
     path: '/runs',
     name: 'runs',
@@ -48,71 +39,76 @@ export const routes: RouteRecordRaw[] = [
     props: true,
     meta: { title: 'Trace', nav: 'runs' },
   },
-  screen(
-    '/evaluations',
-    'evaluations',
-    'evaluations',
-    'Evaluations',
-    'Suite runs against dataset versions, with a case × check matrix and the gate checklist.',
-  ),
-  screen(
-    '/evaluations/:suiteId',
-    'evaluation',
-    'evaluations',
-    'Evaluation',
-    'One suite run: every case, every check, and the gate decision.',
-  ),
-  screen(
-    '/evaluations/:suiteId/cases/:caseId',
-    'evaluation-case',
-    'evaluations',
-    'Case',
-    'One case of a suite run, linked to its trace.',
-  ),
-  screen(
-    '/compare',
-    'compare',
-    'compare',
-    'Compare',
-    'Two suite runs side by side: config diff, metric deltas, and per-case regressions and fixes.',
-  ),
-  screen(
-    '/compare/runs',
-    'compare-runs',
-    'compare',
-    'Compare runs',
-    'A step-aligned diff of two traces that names the first divergence.',
-  ),
-  screen(
-    '/failures',
-    'failures',
-    'failures',
-    'Failures',
-    'Resilience by fault kind and agent version, and failure buckets with example runs.',
-  ),
-  screen('/agents', 'agents', 'agents', 'Agents', 'Agent versions, their configuration, and graph topology.'),
-  screen(
-    '/agents/:agent/:version',
-    'agent-version',
-    'agents',
-    'Agent version',
-    'One agent version: prompt, tools, limits, and retry policy.',
-  ),
-  screen('/datasets', 'datasets', 'datasets', 'Datasets', 'Dataset versions and their cases; import and lint.'),
-  screen(
-    '/datasets/:name/:version',
-    'dataset-version',
-    'datasets',
-    'Dataset',
-    'One dataset version and its cases.',
-  ),
-  screen(
-    '/settings',
-    'settings',
-    'settings',
-    'Settings',
-    'Effective settings, storage inventory, every network destination, and data purge.',
-  ),
+  {
+    path: '/evaluations',
+    name: 'evaluations',
+    component: () => import('./views/EvaluationsView.vue'),
+    meta: { title: 'Evaluations', nav: 'evaluations' },
+  },
+  {
+    path: '/evaluations/:suiteId',
+    name: 'evaluation',
+    component: () => import('./views/EvaluationView.vue'),
+    props: true,
+    meta: { title: 'Evaluation', nav: 'evaluations' },
+  },
+  {
+    path: '/evaluations/:suiteId/cases/:caseId',
+    name: 'evaluation-case',
+    component: () => import('./views/EvaluationCaseView.vue'),
+    props: true,
+    meta: { title: 'Case', nav: 'evaluations' },
+  },
+  {
+    path: '/compare',
+    name: 'compare',
+    component: () => import('./views/CompareView.vue'),
+    meta: { title: 'Compare', nav: 'compare' },
+  },
+  {
+    path: '/compare/runs',
+    name: 'compare-runs',
+    component: () => import('./views/CompareRunsView.vue'),
+    meta: { title: 'Compare runs', nav: 'compare' },
+  },
+  {
+    path: '/failures',
+    name: 'failures',
+    component: () => import('./views/FailuresView.vue'),
+    meta: { title: 'Failures', nav: 'failures' },
+  },
+  {
+    path: '/agents',
+    name: 'agents',
+    component: () => import('./views/AgentsView.vue'),
+    meta: { title: 'Agents', nav: 'agents' },
+  },
+  {
+    path: '/agents/:agent/:version',
+    name: 'agent-version',
+    component: () => import('./views/AgentVersionView.vue'),
+    props: true,
+    meta: { title: 'Agent version', nav: 'agents' },
+  },
+  {
+    path: '/datasets',
+    name: 'datasets',
+    component: () => import('./views/DatasetsView.vue'),
+    meta: { title: 'Datasets', nav: 'datasets' },
+  },
+  {
+    path: '/datasets/:name/:version',
+    name: 'dataset-version',
+    component: () => import('./views/DatasetView.vue'),
+    props: true,
+    meta: { title: 'Dataset', nav: 'datasets' },
+  },
+  {
+    path: '/settings',
+    name: 'settings',
+    component: () => import('./views/SettingsView.vue'),
+    meta: { title: 'Settings', nav: 'settings' },
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

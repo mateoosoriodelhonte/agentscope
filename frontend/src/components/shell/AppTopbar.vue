@@ -1,19 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
-import { pageDetail } from '@/composables/usePageMeta'
+import { pageDetail, pageTrail, type Crumb } from '@/composables/usePageMeta'
 import { routes } from '@/router'
 import ProviderBadge from './ProviderBadge.vue'
 import ThemeToggle from './ThemeToggle.vue'
 
-interface Crumb {
-  label: string
-  to?: string
-}
-
 const route = useRoute()
 
-/** Section › list page › current page, derived from the route's sidebar entry. */
+/** List page › any trail the page set › current page, from the route's sidebar entry. */
 const crumbs = computed<Crumb[]>(() => {
   const nav = route.meta.nav
   const list = routes.find((r) => r.name === nav)
@@ -21,6 +16,7 @@ const crumbs = computed<Crumb[]>(() => {
   if (nav && list && list.path !== route.path) {
     out.push({ label: String(list.meta?.title), to: list.path })
   }
+  out.push(...pageTrail.value)
   out.push({ label: pageDetail.value ?? route.meta.title ?? 'AgentScope' })
   return out
 })

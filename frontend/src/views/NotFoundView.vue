@@ -14,7 +14,7 @@ const route = useRoute()
         version of AgentScope.
       </p>
       <template #actions>
-        <RouterLink to="/runs" class="btn">Go to Runs</RouterLink>
+        <RouterLink to="/overview" class="btn">Go to Overview</RouterLink>
       </template>
     </EmptyState>
   </div>

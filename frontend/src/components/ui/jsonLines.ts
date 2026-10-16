@@ -72,3 +72,8 @@ export function jsonLines(value: JsonValue): JsonLine[] {
   walk(value, 0, [], false)
   return lines
 }
+
+/** Contract models arrive as JSON documents, so any of them can be shown in a JsonView. */
+export function asJson(value: object): JsonValue {
+  return value as unknown as JsonValue
+}

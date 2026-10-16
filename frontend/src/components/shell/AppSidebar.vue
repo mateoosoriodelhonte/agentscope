@@ -39,17 +39,20 @@ const current = computed(() => route.meta.nav)
 
 <template>
   <nav class="sidebar" aria-label="Primary">
-    <RouterLink to="/runs" class="brand">
-      <svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true">
-        <circle cx="16" cy="16" r="9" fill="none" stroke="currentColor" stroke-width="2.5" />
-        <path
-          d="M16 6v4M16 22v4M6 16h4M22 16h4"
-          stroke="currentColor"
-          stroke-width="2.5"
-          stroke-linecap="round"
-        />
-      </svg>
-      <span>AgentScope</span>
+    <!-- Custom so the brand never claims aria-current: the Overview entry below does. -->
+    <RouterLink v-slot="{ href, navigate }" to="/overview" custom>
+      <a :href="href" class="brand" @click="navigate">
+        <svg viewBox="0 0 32 32" width="18" height="18" aria-hidden="true">
+          <circle cx="16" cy="16" r="9" fill="none" stroke="currentColor" stroke-width="2.5" />
+          <path
+            d="M16 6v4M16 22v4M6 16h4M22 16h4"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span>AgentScope</span>
+      </a>
     </RouterLink>
     <div class="groups">
       <div v-for="group in GROUPS" :key="group.label" class="group">

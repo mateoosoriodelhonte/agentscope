@@ -8,6 +8,7 @@ import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { formatDuration, formatTimestamp, plural, shortId } from '@/composables/format'
+import { openNewRun } from '@/composables/newRun'
 import { param, useQueryState } from '@/composables/useQueryState'
 import { SIMULATED_PROVIDER } from '@/composables/useTraceModel'
 
@@ -166,6 +167,7 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
     <header class="head">
       <h1 tabindex="-1">Runs</h1>
       <span v-if="!error && !loading" class="count muted">{{ countLabel }}</span>
+      <button type="button" class="btn primary new-run" @click="openNewRun()">New run</button>
     </header>
 
     <form class="filters" aria-label="Filter runs" @submit.prevent>
@@ -326,6 +328,9 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
 }
 .count {
   font-size: 13px;
+}
+.new-run {
+  margin-left: auto;
 }
 .filters {
   display: flex;

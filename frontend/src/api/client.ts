@@ -29,10 +29,36 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The parsed JSON error body, when there was one (e.g. a partial purge result). */
+    readonly body: unknown = null,
   ) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+/**
+ * A readable message from a FastAPI error body: `detail` as a string, as an object with a
+ * `message`, or as a list of validation errors (`loc` and `msg`).
+ */
+function errorDetail(body: unknown): string | null {
+  if (body === null || typeof body !== 'object') return null
+  const detail = (body as { detail?: unknown }).detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item: unknown) => {
+      if (item === null || typeof item !== 'object') return String(item)
+      const { loc, msg } = item as { loc?: unknown; msg?: unknown }
+      const where = Array.isArray(loc) ? loc.filter((part) => part !== 'body').join('.') : ''
+      return where ? `${where}: ${String(msg)}` : String(msg)
+    })
+    return parts.length ? parts.join('; ') : null
+  }
+  if (detail !== null && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message
+    if (typeof message === 'string') return message
+  }
+  return null
 }
 
 /** A long-running job ended in the `failed` state. */
@@ -53,14 +79,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' })
   if (!response.ok) {
-    let detail = response.statusText || `HTTP ${response.status}`
+    let body: unknown = null
     try {
-      const body = (await response.json()) as { detail?: unknown }
-      if (typeof body.detail === 'string') detail = body.detail
+      body = await response.json()
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(response.status, detail)
+    const message = errorDetail(body) ?? (response.statusText || `HTTP ${response.status}`)
+    throw new ApiError(response.status, message, body)
   }
   return (await response.json()) as T
 }
@@ -94,6 +120,15 @@ export interface RunListQuery {
   suite_id?: string
   limit?: number
   offset?: number
+}
+
+/**
+ * Filters for GET /api/failures. Undefined fields are not sent; a server that does not
+ * support a filter ignores it, so callers check what came back.
+ */
+export interface FailureQuery {
+  agent_ref?: string
+  suite_id?: string
 }
 
 function queryString(params: object): string {
@@ -145,7 +180,8 @@ export const api = {
   getExperiment: async (experimentId: string, signal?: AbortSignal) =>
     request<Comparison>(`/api/experiments/${seg(experimentId)}`, { signal }),
 
-  failures: (signal?: AbortSignal) => request<FailureAnalysis>('/api/failures', { signal }),
+  failures: (query: FailureQuery = {}, signal?: AbortSignal) =>
+    request<FailureAnalysis>(`/api/failures${queryString(query)}`, { signal }),
 
   settings: (signal?: AbortSignal) => request<SettingsView>('/api/settings', { signal }),
   purge: (body: PurgeRequest) => post<PurgeResult>('/api/settings/purge', body),

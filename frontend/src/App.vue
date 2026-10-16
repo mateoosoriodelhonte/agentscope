@@ -3,7 +3,8 @@ import { nextTick, watch, watchEffect } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import AppSidebar from '@/components/shell/AppSidebar.vue'
 import AppTopbar from '@/components/shell/AppTopbar.vue'
-import { pageDetail, setPageDetail } from '@/composables/usePageMeta'
+import NewRunDrawer from '@/components/runs/NewRunDrawer.vue'
+import { pageDetail, setPageDetail, setPageTrail } from '@/composables/usePageMeta'
 import { useTheme } from '@/composables/useTheme'
 
 useTheme()
@@ -36,6 +37,7 @@ void useRouter()
       () => route.path,
       () => {
         setPageDetail(null)
+        setPageTrail([])
         void focusHeading()
       },
     ),
@@ -53,6 +55,7 @@ void useRouter()
       </main>
     </div>
   </div>
+  <NewRunDrawer />
 </template>
 
 <style scoped>
