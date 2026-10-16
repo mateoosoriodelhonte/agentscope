@@ -16,9 +16,10 @@ Slug = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,6
 
 
 class StrictModel(BaseModel):
-    """Base for every contract: unknown fields are rejected, never silently dropped."""
+    """Base for every contract: unknown fields are rejected, never silently dropped, and
+    non-finite floats (NaN, Infinity) are refused so hashes and JSON stay portable."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(extra="forbid", validate_default=True, allow_inf_nan=False)
 
 
 def utcnow() -> datetime:
@@ -26,8 +27,14 @@ def utcnow() -> datetime:
 
 
 def canonical_json(value: Any) -> str:
-    """Deterministic JSON encoding used for hashing (sorted keys, no whitespace)."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    """Deterministic JSON encoding used for hashing.
+
+    Sorted keys, no insignificant whitespace, UTF-8, and no silent coercion: values that are
+    not plain JSON (or NaN/Infinity) raise instead of being stringified.
+    """
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
 
 
 def content_hash(value: Any) -> str:
