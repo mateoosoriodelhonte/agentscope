@@ -1,4 +1,5 @@
-"""AgentScope command-line interface.
+"""AgentScope command-line interface. Every command goes through `agentscope.services`, the
+engine the API uses too.
 
 Exit codes: 0 success · 1 checks or gate failed · 2 invalid input · 3 runtime/harness error.
 """
@@ -8,18 +9,23 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from enum import IntEnum
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 import typer
-from rich.console import Console
-from rich.table import Table
 from rich.text import Text
 
 from agentscope import __version__
-from agentscope.cli.output import clean_text, emit_json
+from agentscope.cli.common import Exit, console, err, fail, open_services
+from agentscope.cli.database import db_app
+from agentscope.cli.evaluate import compare_command, eval_command
+from agentscope.cli.library import agents_app, datasets_app, demo_app
+from agentscope.cli.output import emit_json, safe, table
 from agentscope.domain.datasets import EvalCase, ExpectedAnswer, MatchMode
 from agentscope.domain.tools import FaultKind, FaultSpec
+
+if TYPE_CHECKING:
+    from agentscope.domain.evaluation import CaseResult
+    from agentscope.domain.traces import TraceRecord
 
 app = typer.Typer(
     name="agentscope",
@@ -30,21 +36,12 @@ app = typer.Typer(
 )
 traces_app = typer.Typer(help="Inspect stored traces.", no_args_is_help=True)
 app.add_typer(traces_app, name="traces")
-
-console = Console(highlight=False)
-err = Console(stderr=True, highlight=False)
-
-
-class Exit(IntEnum):
-    OK = 0
-    FAILED = 1
-    INVALID = 2
-    ERROR = 3
-
-
-def _fail(message: str, code: Exit) -> typer.Exit:
-    err.print(Text(f"error: {clean_text(message)}", style="red"))
-    return typer.Exit(int(code))
+app.add_typer(datasets_app, name="datasets", no_args_is_help=True)
+app.add_typer(agents_app, name="agents", no_args_is_help=True)
+app.add_typer(db_app, name="db", no_args_is_help=True)
+app.add_typer(demo_app, name="demo", no_args_is_help=True)
+app.command("eval")(eval_command)
+app.command("compare")(compare_command)
 
 
 def _parse_fault(raw: str) -> FaultSpec:
@@ -82,16 +79,14 @@ def run(
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
 ) -> None:
     """Run one agent task and print a summary of its trace."""
-    from agentscope.agents.base import UnknownAgentError
     from agentscope.runtime.runner import RunRequest
-    from agentscope.services import build_services
 
+    services = open_services()
     try:
         faults = [_parse_fault(f) for f in fault or []]
-        services = build_services()
-        config = services.catalog.resolve(agent)
-    except (ValueError, UnknownAgentError) as exc:
-        raise _fail(str(exc), Exit.INVALID) from exc
+        config = services.resolve_agent(agent_ref=agent)
+    except (ValueError, LookupError) as exc:
+        raise fail(str(exc), Exit.INVALID) from exc
 
     case = (
         EvalCase(
@@ -103,13 +98,10 @@ def run(
         if expect is not None
         else None
     )
-    try:
-        trace, evaluation = asyncio.run(
-            services.run_case(RunRequest(config=config, task=task, faults=faults), case, save=save)
-        )
-    except LookupError as exc:
-        raise _fail(str(exc), Exit.INVALID) from exc
-
+    # Both come back redacted: evaluation saw the raw trace, the terminal never does.
+    trace, evaluation = asyncio.run(
+        services.run_case(RunRequest(config=config, task=task, faults=faults), case, save=save)
+    )
     if as_json:
         emit_json(
             {
@@ -133,42 +125,34 @@ def run(
         raise typer.Exit(int(Exit.FAILED))
 
 
-def _print_trace_summary(trace: Any, evaluation: Any) -> None:
+def _print_trace_summary(trace: TraceRecord, evaluation: CaseResult | None) -> None:
     console.print(
         Text.assemble(
             ("run ", "dim"), (trace.run_id, "bold"), ("  ", ""), (trace.status.value, "cyan")
         )
     )
     console.print(
-        Text(
+        safe(
             f"agent {trace.agent}@{trace.agent_version} · {trace.provider}/{trace.model} · "
             f"{trace.steps} steps · {trace.duration_ms:.0f} ms"
         )
     )
-    table = Table(show_header=True, header_style="bold", box=None)
-    table.add_column("#", justify="right")
-    table.add_column("tool")
-    table.add_column("outcome")
-    table.add_column("executed")
+    calls = table("#", "tool", "outcome", "executed", keys=2)
     for index, inv in enumerate(trace.tool_invocations, 1):
-        table.add_row(
-            str(index),
-            clean_text(inv.tool),
-            inv.outcome.value,
-            "yes" if inv.executed else "blocked",
+        calls.add_row(
+            safe(index),
+            safe(inv.tool),
+            safe(inv.outcome.value),
+            safe("yes" if inv.executed else "blocked"),
         )
-    console.print(table)
-    console.print(
-        Text("final output: ", style="bold") + Text(clean_text(json.dumps(trace.final_output)))
-    )
+    console.print(calls)
+    console.print(Text("final output: ", style="bold") + safe(json.dumps(trace.final_output)))
     if evaluation is not None:
         verdict = "PASSED" if evaluation.passed else "FAILED"
         console.print(Text(f"evaluation: {verdict}", style="green" if evaluation.passed else "red"))
         for check in evaluation.checks:
             console.print(
-                Text(
-                    f"  {check.status.value:<15} {check.name.value:<22} {clean_text(check.message)}"
-                )
+                safe(f"  {check.status.value:<15} {check.name.value:<22} {check.message}")
             )
 
 
@@ -179,37 +163,32 @@ def traces_list(
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """List recent runs."""
-    from agentscope.services import build_services
-
-    items, total = build_services().repository.list_runs(agent=agent, limit=limit)
+    items, total = open_services().repository.list_runs(agent=agent, limit=limit)
     if as_json:
         emit_json({"total": total, "items": [i.model_dump(mode="json") for i in items]})
         return
-    table = Table(box=None, header_style="bold")
-    for column in ("run_id", "agent", "status", "steps", "verdict", "task"):
-        table.add_column(column)
+    runs = table("run_id", "agent", "status", "steps", "verdict", "task", keys=2)
     for item in items:
         verdict = "-" if item.passed is None else ("pass" if item.passed else "fail")
-        table.add_row(
-            item.run_id,
-            f"{item.agent}@{item.agent_version}",
-            item.status.value,
-            str(item.steps),
-            verdict,
-            clean_text(item.task)[:60],
+        runs.add_row(
+            safe(item.run_id),
+            safe(f"{item.agent}@{item.agent_version}"),
+            safe(item.status.value),
+            safe(item.steps),
+            safe(verdict),
+            safe(item.task[:60]),
         )
-    console.print(table)
+    console.print(runs)
     console.print(Text(f"{len(items)} of {total} runs", style="dim"))
 
 
 @traces_app.command("show")
 def traces_show(run_id: str, as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Show one stored trace."""
-    from agentscope.services import build_services
-
-    found = build_services().repository.get_run(run_id)
+    services = open_services()
+    found = services.repository.get_run(run_id)
     if found is None:
-        raise _fail(f"run {run_id} not found", Exit.INVALID)
+        raise fail(f"run {run_id} not found", Exit.INVALID)
     trace, _case, evaluation = found
     if as_json:
         emit_json(
@@ -220,6 +199,8 @@ def traces_show(run_id: str, as_json: Annotated[bool, typer.Option("--json")] = 
         )
         return
     _print_trace_summary(trace, evaluation)
+    link = f"http://127.0.0.1:{services.settings.port}/runs/{trace.run_id}"
+    console.print(safe(link, "dim"), soft_wrap=True)
 
 
 @app.command()
@@ -227,31 +208,64 @@ def serve(
     host: Annotated[str | None, typer.Option(help="Bind address (default 127.0.0.1)")] = None,
     port: Annotated[int | None, typer.Option(help="Port (default 8765)")] = None,
     allow_remote: Annotated[
-        bool, typer.Option("--allow-remote", help="Permit a non-loopback bind")
+        bool,
+        typer.Option(
+            "--allow-remote",
+            help="Remote mode: permit a non-loopback bind; every request must then carry "
+            "AGENTSCOPE_API_TOKEN as a Bearer token",
+        ),
     ] = False,
+    allowed_host: Annotated[
+        list[str] | None,
+        typer.Option("--allowed-host", help="Extra Host header value to accept; repeatable"),
+    ] = None,
 ) -> None:
     """Serve the API and dashboard on localhost."""
     import uvicorn
 
     from agentscope.api.app import create_app
     from agentscope.config import LOOPBACK_HOSTS, get_settings
+    from agentscope.services import egress_destinations
 
     settings = get_settings()
     bind = host or settings.host
-    if bind not in LOOPBACK_HOSTS and not (allow_remote or settings.allow_remote):
-        raise _fail(
+    bind_port = port or settings.port
+    remote = allow_remote or settings.allow_remote
+    if bind not in LOOPBACK_HOSTS and not remote:
+        raise fail(
             f"refusing to bind {bind}: pass --allow-remote to expose AgentScope "
             "beyond this machine",
             Exit.INVALID,
         )
+    token = settings.api_token.get_secret_value() if settings.api_token else ""
+    if remote and not token:
+        raise fail(
+            "remote mode needs AGENTSCOPE_API_TOKEN: every request must then send it as "
+            "'Authorization: Bearer <token>'",
+            Exit.INVALID,
+        )
+    services = open_services()
+    err.print(safe(f"AgentScope {__version__} on http://{bind}:{bind_port}", "bold"))
+    err.print(safe(f"data: {settings.database_location}", "dim"), soft_wrap=True)
+    destinations = egress_destinations(settings)
     err.print(
-        Text(
-            f"AgentScope {__version__} on http://{bind}:{port or settings.port} "
-            f"(data: {settings.effective_database_url.split('://', 1)[0]})",
-            style="dim",
+        safe(
+            "egress (every destination AgentScope may contact):"
+            if destinations
+            else "egress: none",
+            "dim",
         )
     )
-    uvicorn.run(create_app(), host=bind, port=port or settings.port, log_level="warning")
+    for destination in destinations:
+        err.print(safe(f"  {destination}", "dim"), soft_wrap=True)
+    if remote:
+        err.print(safe("remote mode: every request requires the API token", "yellow"))
+    uvicorn.run(
+        create_app(services, api_token=token if remote else None, allowed_hosts=allowed_host or ()),
+        host=bind,
+        port=bind_port,
+        log_level="warning",
+    )
 
 
 def main() -> None:
@@ -259,3 +273,6 @@ def main() -> None:
         app()
     except KeyboardInterrupt:  # pragma: no cover
         sys.exit(130)
+    except Exception as exc:  # pragma: no cover - a defect: exit 3, never a traceback dump
+        err.print(Text(f"internal error: {type(exc).__name__}", style="red"))
+        sys.exit(int(Exit.ERROR))
