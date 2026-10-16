@@ -2,17 +2,36 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from importlib import resources
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from agentscope import __version__
-from agentscope.api.routes import agents, runs
+from agentscope.api.deps import InvalidInput, invalid_input_response
+from agentscope.api.routes import (
+    agents,
+    datasets,
+    demo,
+    evaluations,
+    experiments,
+    insights,
+    jobs,
+    runs,
+    settings,
+)
 from agentscope.api.security import LocalOnlyMiddleware
+from agentscope.datasets.issues import Issue
+from agentscope.jobs import JobManager
 from agentscope.services import Services, build_services
+
+_log = logging.getLogger(__name__)
 
 
 def find_web_dist() -> Path | None:
@@ -26,31 +45,82 @@ def find_web_dist() -> Path | None:
     return None
 
 
-def create_app(services: Services | None = None, *, web_dist: Path | None = None) -> FastAPI:
+def _request_issues(exc: RequestValidationError) -> InvalidInput:
+    """Request validation errors as located issues, without echoing the submitted values."""
+    issues = [
+        Issue("/" + "/".join(str(part) for part in error.get("loc", ())), str(error.get("msg")))
+        for error in exc.errors()[:50]
+    ]
+    return InvalidInput("the request is invalid", issues)
+
+
+def create_app(
+    services: Services | None = None,
+    *,
+    web_dist: Path | None = None,
+    api_token: str | None = None,
+    allowed_hosts: Sequence[str] = (),
+    jobs_manager: JobManager | None = None,
+) -> FastAPI:
+    """`api_token` turns on remote mode: every request must then authenticate with it."""
     services = services or build_services()
+    job_manager = jobs_manager or JobManager(redact=services.redactor.redact_text)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        yield
+        await job_manager.shutdown()
+
     app = FastAPI(
         title="AgentScope",
         version=__version__,
         docs_url="/api/docs",
         redoc_url=None,
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.state.services = services
-    settings = services.settings
+    app.state.jobs = job_manager
     app.add_middleware(
         LocalOnlyMiddleware,
-        allowed_origins=settings.allowed_origins,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=services.settings.allowed_origins,
         max_body_bytes=256 * 1024,
         large_body_paths=["/api/datasets"],
-        large_body_bytes=settings.max_request_bytes,
+        large_body_bytes=services.settings.max_request_bytes,
+        api_token=api_token,
     )
+
+    @app.exception_handler(InvalidInput)
+    async def invalid_input(_request: Request, exc: InvalidInput) -> JSONResponse:
+        return invalid_input_response(exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        return invalid_input_response(_request_issues(exc))
+
+    @app.exception_handler(Exception)
+    async def internal_error(request: Request, exc: Exception) -> JSONResponse:
+        # Never a traceback in a response: the details go to the server log only.
+        _log.error("unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path)
+        return JSONResponse({"detail": "internal error"}, status_code=500)
 
     @app.get("/api/health", tags=["meta"])
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
 
-    app.include_router(agents.router)
-    app.include_router(runs.router)
+    for module in (
+        agents,
+        runs,
+        datasets,
+        evaluations,
+        experiments,
+        insights,
+        jobs,
+        settings,
+        demo,
+    ):
+        app.include_router(module.router)
 
     @app.api_route(
         "/api/{path:path}",
