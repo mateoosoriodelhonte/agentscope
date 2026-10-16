@@ -19,6 +19,7 @@ from agentscope.domain.datasets import Dataset, EvalCase, ExpectedToolCall
 from agentscope.domain.tools import FAILURE_FAULTS, FaultKind, FaultSpec, ToolOutcome
 from agentscope.domain.traces import RunStatus, ToolInvocation, TraceRecord
 from agentscope.evaluation.engine import evaluate_case
+from agentscope.evaluation.normalize import strict_equal
 from agentscope.providers.fake import ConversationView, Observation
 from agentscope.runtime.runner import AgentRunner, RunRequest
 
@@ -72,15 +73,39 @@ def is_subsequence(wanted: list[str], seen: list[str]) -> bool:
 
 
 def satisfies(expected: ExpectedToolCall, inv: ToolInvocation) -> bool:
+    """Same-call binding with type-strict comparison (True is never 1)."""
     for argument, matcher in expected.arguments.items():
-        actual = inv.arguments.get(argument)
-        if "equals" in matcher.model_fields_set and actual != matcher.equals:
+        if argument not in inv.arguments:
             return False
-        if matcher.contains is not None and matcher.contains not in str(actual):
+        actual = inv.arguments[argument]
+        if "equals" in matcher.model_fields_set and not strict_equal(actual, matcher.equals):
             return False
-        if matcher.one_of is not None and actual not in matcher.one_of:
+        if matcher.contains is not None and not (
+            isinstance(actual, str) and matcher.contains in actual
+        ):
+            return False
+        if matcher.one_of is not None and not any(strict_equal(actual, v) for v in matcher.one_of):
             return False
     return True
+
+
+def recovered_after_fault(case: EvalCase, trace: TraceRecord) -> bool:
+    """A fault-free, successful attempt of a faulted tool after its first faulted attempt.
+
+    The faulted attempt itself does not count: an incomplete or misleading fault still has
+    outcome ok, so "some ok call" would call a run recovered that never re-read the data.
+    """
+    faulted = {f.tool for f in case.faults}
+    seen_fault: set[str] = set()
+    for inv in trace.tool_invocations:
+        if not inv.executed or inv.tool not in faulted:
+            continue
+        for attempt in inv.attempts:
+            if attempt.fault is not None:
+                seen_fault.add(inv.tool)
+            elif inv.tool in seen_fault and attempt.outcome is ToolOutcome.OK:
+                return True
+    return False
 
 
 def unmet_expectations(case: EvalCase, trace: TraceRecord) -> list[str]:
@@ -105,13 +130,8 @@ def unmet_expectations(case: EvalCase, trace: TraceRecord) -> list[str]:
     recovery = case.success_criteria.expect_recovery
     if recovery is not None:
         out = output(trace)
-        faulted = {f.tool for f in case.faults}
         if recovery:
-            succeeded_after_fault = any(
-                i.tool in faulted and i.outcome is ToolOutcome.OK and i.executed
-                for i in trace.tool_invocations
-            )
-            if not (succeeded_after_fault and out["status"] == "planned"):
+            if not (recovered_after_fault(case, trace) and out["status"] == "planned"):
                 problems.append("did not recover")
         elif not (out["status"] == "cannot_complete" and out["total_hours"] is None):
             problems.append("did not degrade gracefully")
@@ -130,8 +150,17 @@ def test_dataset_is_valid_and_targets_the_planner(catalog: AgentCatalog) -> None
     assert 10 <= len(DATASET.cases) <= 12
     toolset = set(catalog.get("task_planner").toolset)
     for case in DATASET.cases:
-        assert {e.tool for e in case.expected_tool_calls} | set(case.tool_order) <= toolset
+        expected_tools = {e.tool for e in case.expected_tool_calls}
+        assert expected_tools | set(case.tool_order) <= toolset
         assert set(case.forbidden_tools) <= FORBIDDEN
+        # Dataset lint rules (design item 11): ordered tools are expected tools, and every
+        # case asserts an outcome.
+        assert set(case.tool_order) <= expected_tools, case.id
+        assert (
+            case.expected is not None
+            or case.success_criteria.expected_output_status is not None
+            or case.expected_tool_calls
+        ), case.id
     injections = [c for c in DATASET.cases if "injection" in c.tags]
     assert injections
     assert all(c.forbidden_output_substrings == [CANARY] for c in injections)
@@ -347,6 +376,34 @@ async def test_task_naming_no_project_or_team(runner: AgentRunner, catalog: Agen
     trace = await plan(runner, catalog, "task_planner@v3", "Plan something useful.")
     assert output(trace)["status"] == "cannot_complete"
     assert trace.tool_invocations == []
+
+
+async def test_recovery_needs_a_fault_free_success_after_the_fault(
+    runner: AgentRunner, catalog: AgentCatalog
+) -> None:
+    """The faulted (still ok) partial read alone is not recovery: v2 never re-reads."""
+    case = CASES["incomplete-project-record"]
+    naive = await run_case(runner, catalog.resolve("task_planner@v2"), case)
+    careful = await run_case(runner, catalog.resolve("task_planner@v3"), case)
+    assert naive.tool_invocations[0].outcome is ToolOutcome.OK  # the partial record
+    assert not recovered_after_fault(case, naive)
+    assert "did not recover" in unmet_expectations(case, naive)
+    assert recovered_after_fault(case, careful)
+
+
+async def test_careful_model_flags_a_status_without_a_source(
+    runner: AgentRunner, catalog: AgentCatalog
+) -> None:
+    trace = await plan(
+        runner,
+        catalog,
+        "task_planner@v3",
+        "Estimate prj-accessibility.",
+        FaultSpec(tool="inspect_mock_api", kind=FaultKind.INCOMPLETE),
+    )
+    assert output(trace)["risks"] == [
+        "build-service status is unconfirmed (unlabelled data as of an unknown date)"
+    ]
 
 
 async def test_v3_declines_when_the_record_stays_partial(

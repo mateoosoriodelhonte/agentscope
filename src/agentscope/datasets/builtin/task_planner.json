@@ -35,6 +35,11 @@
       "task": "Estimate the total hours for project prj-accessibility.",
       "expected": {"field": "total_hours", "match": "numeric", "value": 32.5},
       "expected_tool_calls": [
+        {
+          "tool": "lookup_record",
+          "arguments": {"record_type": {"equals": "project"}, "record_id": {"equals": "prj-accessibility"}},
+          "max_calls": 1
+        },
         {"tool": "calculate", "arguments": {"expression": {"equals": "10 + 18.5 + 4"}}, "max_calls": 1}
       ],
       "tool_order": ["lookup_record", "calculate"],
@@ -123,7 +128,13 @@
       "expected": {"field": "total_hours", "match": "numeric", "value": 54},
       "expected_tool_calls": [
         {"tool": "list_records", "arguments": {"record_type": {"equals": "project"}, "team": {"equals": "data"}}},
-        {"tool": "lookup_record", "arguments": {"record_id": {"equals": "prj-ridership-dash"}}}
+        {"tool": "lookup_record", "arguments": {"record_id": {"equals": "prj-ridership-dash"}}},
+        {"tool": "inspect_mock_api", "arguments": {"path": {"equals": "/status/search-index"}}},
+        {"tool": "calculate", "arguments": {"expression": {"equals": "14 + 18 + 22"}}},
+        {
+          "tool": "check_calendar",
+          "arguments": {"employee_id": {"equals": "emp-cato"}, "week": {"equals": "2026-W45"}}
+        }
       ],
       "tool_order": ["list_records", "lookup_record", "inspect_mock_api", "calculate", "check_calendar"],
       "success_criteria": {"expected_output_status": "planned"},

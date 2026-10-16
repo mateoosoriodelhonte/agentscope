@@ -75,6 +75,16 @@ async def test_unlisted_paths_are_errors(registry: ToolRegistry, path: str) -> N
     assert result.error.startswith("no route for GET ")
 
 
+def test_fixtures_are_read_only() -> None:
+    fixtures = load_mock_api()
+    with pytest.raises(TypeError):
+        fixtures["/status/payments"].body["state"] = "operational"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        fixtures["/status/new"] = fixtures["/status/payments"]  # type: ignore[index]
+    assert fixtures["/status/payments"].body["state"] == "degraded"
+    assert load_mock_api() is fixtures  # loaded once
+
+
 def test_description_names_every_fixture() -> None:
     for path in load_mock_api():
         name = path.removeprefix("/status/")

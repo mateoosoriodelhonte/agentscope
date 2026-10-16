@@ -32,7 +32,14 @@ class MockResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     status_code: int = Field(ge=100, le=599)
     # Fewer fields than an output may carry, so a fault hook can always add a message.
-    body: dict[BodyKey, BodyValue] = Field(max_length=16)
+    body: Mapping[BodyKey, BodyValue] = Field(max_length=16)
+
+    @field_validator("body")
+    @classmethod
+    def _read_only(cls, value: Mapping[str, BodyValue]) -> Mapping[str, BodyValue]:
+        # `frozen` only blocks attribute assignment; the cached fixture's body must not be
+        # editable in place either.
+        return MappingProxyType(dict(value))
 
 
 @lru_cache(maxsize=1)

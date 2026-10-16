@@ -301,7 +301,8 @@ class _Run:
             state, source = body.get("state"), body.get("source")
             as_of = body.get("as_of") or "an unknown date"
             if self.careful and (source != "live" or not isinstance(state, str)):
-                risks.append(f"{service} status is unconfirmed ({source} data as of {as_of})")
+                origin = source if isinstance(source, str) else "unlabelled"
+                risks.append(f"{service} status is unconfirmed ({origin} data as of {as_of})")
             elif isinstance(state, str) and state != "operational":
                 risks.append(f"{service} is {state} (as of {as_of})")
         return risks
