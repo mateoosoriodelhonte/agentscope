@@ -114,6 +114,7 @@ addopts = "-ra --strict-markers --strict-config --disable-socket --allow-unix-so
 markers = [
   "postgres: requires AGENTSCOPE_TEST_POSTGRES_URL pointing at a disposable PostgreSQL database",
   "slow: slower tests (real timeouts, full suites)",
+  "ollama: requires a local Ollama server and AGENTSCOPE_TEST_OLLAMA_MODEL naming a pulled model",
 ]
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
