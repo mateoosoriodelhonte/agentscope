@@ -211,3 +211,5 @@ class SuiteResult(StrictModel):
     cases: list[CaseResult]
     metrics: SuiteMetrics
     gate: GateResult | None = None
+    # Why the harness gave up on an errored suite (cancelled, interrupted, crashed).
+    error: str | None = None

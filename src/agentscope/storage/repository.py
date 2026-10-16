@@ -173,8 +173,13 @@ class Repository:
         return self._sessions()
 
     def _scrub[M: BaseModel](self, model: M) -> M:
-        """A redacted copy, validated back into the same contract."""
-        return type(model).model_validate(self._redactor.redact(model.model_dump(mode="json")))
+        """A redacted copy, validated back into the same contract.
+
+        Only explicitly set fields go through the round trip, so validators that depend on
+        which fields were given (an argument matcher's single comparison) still accept it.
+        """
+        dumped = model.model_dump(mode="json", exclude_unset=True)
+        return type(model).model_validate(self._redactor.redact(dumped))
 
     # --- runs -------------------------------------------------------------------------
 
@@ -224,7 +229,11 @@ class Repository:
             transitions=[t.model_dump(mode="json") for t in clean.transitions],
             tool_invocations=[i.model_dump(mode="json") for i in clean.tool_invocations],
             guardrail_events=[g.model_dump(mode="json") for g in clean.guardrail_events],
-            eval_case=clean_case.model_dump(mode="json") if clean_case else None,
+            # Set fields only: a full dump gives an argument matcher two comparisons
+            # (`"equals": null` next to the one in use) and could not be read back.
+            eval_case=clean_case.model_dump(mode="json", exclude_unset=True)
+            if clean_case
+            else None,
             evaluation=clean_eval.model_dump(mode="json") if clean_eval else None,
             passed=clean_eval.passed if clean_eval else None,
             created_at=datetime.now(UTC),
@@ -275,17 +284,33 @@ class Repository:
         self,
         *,
         agent: str | None = None,
+        agent_version: str | None = None,
         status: str | None = None,
+        has_faults: bool | None = None,
+        has_blocked_calls: bool | None = None,
+        verdict: Literal["passed", "failed", "none"] | None = None,
         case_id: str | None = None,
         suite_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[RunSummary], int]:
+        """Newest first. `verdict="none"` selects runs that were never evaluated."""
         query = select(RunRow)
         if agent:
             query = query.where(RunRow.agent == agent)
+        if agent_version:
+            query = query.where(RunRow.agent_version == agent_version)
         if status:
             query = query.where(RunRow.status == status)
+        if has_faults is not None:
+            query = query.where(RunRow.fault_count > 0 if has_faults else RunRow.fault_count == 0)
+        if has_blocked_calls is not None:
+            blocked = RunRow.blocked_tool_calls
+            query = query.where(blocked > 0 if has_blocked_calls else blocked == 0)
+        if verdict == "none":
+            query = query.where(RunRow.passed.is_(None))
+        elif verdict is not None:
+            query = query.where(RunRow.passed.is_(verdict == "passed"))
         if case_id:
             query = query.where(RunRow.case_id == case_id)
         if suite_id:
@@ -357,7 +382,8 @@ class Repository:
                 agent=clean.agent,
                 case_count=len(clean.cases),
                 tags=sorted({tag for case in clean.cases for tag in case.tags}),
-                data=clean.model_dump(mode="json"),
+                # Set fields only (see save_trace); validating it gives back `digest`.
+                data=clean.model_dump(mode="json", exclude_unset=True),
                 created_at=datetime.now(UTC),
             )
             session.add(row)
@@ -473,6 +499,7 @@ class Repository:
             suite.passed = clean.metrics.passed
             suite.pass_rate = clean.metrics.pass_rate
             suite.finished_at = clean.finished_at or datetime.now(UTC)
+            suite.error = clean.error
 
     def fail_suite(self, suite_id: str, error: str) -> None:
         """Mark a suite as errored: the harness failed, not the agent."""
@@ -518,6 +545,7 @@ class Repository:
                     "cases": cases,
                     "metrics": metrics,
                     "gate": row.gate,
+                    "error": row.error,
                 }
             )
 
@@ -527,6 +555,7 @@ class Repository:
         agent_ref: str | None = None,
         dataset_name: str | None = None,
         status: str | None = None,
+        label: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[SuiteListItem], int]:
@@ -537,6 +566,8 @@ class Repository:
             query = query.where(SuiteRunRow.dataset_name == dataset_name)
         if status:
             query = query.where(SuiteRunRow.status == status)
+        if label is not None:
+            query = query.where(SuiteRunRow.label == label)
         with self.session() as session:
             total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
             rows = session.scalars(
@@ -548,6 +579,21 @@ class Repository:
             return [_suite_item(r) for r in rows], total
 
     # --- failure analysis -------------------------------------------------------------
+
+    def latest_suite_ids(self, *, agent_refs: Sequence[str] = ()) -> list[str]:
+        """The most recent completed suite of each agent version (optionally only `agent_refs`),
+        ordered by agent version."""
+        query = select(SuiteRunRow.agent_ref, SuiteRunRow.id).where(
+            SuiteRunRow.status == "completed"
+        )
+        if agent_refs:
+            query = query.where(SuiteRunRow.agent_ref.in_(agent_refs))
+        query = query.order_by(SuiteRunRow.agent_ref, SuiteRunRow.started_at.desc(), SuiteRunRow.id)
+        latest: dict[str, str] = {}
+        with self.session() as session:
+            for agent_ref, key in session.execute(query):
+                latest.setdefault(agent_ref, str(key))
+        return list(latest.values())
 
     def evaluated_cases(self, suite_ids: Sequence[str]) -> list[EvaluatedCase]:
         """Every case verdict of the given suites, with the faults injected into its run."""
@@ -647,13 +693,15 @@ class Repository:
         return Comparison.model_validate(document) if document is not None else None
 
     def list_experiments(
-        self, *, limit: int = 50, offset: int = 0
+        self, *, name: str | None = None, limit: int = 50, offset: int = 0
     ) -> tuple[list[ExperimentListItem], int]:
+        query = select(ExperimentRow)
+        if name is not None:
+            query = query.where(ExperimentRow.name == name)
         with self.session() as session:
-            total = session.scalar(select(func.count()).select_from(ExperimentRow)) or 0
+            total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
             rows = session.scalars(
-                select(ExperimentRow)
-                .options(defer(ExperimentRow.comparison))
+                query.options(defer(ExperimentRow.comparison))
                 .order_by(ExperimentRow.created_at.desc(), ExperimentRow.id)
                 .limit(limit)
                 .offset(offset)

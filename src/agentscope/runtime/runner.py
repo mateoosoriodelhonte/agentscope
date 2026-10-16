@@ -261,6 +261,9 @@ class AgentRunner:
         ended = datetime.now(UTC)
         usage = ctx.usage.result()
         redact = self.redactor.redact
+        # The final output and tool payloads stay unredacted in memory: checks must see what
+        # the model really produced (a secret-shaped leak is still a leak). Spans were
+        # redacted when recorded, and the repository scrubs everything else on save.
         return TraceRecord(
             trace_id=run_span.trace_id,
             run_id=request.run_id,
@@ -281,7 +284,7 @@ class AgentRunner:
             steps=ctx.step,
             provider=provider_label,
             model=config.model.model,
-            final_output=redact(final_output),
+            final_output=final_output,
             usage=usage,
             cost=estimate_cost(usage, self._rates.get(config.model.model)),
             faults=[f.model_copy(update={"payload": redact(f.payload)}) for f in request.faults],
@@ -289,11 +292,6 @@ class AgentRunner:
             case_id=request.case_id,
             spans=spans,
             transitions=recorder.transitions,
-            tool_invocations=[
-                inv.model_copy(
-                    update={"arguments": redact(inv.arguments), "output": redact(inv.output)}
-                )
-                for inv in ctx.invocations
-            ],
+            tool_invocations=list(ctx.invocations),
             guardrail_events=ctx.guardrails,
         )

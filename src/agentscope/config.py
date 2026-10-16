@@ -13,6 +13,7 @@ from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -30,11 +31,15 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = Path(".agentscope")
-    database_url: str | None = None
+    # A DSN can embed a password, so it is a secret: masked in /api/settings, `db info` and
+    # logs. `database_location` says where the data lives without the password.
+    database_url: SecretStr | None = Field(default=None, repr=False)
 
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
     allow_remote: bool = False
+    # Required by `serve --allow-remote`: every request must then carry it as a Bearer token.
+    api_token: SecretStr | None = Field(default=None, repr=False)
     # Extra Origin values allowed to make state-changing API requests (e.g. a Vite dev server).
     allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
@@ -77,9 +82,15 @@ class Settings(BaseSettings):
 
     @property
     def effective_database_url(self) -> str:
-        if self.database_url:
-            return self.database_url
+        """The real DSN, password included: for opening the engine, never for display."""
+        if self.database_url and self.database_url.get_secret_value():
+            return self.database_url.get_secret_value()
         return f"sqlite:///{(self.data_dir / 'agentscope.db').resolve()}"
+
+    @property
+    def database_location(self) -> str:
+        """The DSN with its password masked, safe to print."""
+        return make_url(self.effective_database_url).render_as_string(hide_password=True)
 
     @property
     def is_loopback(self) -> bool:
