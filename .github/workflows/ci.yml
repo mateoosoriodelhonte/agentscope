@@ -57,6 +57,31 @@ jobs:
       - name: Test
         run: uv run pytest --cov --cov-report=term --cov-report=xml
 
+  quality-gate:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      # Gates the deterministic fake-model suite in tests/fixtures (dataset files, gate.json
+      # and baselines, by the loader's naming convention). Exit codes: 1 gate failed,
+      # 2 invalid fixtures, 3 harness error; any of them fails the job.
+      - name: Evaluate
+        run: uv run agentscope eval --dataset tests/fixtures --check --no-save --json > gate-result.json
+      - name: Upload gate result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-result
+          path: gate-result.json
+          if-no-files-found: warn
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
