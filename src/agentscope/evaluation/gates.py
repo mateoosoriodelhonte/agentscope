@@ -37,7 +37,8 @@ def _display(value: Fraction) -> JsonValue:
 
 def new_regressions(baseline: Baseline, cases: Sequence[CaseResult]) -> list[str]:
     """Case ids that passed in the baseline and do not pass now. Cases whose content
-    changed are skipped: they are different tests that happen to share an id."""
+    changed are skipped: they are different tests that happen to share an id. So are
+    harness errors: AgentScope failed, not the agent, and max_harness_errors judges them."""
     before = {c.case_id: c for c in baseline.cases}
     return sorted(
         c.case_id
@@ -46,6 +47,7 @@ def new_regressions(baseline: Baseline, cases: Sequence[CaseResult]) -> list[str
         and b.case_hash == c.case_hash
         and b.passed
         and not c.passed
+        and c.harness_error is None
     )
 
 

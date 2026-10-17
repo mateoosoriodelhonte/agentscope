@@ -21,6 +21,8 @@ class CaseChange(StrEnum):
     ADDED = "added"  # only in B
     REMOVED = "removed"  # only in A
     CONTENT_CHANGED = "content_changed"  # same id, different case content: not comparable
+    # AgentScope failed on at least one side, so there is no agent verdict to compare.
+    HARNESS_ERROR = "harness_error"
 
 
 ConfigDimension = Literal[
@@ -96,3 +98,6 @@ class Comparison(StrictModel):
     config_diff: list[ConfigDifference]
     # More than one configuration dimension changed, so no single change can be credited.
     confounded: bool
+    # Caveats that are not configuration differences: verdicts judged by different check
+    # engines, or resolved content that was not recorded and so cannot be compared.
+    warnings: list[str] = Field(default_factory=list)

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from fractions import Fraction
+from typing import Any
+
+import pytest
 
 from agentscope.agents.research import VERSIONS
 from agentscope.domain.agents import AgentConfig
@@ -15,9 +18,10 @@ from agentscope.domain.evaluation import (
     CheckStatus,
     EnvironmentFingerprint,
     ReasonCode,
+    ResolvedContent,
     SuiteResult,
 )
-from agentscope.domain.experiments import CaseChange, CheckFlip
+from agentscope.domain.experiments import CaseChange, CheckFlip, Comparison
 from agentscope.evaluation.metrics import compute_metrics
 from agentscope.experiments.compare import compare, config_diff
 
@@ -209,3 +213,146 @@ def test_a_non_deterministic_side_makes_the_comparison_non_deterministic() -> No
     )
     assert not result.deterministic
     assert (result.experiment_id, result.created_at) == ("exp-1", T0)
+
+
+# --- resolved content and the environment ------------------------------------------------
+
+SAME = [case("c1", P, P)]
+
+
+def resolved(**changes: Any) -> ResolvedContent:
+    base: dict[str, Any] = {
+        "prompt": "sha256:prompt",
+        "tools": {"search_documents": "sha256:search", "retrieve_document": "sha256:read"},
+        "output_schema": "sha256:schema",
+        "graph": "sha256:graph",
+        "fake_brain_version": "3",
+    }
+    return ResolvedContent.model_validate({**base, **changes})
+
+
+def with_environment(result: SuiteResult, **changes: Any) -> SuiteResult:
+    return result.model_copy(update={"environment": result.environment.model_copy(update=changes)})
+
+
+def dimensions(result: Comparison) -> list[tuple[str, str]]:
+    return [(d.path, d.dimension) for d in result.config_diff]
+
+
+def test_a_hidden_prompt_change_next_to_a_model_change_is_confounded() -> None:
+    a = with_environment(suite(V2, SAME), resolved=resolved())
+    b = with_environment(suite(V3, SAME), resolved=resolved(prompt="sha256:edited"))
+    result = compare(a, b, "model and hidden prompt")
+    assert dimensions(result) == [("model.model", "model"), ("resolved.prompt", "prompt")]
+    assert result.confounded
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        (
+            {"tools": {"search_documents": "sha256:v2", "retrieve_document": "sha256:read"}},
+            ("resolved.tools.search_documents", "tool_schema"),
+        ),
+        ({"output_schema": "sha256:other"}, ("resolved.output_schema", "other")),
+        ({"graph": "sha256:rewired"}, ("resolved.graph", "graph")),
+        ({"fake_brain_version": "4"}, ("resolved.fake_brain_version", "model")),
+    ],
+)
+def test_each_hidden_component_is_its_own_dimension(
+    changes: dict[str, Any], expected: tuple[str, str]
+) -> None:
+    a = with_environment(suite(V2, SAME), resolved=resolved())
+    b = with_environment(suite(V3, SAME), resolved=resolved(**changes))
+    result = compare(a, b, "hidden")
+    assert dimensions(result) == [("model.model", "model"), expected]
+    assert result.confounded == (expected[1] != "model")
+
+
+def test_a_hidden_change_alone_is_attributable() -> None:
+    a = with_environment(suite(V2, SAME), resolved=resolved())
+    b = with_environment(
+        suite(V2, SAME, effective="sha256:edited"), resolved=resolved(prompt="sha256:edited")
+    )
+    result = compare(a, b, "prompt text only")
+    assert dimensions(result) == [("resolved.prompt", "prompt")]
+    assert not result.confounded
+
+
+def test_changes_the_configuration_explains_are_not_listed_twice() -> None:
+    """A new prompt version has new prompt text, and a removed tool has no schema."""
+    narrowed = V2.model_copy(update={"prompt_version": "p1", "tools": ["search_documents"]})
+    a = with_environment(suite(V2, SAME), resolved=resolved())
+    b = with_environment(
+        suite(narrowed, SAME),
+        resolved=resolved(prompt="sha256:p1", tools={"search_documents": "sha256:search"}),
+    )
+    assert dimensions(compare(a, b, "explained")) == [
+        ("prompt_version", "prompt"),
+        ("tools", "tools"),
+    ]
+
+
+def test_a_tool_data_change_is_reported() -> None:
+    a = suite(V2, SAME)
+    b = with_environment(suite(V3, SAME), data_hash="sha256:new-data")
+    result = compare(a, b, "data")
+    assert dimensions(result) == [("model.model", "model"), ("environment.data_hash", "other")]
+    assert result.confounded
+
+
+def test_an_agentscope_upgrade_is_reported() -> None:
+    """Without per-component hashes an upgrade can still have changed prompts or tools."""
+    a = suite(V2, SAME)
+    b = with_environment(suite(V3, SAME), agentscope_version="0.2.0")
+    result = compare(a, b, "upgrade")
+    assert ("environment.agentscope_version", "other") in dimensions(result)
+    assert result.confounded
+
+
+def test_a_check_engine_mismatch_is_a_warning() -> None:
+    a = suite(V2, SAME)
+    b = with_environment(suite(V2, SAME), check_engine_version="2.0.0")
+    result = compare(a, b, "engine")
+    assert any("check engine" in w for w in result.warnings)
+    assert dimensions(result) == []
+
+
+def test_unrecorded_resolved_content_is_a_warning_when_configurations_differ() -> None:
+    result = compare(suite(V2, SAME), suite(V3, SAME), "legacy")
+    assert any("resolved content" in w for w in result.warnings)
+    recorded = compare(
+        with_environment(suite(V2, SAME), resolved=resolved()),
+        with_environment(suite(V3, SAME), resolved=resolved()),
+        "recorded",
+    )
+    assert recorded.warnings == []
+    assert dimensions(recorded) == [("model.model", "model")]
+
+
+# --- harness errors are not regressions --------------------------------------------------
+
+
+def errored(case_id: str) -> CaseResult:
+    return CaseResult(
+        case_id=case_id,
+        case_hash=f"sha256:{case_id}",
+        run_id=None,
+        trace_id=None,
+        passed=False,
+        status=None,
+        harness_error="internal_error: boom",
+    )
+
+
+def test_a_harness_error_is_neither_a_regression_nor_a_fix() -> None:
+    a = suite(V2, [case("c1", P, P), errored("c2")])
+    b = suite(V2, [errored("c1"), case("c2", P, P)])
+    result = compare(a, b, "harness")
+    assert {c.case_id: c.change for c in result.cases} == {
+        "c1": CaseChange.HARNESS_ERROR,
+        "c2": CaseChange.HARNESS_ERROR,
+    }
+    assert all(f.regressions == 0 and f.fixes == 0 for f in result.check_flips)
+    harness = next(d for d in result.metric_deltas if d.metric == "harness_errors")
+    assert (harness.a, harness.b) == (1, 1)
