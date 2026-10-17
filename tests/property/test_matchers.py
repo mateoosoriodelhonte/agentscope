@@ -185,6 +185,10 @@ def test_signs_and_symbols_are_significant(symbols: str, text: str) -> None:
         ("«Amara Quill»", "amara quill"),
         ("  ...September!  ", "september"),
         ("\u2018Sept\u2019", "sept"),
+        ("...1987", "1987"),
+        ("\u2026 1987", "1987"),
+        (". 1987", "1987"),
+        ("(.5)", ".5"),
     ],
 )
 def test_sentence_punctuation_quotes_and_brackets_are_trimmed(a: str, b: str) -> None:

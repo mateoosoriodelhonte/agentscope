@@ -101,8 +101,9 @@ DEGRADED_STATUSES = frozenset({"insufficient_evidence", "cannot_complete", "refu
 
 
 class SuccessCriteria(StrictModel):
-    # False lets a run end without an output (max_steps, timeout): schema_validity and
-    # task_completion then do not hold it against the agent.
+    # False lets a run end without an output (max_steps, timeout): schema_validity,
+    # task_completion, timeout_behavior (max_steps) and, unless expect_recovery is set,
+    # error_recovery then do not hold it against the agent.
     must_complete: bool = True
     # Expected value of the final output's `status` field.
     expected_output_status: OutputStatus | None = None

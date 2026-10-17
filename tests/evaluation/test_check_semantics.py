@@ -285,7 +285,17 @@ def test_one_of_still_fails_for_an_unlisted_answer() -> None:
 
 @pytest.mark.parametrize(
     ("expected", "actual"),
-    [("-3", "3"), ("+1", "-1"), ("C++", "C"), ("C#", "C"), ("50%", "50"), ("$5", "5")],
+    [
+        ("-3", "3"),
+        ("+1", "-1"),
+        ("C++", "C"),
+        ("C#", "C"),
+        ("50%", "50"),
+        ("$5", "5"),
+        (".5", "5"),
+        (".NET", "NET"),
+        ("(.5)", "5"),
+    ],
 )
 def test_normalized_matching_keeps_signs_and_symbols(expected: str, actual: str) -> None:
     eval_case = case(expected={"match": "normalized", "value": expected})
@@ -379,9 +389,11 @@ def test_an_output_that_violates_the_schema_is_an_invalid_output() -> None:
     assert evaluate(case(), trace(output={"answer": 25})).invalid_output
 
 
-def test_an_exhausted_decision_repair_budget_is_an_invalid_output() -> None:
+@pytest.mark.parametrize("must_complete", [True, False])
+def test_an_exhausted_decision_repair_budget_is_an_invalid_output(must_complete: bool) -> None:
     record = trace(status=RunStatus.FAILED).model_copy(update={"error_code": "invalid_decision"})
-    assert evaluate(case(), record).invalid_output
+    eval_case = case(success_criteria={"must_complete": must_complete})
+    assert evaluate(eval_case, record).invalid_output
 
 
 def test_must_complete_false_accepts_a_run_without_output() -> None:
@@ -434,6 +446,36 @@ def test_must_complete_false_accepts_a_run_that_exhausts_its_steps() -> None:
     )
     record = trace([_timed_out()], status=RunStatus.MAX_STEPS)
     assert run_check(CheckName.TIMEOUT_BEHAVIOR, eval_case, record).status is CheckStatus.PASSED
+
+
+def test_must_complete_false_lets_a_fault_case_end_without_output() -> None:
+    """A timeout fault makes error_recovery apply too; with no output to judge and no
+    expect_recovery it must not fail the case the timeout check just accepted."""
+    eval_case = case(
+        faults=[fault(SEARCH, "timeout", on_call=None)], success_criteria={"must_complete": False}
+    )
+    record = trace([_timed_out()], status=RunStatus.MAX_STEPS)
+    result = evaluate(eval_case, record)
+    assert result.passed, [(c.name, c.message) for c in result.checks if c.status == "failed"]
+    recovery = next(c for c in result.checks if c.name is CheckName.ERROR_RECOVERY)
+    assert recovery.status is CheckStatus.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize(
+    ("criteria", "status"),
+    [
+        ({"must_complete": False, "expect_recovery": True}, RunStatus.MAX_STEPS),
+        ({"must_complete": False, "expect_recovery": False}, RunStatus.MAX_STEPS),
+        ({"must_complete": False}, RunStatus.ERROR),
+        ({}, RunStatus.MAX_STEPS),
+    ],
+)
+def test_error_recovery_still_judges_a_missing_output_otherwise(
+    criteria: dict[str, Any], status: RunStatus
+) -> None:
+    eval_case = case(faults=[fault(SEARCH, "timeout", on_call=None)], success_criteria=criteria)
+    record = trace([_timed_out()], status=status)
+    assert run_check(CheckName.ERROR_RECOVERY, eval_case, record).status is CheckStatus.FAILED
 
 
 def test_one_agent_retry_of_the_runtime_budget_is_within_budget() -> None:

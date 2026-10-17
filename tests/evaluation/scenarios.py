@@ -474,6 +474,14 @@ scenario(
     R.NOT_RECOVERED,
 )
 scenario(
+    "recovery-no-output-not-required",
+    C.ERROR_RECOVERY,
+    case(faults=search_error, success_criteria={"must_complete": False}),
+    trace([failed_search()], status=RunStatus.MAX_STEPS),
+    NA,
+    R.NO_EXPECTATION,
+)
+scenario(
     "recovery-fault-never-surfaced",
     C.ERROR_RECOVERY,
     case(faults=[fault(READ, "error")]),

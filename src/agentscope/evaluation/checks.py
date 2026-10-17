@@ -810,13 +810,24 @@ def error_recovery(ctx: CheckContext) -> CheckResult:
     """After tool failures the agent either recovered (every failed attempt was followed by
     a clean success of the same tool or of a declared recovery tool, then an answer) or
     degraded (a declining status and every answer field empty). Answering with a failure
-    left unrecovered is fabrication and always fails."""
+    left unrecovered is fabrication and always fails.
+
+    A case that sets must_complete=false and no expect_recovery accepts a run that ended
+    without an output (max_steps, timeout): there is nothing to judge. A run that ended in
+    error, or a case that sets expect_recovery, is still judged."""
     name = CheckName.ERROR_RECOVERY
     criteria = ctx.case.success_criteria
     expect = criteria.expect_recovery
     if expect is None and not any(f.kind in RECOVERY_FAULTS for f in ctx.case.faults):
         return _na(name)
     trace = ctx.trace
+    if (
+        expect is None
+        and not criteria.must_complete
+        and trace.final_output is None
+        and trace.status is not RunStatus.ERROR
+    ):
+        return _na(name, "no final output, and the case does not require the run to complete")
     failures = _failures(ctx)
     unrecovered = [f for f in failures if f.recovery is None]
 

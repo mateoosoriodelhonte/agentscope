@@ -70,9 +70,14 @@ def _invalid_output(schema_result: CheckResult | None, trace: TraceRecord) -> bo
     """The model produced an output that broke the schema, or never produced a parsable
     decision before its repair budget ran out. A run that simply ended without an output
     (timeout, max_steps, provider error) produced nothing invalid. Judged only while
-    schema_validity is enabled."""
-    if schema_result is None or schema_result.status is not CheckStatus.FAILED:
+    schema_validity is enabled; an exhausted decision repair budget counts even when the
+    case accepts a run without output (must_complete=false), since the model's responses
+    were invalid all the same."""
+    if schema_result is None:
         return False
-    return schema_result.reason is ReasonCode.SCHEMA_INVALID or (
-        trace.status is RunStatus.FAILED and trace.error_code == "invalid_decision"
+    if trace.status is RunStatus.FAILED and trace.error_code == "invalid_decision":
+        return True
+    return (
+        schema_result.status is CheckStatus.FAILED
+        and schema_result.reason is ReasonCode.SCHEMA_INVALID
     )

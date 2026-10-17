@@ -11,8 +11,8 @@ NORMALIZER_VERSION = "3"
 
 _WHITESPACE = re.compile(r"\s+")
 # Trimmed from the edges of a normalized answer: sentence punctuation, quotes and brackets
-# (plus whitespace). Signs and symbols ("-3", "C++", "C#", "50%", "$5") are kept: trimming
-# them would make different answers equal.
+# (plus whitespace). Signs and symbols ("-3", "C++", "C#", "50%", "$5") and a leading
+# decimal point (".5") are kept: trimming them would make different answers equal.
 _EDGE_CHARS = frozenset(".,;:!?¡¿…'\"`。、")
 _EDGE_CATEGORIES = frozenset({"Ps", "Pe", "Pi", "Pf"})  # brackets, initial/final quotes
 _NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
@@ -48,16 +48,29 @@ def _is_edge(ch: str) -> bool:
     return ch in _EDGE_CHARS or ch.isspace() or unicodedata.category(ch) in _EDGE_CATEGORIES
 
 
+def _leading_point(folded: str, i: int, end: int) -> bool:
+    """A lone "." that starts a token (".5", ".NET", ".env"): a decimal point or part of a
+    name, not sentence punctuation, so trimming it would make ".5" equal "5". An ellipsis
+    ("...1987") is still punctuation."""
+    return (
+        folded[i] == "."
+        and i + 1 < end
+        and folded[i + 1].isalnum()
+        and (i == 0 or folded[i - 1] != ".")
+    )
+
+
 def normalize(text: str) -> str:
-    """`fold` plus sentence punctuation, quotes and brackets trimmed from both ends.
-    Versioned as NORMALIZER_VERSION because results depend on it.
+    """`fold` plus sentence punctuation, quotes and brackets trimmed from both ends (a lone
+    leading "." before a letter or digit is kept: see `_leading_point`). Versioned as
+    NORMALIZER_VERSION because results depend on it.
 
     A plain scan from each end, so it is linear in the length of the text; an edge regex
     rescans a long punctuation run from every position, which is quadratic.
     """
     folded = fold(text)
     start, end = 0, len(folded)
-    while start < end and _is_edge(folded[start]):
+    while start < end and _is_edge(folded[start]) and not _leading_point(folded, start, end):
         start += 1
     while end > start and _is_edge(folded[end - 1]):
         end -= 1
