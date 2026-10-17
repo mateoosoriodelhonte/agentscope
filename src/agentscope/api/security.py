@@ -1,6 +1,8 @@
 """ASGI middleware that keeps the local API local.
 
 - Host check: only loopback host names (defends against DNS rebinding).
+- Remote mode: with an API token, every request (GETs and static files included) must carry
+  `Authorization: Bearer <token>`, compared in constant time.
 - Mutation guard: state-changing requests must be JSON, carry the X-AgentScope-Client
   header (which forces a CORS preflight that is never granted cross-origin), come from the
   server's own origin when an Origin header is present, and not be cross-site fetches.
@@ -10,8 +12,9 @@
 
 from __future__ import annotations
 
+import hmac
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -48,13 +51,15 @@ def parse_hostname(host: str) -> str:
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
-async def _reject(send: Send, status: int, detail: str) -> None:
+async def _reject(
+    send: Send, status: int, detail: str, extra: Sequence[tuple[bytes, bytes]] = ()
+) -> None:
     body = json.dumps({"detail": detail}).encode()
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [(b"content-type", b"application/json"), *SECURITY_HEADERS],
+            "headers": [(b"content-type", b"application/json"), *extra, *SECURITY_HEADERS],
         }
     )
     await send({"type": "http.response.body", "body": body})
@@ -70,9 +75,11 @@ class LocalOnlyMiddleware:
         max_body_bytes: int = 256 * 1024,
         large_body_paths: Iterable[str] = (),
         large_body_bytes: int = 10 * 1024 * 1024,
+        api_token: str | None = None,
     ) -> None:
         self.app = app
         self.allowed_hosts = LOOPBACK_HOSTNAMES | {h.lower() for h in allowed_hosts if h != "*"}
+        self.expected_authorization = f"Bearer {api_token}".encode() if api_token else None
         self.allowed_origins = {o.rstrip("/").lower() for o in allowed_origins}
         self.max_body_bytes = max_body_bytes
         self.large_body_paths = tuple(large_body_paths)
@@ -86,6 +93,13 @@ class LocalOnlyMiddleware:
         host = headers.get(b"host", b"").decode("latin-1")
         if parse_hostname(host) not in self.allowed_hosts:
             await _reject(send, 400, "invalid host header")
+            return
+        if self.expected_authorization is not None and not hmac.compare_digest(
+            headers.get(b"authorization", b""), self.expected_authorization
+        ):
+            await _reject(
+                send, 401, "missing or invalid API token", [(b"www-authenticate", b"Bearer")]
+            )
             return
 
         method = scope["method"].upper()
