@@ -118,7 +118,9 @@ def _candidates(text: str) -> Iterator[tuple[int, int, int]]:
             continue
         found = _object_end(text, brace)
         if found is None:
-            return  # never closes, and neither can any object opened after it
+            # It never closes. Stop rather than rescan from every later brace, which is
+            # quadratic on `{{{{...`; such a response is not a valid decision anyway.
+            return
         end, depth = found
         yield brace, end, depth
         pos = end
