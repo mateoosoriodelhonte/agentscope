@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agentscope.agents.base import AgentCatalog
 from agentscope.agents.research import CANARY
 from agentscope.domain.agents import ModelConfig
 from agentscope.domain.datasets import LimitsOverride
-from agentscope.domain.tools import FaultKind, FaultSpec
+from agentscope.domain.tools import (
+    FaultKind,
+    FaultSpec,
+    ModelFaultKind,
+    ModelFaultSpec,
+    ToolOutcome,
+)
 from agentscope.domain.traces import RunStatus
 from agentscope.runtime.runner import AgentRunner, RunRequest
 
@@ -60,6 +68,55 @@ async def test_compromised_model_is_still_contained_by_permissions(
     assert not any(
         i.executed and i.tool not in trace.permitted_tools for i in trace.tool_invocations
     )
+
+
+async def test_compromised_model_does_not_retry_a_refused_call(
+    runner: AgentRunner, catalog: AgentCatalog
+) -> None:
+    """A refused call fails the same way every time: the model moves on and answers."""
+    config = catalog.resolve("research_assistant@v1").model_copy(
+        update={"model": ModelConfig(model="scripted-compliant")}
+    )
+    trace = await runner.run(RunRequest(config=config, task=INJECTED_QUESTION))
+    assert [i.tool for i in trace.tool_invocations].count("send_email") == 1
+    assert trace.final_output["answer"] == "1987"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+async def test_every_version_carries_on_after_an_unknown_tool_response(
+    runner: AgentRunner, catalog: AgentCatalog, version: str
+) -> None:
+    trace = await trace_for(
+        runner,
+        catalog,
+        f"research_assistant@{version}",
+        task="When was the Calder Rail Bridge built?",
+        model_faults=[ModelFaultSpec(kind=ModelFaultKind.UNKNOWN_TOOL, on_call=2)],
+    )
+    refused = [i for i in trace.tool_invocations if not i.executed]
+    assert [(i.tool, i.outcome) for i in refused] == [
+        ("nonexistent_tool", ToolOutcome.PERMISSION_DENIED)
+    ]
+    assert trace.final_output["answer"] == "1911"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(("version", "status"), [("v1", RunStatus.FAILED), ("v2", None)])
+async def test_decision_repair_recovers_from_an_unparseable_response(
+    runner: AgentRunner, catalog: AgentCatalog, version: str, status: RunStatus | None
+) -> None:
+    trace = await trace_for(
+        runner,
+        catalog,
+        f"research_assistant@{version}",
+        task="How many growers take part in the 2026 Larkspur Orchard Festival?",
+        model_faults=[ModelFaultSpec(kind=ModelFaultKind.INVALID_JSON)],
+    )
+    if status is not None:
+        assert (trace.status, trace.error_code) == (status, "invalid_decision")
+        return
+    assert trace.status is RunStatus.COMPLETED
+    assert "decision_repaired" in [g.kind for g in trace.guardrail_events]
+    assert trace.final_output["answer"] == "34"  # type: ignore[index]
 
 
 async def test_v2_recovers_from_transient_search_timeout(
