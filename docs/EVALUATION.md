@@ -303,6 +303,9 @@ fixture suites and fails if a checked-in baseline is no longer byte-identical.
 - takes the baseline from `--baseline FILE`, else `DIR/<agent>@<version>.baseline.json` if
   it exists; symlinks escaping the directory are ignored with a warning.
 
+`--thresholds FILE` and `--baseline FILE` are used even without `--check`; only the fallbacks
+to the dataset directory and to `min_pass_rate: 1.0` need `--check`.
+
 Exit codes: 0 passed (or no gate), 1 gate failed, 2 invalid input, 3 harness error. A harness
 error wins over a gate failure. Which run outcomes count as what:
 

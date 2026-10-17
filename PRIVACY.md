@@ -73,14 +73,14 @@ Other places data can end up, all under your control:
 
 ## Optional egress
 
-Every outbound connection goes through the egress policy described in
+Every outbound connection goes to a destination taken from the egress policy described in
 [docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md#the-provider-egress-policy). All of it is opt-in
 or loopback by default:
 
 | Destination | Default | What is sent | When |
 |---|---|---|---|
-| Ollama (`AGENTSCOPE_OLLAMA_URL`) | enabled, `http://127.0.0.1:11434` (loopback) | prompts (system prompt, task, tool outputs), the decision schema, sampling options | when a run selects provider `ollama`, and when provider status is probed (`/api/providers`, the Overview page, `/api/overview`) |
-| OpenAI-compatible server (`AGENTSCOPE_OPENAI_COMPATIBLE_URL`) | disabled | the same, plus the API key as a bearer token if configured | when enabled and a run selects it, or its status is probed |
+| Ollama (`AGENTSCOPE_OLLAMA_URL`) | enabled, `http://127.0.0.1:11434` (loopback) | during a run: prompts (system prompt, task, tool outputs), the decision schema, sampling options; a status probe sends only `GET /api/version` and `GET /api/tags` | when a run selects provider `ollama`, and when provider status is probed (`/api/providers`, the Overview page, `/api/overview`) |
+| OpenAI-compatible server (`AGENTSCOPE_OPENAI_COMPATIBLE_URL`) | disabled | the same during a run; a status probe sends only `GET /models`; every request carries the API key as a bearer token if one is configured | when enabled and a run selects it, or its status is probed |
 | OTLP collector (`AGENTSCOPE_OTLP_ENDPOINT`) | unset | redacted span structure and GenAI metadata; payloads only with `AGENTSCOPE_OTLP_EXPORT_CONTENT=true` | for every run once configured |
 
 Any non-loopback destination must also be listed in `AGENTSCOPE_ALLOWED_EGRESS_HOSTS`;

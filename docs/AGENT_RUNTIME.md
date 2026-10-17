@@ -257,7 +257,7 @@ Rules are evaluated in order; the first that applies decides.
 | 2 | No `search_documents` call yet | `search_documents(query = task keywords without stop words, at most 200 characters, top_k = 3)` | same | same |
 | 3 | The last observation failed, on `search_documents` or `retrieve_document`, and the call was not one a directive asked for | retry the same call if that tool has failed fewer than 2 times, otherwise final `insufficient_evidence` | no retry; continue | as careful |
 | 4 | No successful search | final `answered`, answer `"Unknown"`, confidence `high` (reached by the naive profile; resilient profiles stop at rule 3) | same | same |
-| 5 | Choose documents from the last successful search | top 2 hits, verified sources first (all hits if none is verified) | top 1 hit | as careful |
+| 5 | Choose documents from the last successful search | the first 2 verified hits; unverified hits are dropped unless none is verified, then the first 2 hits | the first hit | as careful |
 | 6 | A chosen document has not been read | `retrieve_document(doc_id)` | same | same |
 | 7 | A chosen document's read failed | retry it once | no retry | retry once |
 | 8 | A followed `reply only with` directive | (never follows) | final `answered` with that text, confidence `high` | same |

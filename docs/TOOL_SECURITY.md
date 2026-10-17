@@ -39,7 +39,8 @@ Built-in tools (`src/agentscope/tools/builtin/`), all registered by `builtin_too
 
 Packaged data is read through `importlib.resources`, validated once into Pydantic models
 and, for records and mock API fixtures, exposed through read-only mappings
-(`MappingProxyType`). Tools answer by exact key lookup.
+(`MappingProxyType`). Lookups are by exact id or path; only `search_documents` ranks, by
+keyword overlap with titles, bodies and fact subjects.
 
 ## Argument and output validation
 
@@ -105,7 +106,9 @@ Per-tool hooks:
 |---|---|---|---|
 | `search_documents` | default | first snippet replaced by the payload | payload appended to the first snippet |
 | `retrieve_document` | body cut to a third, facts removed | fact values distorted (integers +1, or +4 above 100; decimals ×1.5; text gets " (disputed)"), payload appended to the body | payload appended to the body |
-| `lookup_record` | projects keep the first half of their workstreams (`workstream_count` still says how many exist); employees lose their notes | project estimates halved or employee capacity +8 hours (at most 80), payload appended to notes | default |
+| `lookup_record` | projects keep the first half of their workstreams (`workstream_count` still says how many exist); employees lose their notes | project estimates halved or employee capacity +8 hours (at most 80), payload appended to notes | payload appended to notes |
+| `list_records` | default | statuses inverted (`active` reported as `on_hold`, or `on_leave` for employees, and back; payload unused) | payload appended to the first record's name |
+| `check_calendar` | default | the week shown as free: nothing booked, full capacity available, one zero-hour commitment titled with the payload | payload appended to the first commitment's title (or a zero-hour commitment added) |
 | `calculate` | fractional part dropped | result 10% high (payload unused) | payload appended to `display` |
 | `inspect_mock_api` | only the first body field kept | payload as `message`; a body with a `state` reports `operational` from a `cached` source | payload appended to `message` |
 | `create_task`, `send_email`, `delete_record` | default | payload as `detail` | payload appended to `detail` |
@@ -188,7 +191,7 @@ Packaged data stays readable through `importlib.resources`.
 ## The provider egress policy
 
 Tools have no network access at all. Model providers and the optional OTLP exporter do, and
-only through `src/agentscope/providers/http.py`:
+only to destinations derived by `src/agentscope/providers/http.py`:
 
 - `EgressPolicy.from_settings()` derives every allowed destination from Settings alone:
   `AGENTSCOPE_OLLAMA_URL` when Ollama is enabled, `AGENTSCOPE_OPENAI_COMPATIBLE_URL` when that
@@ -198,19 +201,26 @@ only through `src/agentscope/providers/http.py`:
   other host must be listed exactly in `AGENTSCOPE_ALLOWED_EGRESS_HOSTS` (or the older
   `AGENTSCOPE_ALLOWED_MODEL_HOSTS`). Credentials (an API key) are never sent to a non-loopback
   host over plain http. Refusal messages never echo the configured URL.
-- `egress_client()` is the only HTTP client factory. Its transport checks every request
-  against one target: same scheme, host and port, and one of that target's fixed routes:
+- `egress_client()` is the only factory for the providers' HTTP clients (httpx). Its
+  transport checks every request against one target: same scheme, host and port, and one of
+  that target's fixed routes:
 
   | Target | Routes |
   |---|---|
   | Ollama | `POST /api/chat`, `GET /api/tags`, `GET /api/version` |
   | OpenAI-compatible | `POST /chat/completions`, `GET /models` (under the base URL's path) |
-  | OTLP | `POST /v1/traces` |
+  | OTLP | `POST /v1/traces` (declared in the policy; see below) |
 
-  Query strings are not allowed. Clients never follow redirects (a 3xx answer becomes a
+  Query strings are not allowed. These clients never follow redirects (a 3xx answer becomes a
   provider error), ignore proxy, CA-bundle and netrc settings from the environment
   (`trust_env=False`), make no transport retries, and have explicit timeouts (connect at most
   5 seconds).
+- The OTLP exporter (`src/agentscope/tracing/export.py`) does not use `egress_client()`: the
+  OpenTelemetry exporter sends over its own `requests` session. Its only endpoint is the
+  policy's OTLP target with the path `/v1/traces`; the session ignores proxy, CA-bundle and
+  netrc settings (`trust_env=False`) and refuses redirects (`max_redirects=0`), and the
+  exporter has a 5-second timeout per batch, its own retries included. See
+  [TRACING.md](TRACING.md#opt-in-otlp-export).
 - Transport errors become `ProviderError`s that name the target as `host:port` but never
   headers or bodies. The OpenAI-compatible provider scrubs its API key from any error text,
   even when a server echoes it back.

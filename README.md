@@ -34,9 +34,10 @@ failure modes, not a measurement of any real model.
   and hardened prompts carry an instruction-hierarchy clause.
 
 **Simulated tools and fault injection** ([docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md))
-- Ten tools over packaged synthetic data, validated with Pydantic in strict mode on every
-  call. No tool touches the network, the host filesystem or a shell; the three write tools
-  only append to a per-run, in-memory sandbox.
+- Ten tools over packaged synthetic data. On every call, arguments are validated with
+  Pydantic in strict mode and outputs against the tool's output model. No tool touches the
+  network, the host filesystem or a shell; the three write tools only append to a per-run,
+  in-memory sandbox.
 - Seven tool fault kinds (`timeout`, `error`, `malformed`, `incomplete`, `misleading`,
   `injection`, `permission_denied`) and four model fault kinds (`invalid_json`, `empty`,
   `schema_violation`, `unknown_tool`), targeted by call number.
@@ -191,7 +192,7 @@ Exit codes (`src/agentscope/cli/common.py`):
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. `eval` without `--check` exits 0 even when cases fail. |
+| 0 | Success. `eval` without a gate (no `--check` and no `--thresholds`) exits 0 even when cases fail. |
 | 1 | Checks or gate failed: `eval --check` gate failure, `run --expect` verdict failure, `compare --fail-on-regression` with a regression. |
 | 2 | Invalid input: dataset errors, incompatible baseline, unknown agent or dataset, disabled provider, bad flags, `db purge` without `--yes`, unknown run id. |
 | 3 | Runtime or harness error: a case the harness could not judge (`internal_error`, `internal_recursion_limit`), an unexpected exception, an unusable database, or a purge that could not finish erasing. A harness error wins over a gate failure. |
@@ -314,8 +315,8 @@ host must be listed in `AGENTSCOPE_ALLOWED_EGRESS_HOSTS`.
   strict Content-Security-Policy on every response. Remote mode requires a bearer token and
   is meant for API clients: the dashboard cannot send the token.
 - Nothing leaves the machine unless you configure it: no telemetry, LangSmith tracing forced
-  off, `OTEL_*` variables ignored, and every outbound HTTP request checked against an egress
-  policy built from `AGENTSCOPE_*` settings.
+  off, `OTEL_*` variables ignored, and every outbound destination (model providers, the
+  optional OTLP collector) taken from an egress policy built from `AGENTSCOPE_*` settings.
 - Secrets are redacted before anything is stored or exported; datasets containing
   secret-shaped values are refused on import.
 
@@ -373,6 +374,8 @@ src/agentscope/
   storage/           ORM models, repository, Alembic migrations
   services.py        the engine shared by the CLI and the API
   suite_runner.py    runs a dataset sequentially and aggregates verdicts
+  analysis.py        overview and failure analysis over stored verdicts
+  demo.py            the demo seed
   jobs.py            in-memory background jobs for the API
   api/               FastAPI app, security middleware, routes, schemas
   cli/               Typer commands

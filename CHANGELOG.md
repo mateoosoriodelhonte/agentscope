@@ -31,7 +31,8 @@ First release (V1): a local-first platform to debug, evaluate and compare AI age
 **Tools and fault injection**
 - Ten simulated tools over packaged synthetic data (documents, staff and project records,
   calendars, a safe calculator, a fixture-backed mock API, and three sandbox-only write tools),
-  validated with Pydantic in strict mode.
+  with arguments validated by Pydantic in strict mode and outputs checked against each tool's
+  output model.
 - Tool faults `timeout`, `error`, `malformed`, `incomplete`, `misleading`, `injection`,
   `permission_denied`, and model faults `invalid_json`, `empty`, `schema_violation`,
   `unknown_tool`, targeted by call number.
@@ -43,7 +44,8 @@ First release (V1): a local-first platform to debug, evaluate and compare AI age
 - Ollama provider (local; enabled by default, contacted only when selected or probed; never
   downloads models) and an opt-in OpenAI-compatible provider.
 - Egress policy built from settings alone, with fixed routes per target, no redirects and no
-  proxy settings from the environment; provider status probes.
+  proxy settings from the environment for provider requests and OTLP export; provider status
+  probes.
 
 **Tracing**
 - One OpenTelemetry span per run, node, model call, tool attempt and guardrail decision, with

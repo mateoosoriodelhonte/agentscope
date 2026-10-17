@@ -64,7 +64,7 @@ uv run pytest --cov --cov-report=term         # coverage (as in CI)
 ### PostgreSQL
 
 Tests marked `postgres` (repository and migration tests) run only when
-`AGENTSCOPE_TEST_POSTGRES_URL` points at a **disposable** database: the migration tests run
+`AGENTSCOPE_TEST_POSTGRES_URL` points at a **disposable** database: both groups run
 `DROP SCHEMA public CASCADE` on it. For example:
 
 ```sh
@@ -101,9 +101,11 @@ cd frontend && npm run dev       # terminal 2, then open http://127.0.0.1:5173
 ```
 
 The API accepts the proxied requests because the `Host` header (`127.0.0.1:5173`) is a
-loopback name, and state-changing requests from the dev origin pass the mutation guard
-because `http://127.0.0.1:5173` and `http://localhost:5173` are the default
-`AGENTSCOPE_ALLOWED_ORIGINS`. A dev server on another origin needs that setting changed.
+loopback name. State-changing requests pass the mutation guard because the proxy keeps that
+`Host`, so the browser's `Origin` (`http://127.0.0.1:5173`) equals the server's own origin as
+the API sees it. `http://127.0.0.1:5173` and `http://localhost:5173` are also the default
+`AGENTSCOPE_ALLOWED_ORIGINS`, which matters only for a proxy that rewrites `Host` (Vite's
+`changeOrigin: true`); such a proxy on another origin needs that origin added.
 
 ## Docker Compose
 
@@ -152,7 +154,7 @@ loaded implicitly. List and object values are JSON, for example
 | `AGENTSCOPE_ALLOW_REMOTE` | `false` | Remote mode, as `serve --allow-remote`. |
 | `AGENTSCOPE_API_TOKEN` | unset | Bearer token required on every request in remote mode (at least 16 characters). Secret. |
 | `AGENTSCOPE_ALLOWED_ORIGINS` | `["http://127.0.0.1:5173", "http://localhost:5173"]` | Extra `Origin` values allowed to make state-changing requests (the server's own origin is always allowed). |
-| `AGENTSCOPE_MAX_REQUEST_BYTES` | `5242880` (5 MiB) | Body limit for `/api/datasets` requests (at least 1024). Other requests are limited to 256 KiB. |
+| `AGENTSCOPE_MAX_REQUEST_BYTES` | `5242880` (5 MiB) | Body limit for `/api/datasets` requests (at least 1024). Other requests are limited to 256 KiB. The dataset loader refuses documents over 5 MiB whatever this value, so raising it does not admit larger datasets. |
 | `AGENTSCOPE_ENABLE_OLLAMA` | `true` | Makes the Ollama provider selectable. Nothing is sent until a run selects it or its status is probed. |
 | `AGENTSCOPE_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server. A non-loopback host must be allowlisted. |
 | `AGENTSCOPE_ALLOWED_EGRESS_HOSTS` | `[]` | Non-loopback hostnames or IP addresses that providers and the OTLP exporter may contact (exact matches). Empty means loopback only. |
@@ -185,7 +187,7 @@ from the process environment, with one warning naming them (never their values).
 |---|---|
 | `400 {"detail": "invalid host header"}` | The `Host` header is not `127.0.0.1`, `localhost` or `::1`. Open the app through one of those, or (remote mode) pass `--allowed-host NAME`. |
 | `403 missing X-AgentScope-Client header`, or `must use Content-Type: application/json` | Scripts must send both headers on POST requests: `curl -X POST -H 'Content-Type: application/json' -H 'X-AgentScope-Client: 1' ...`. |
-| `403 cross-origin request rejected` / `cross-site request rejected` | The request came from another origin. For a dev server on another port, add its origin to `AGENTSCOPE_ALLOWED_ORIGINS`. |
+| `403 cross-origin request rejected` / `cross-site request rejected` | The request came from another origin. A dev proxy that rewrites the `Host` header needs its origin in `AGENTSCOPE_ALLOWED_ORIGINS`; a `Sec-Fetch-Site` other than `same-origin` or `none` is always refused. |
 | `413 request body exceeds ... bytes` | 256 KiB for most requests; dataset requests up to `AGENTSCOPE_MAX_REQUEST_BYTES`. |
 | `429` when starting work | 2 jobs are running and 16 queued; wait for some to finish. |
 | The dashboard does not load at `/` | Build it: `cd frontend && npm run build`, then restart `serve`. |

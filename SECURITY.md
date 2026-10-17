@@ -43,9 +43,9 @@ Every request other than `GET`, `HEAD` and `OPTIONS` must:
 - use `Content-Type: application/json` (forms cannot);
 - carry `X-AgentScope-Client: 1` (a custom header forces a CORS preflight, which the server
   never grants: it sends no CORS headers);
-- if an `Origin` header is present, match the server's own `scheme://host:port` or a value in
-  `AGENTSCOPE_ALLOWED_ORIGINS` (default: the Vite dev server origins); `Origin: null` is
-  rejected;
+- if an `Origin` header is present, match the server's own origin (the request scheme and its
+  already-checked `Host` header) or a value in `AGENTSCOPE_ALLOWED_ORIGINS` (default: the Vite
+  dev server origins); `Origin: null` is rejected;
 - not be a `cross-site` or `same-site` fetch according to `Sec-Fetch-Site` (only
   `same-origin` and `none` pass).
 
@@ -98,10 +98,12 @@ leak is detected even when the stored copy is redacted. Details:
   off, their API keys and endpoints are removed, and `OTEL_EXPORTER_OTLP_*`, `OTEL_SPAN_*`,
   `OTEL_ATTRIBUTE_*`, `OTEL_TRACES_EXPORTER` and `OTEL_SDK_DISABLED` are removed. Each run
   also passes `callbacks=[]` to LangGraph and disables LangSmith tracing for its duration.
-- Every outbound HTTP request goes through one client factory that checks it against an
-  immutable policy built from Settings: only the configured Ollama, OpenAI-compatible and
-  OTLP targets, only their fixed routes, loopback unless a host is allowlisted, credentials to
-  non-loopback hosts only over https, no redirects, no proxy or netrc settings from the
+- Every outbound destination comes from an immutable policy built from Settings: only the
+  configured Ollama, OpenAI-compatible and OTLP targets, loopback unless a host is
+  allowlisted, credentials and OTLP headers to non-loopback hosts only over https. Model
+  provider requests go through one client factory whose transport checks each request
+  against its target and fixed routes; the OTLP exporter sends only to the policy's
+  `/v1/traces` URL. Neither follows redirects or reads proxy or netrc settings from the
   environment. Details: [docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md#the-provider-egress-policy).
 - No `.env` file is read implicitly, so a project-local file cannot redirect a base URL while
   an API key comes from the shell.
@@ -224,8 +226,9 @@ Limitations:
 ## Supply chain
 
 - `uv.lock` is committed and installs use `--frozen`; uv resolves nothing published after
-  `exclude-newer` (2026-10-09) in `pyproject.toml`. New npm packages are installed with
-  `npm install --before=2026-10-09`.
+  `exclude-newer` (2026-10-09) in `pyproject.toml`. By convention (no tooling enforces it),
+  new npm packages are added with `npm install --before=2026-10-09`; `npm ci` then installs
+  exactly what `package-lock.json` pins.
 - GitHub Actions in `.github/workflows/ci.yml` are pinned to full commit SHAs, and the
   workflow token is read-only (`permissions: contents: read`).
 - CI runs `npm audit --omit=dev --audit-level=high` on every push and pull request.

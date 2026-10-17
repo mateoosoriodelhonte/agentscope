@@ -130,7 +130,8 @@ secret-shaped string a model leaked is still detected as a leak
 Payload size: a payload is serialized as JSON with at most 65,536 characters. If it is
 larger, string leaves longer than 8,192 characters are cut (with `… [truncated N chars]`);
 if it is still too large, it is replaced by `{"_truncated": true, "_original_chars": N,
-"preview": <first 4,096 characters>}`. Either way the span gets
+"preview": ...}`, where `N` is the length of the JSON after the leaves were cut and `preview`
+holds its first 4,096 characters. Either way the span gets
 `agentscope.payload.truncated=true`.
 
 Redaction is pattern-based: a secret that matches no pattern, key name or configured value is
@@ -205,8 +206,9 @@ calls, verdict). A run opens the trace explorer (`/runs/:runId`):
 - a span tree grouped by step, with outcome and duration columns; duration bars switch between
   relative and timeline mode (`t`);
 - detail tabs that depend on the span: Decision and Messages for plan and chat spans (exactly
-  what the model saw), Verdict for guard spans, Call, Result and Attempts for tool spans,
-  Observation, Validation, Outcome, and a Raw tab with every attribute;
+  what the model saw), Verdict for guard and `guardrail tool_policy` spans, Findings for
+  `guardrail content_scan` spans, Call, Result and Attempts for tool spans, Observation,
+  Validation, Outcome, and a Raw tab with every attribute;
 - a verdict panel (failures first) when the run was evaluated: activating a check sets
   `?check=`, selects and outlines its evidence spans (`n` / `N` cycle through them), and shows
   an expected-versus-executed tool sequence for evidence about something that never happened.
