@@ -40,10 +40,13 @@ const seedError = computed(() =>
 )
 
 const data = computed(() => overview.data.value)
+// The built-in datasets are always stored, so they never make a fresh data dir non-empty:
+// only what was recorded (runs, evaluations, comparisons) does.
+const RECORDED = ['runs', 'suites', 'experiments'] as const
 const isEmpty = computed(() => {
   const d = data.value
   if (!d) return false
-  return Object.values(d.counts).every((n) => n === 0) && !d.recent_runs.length && !d.recent_suites.length
+  return RECORDED.every((key) => !d.counts[key]) && !d.recent_runs.length && !d.recent_suites.length
 })
 const countsLine = computed(() => {
   const counts = data.value?.counts ?? {}
@@ -86,9 +89,24 @@ const hasSeries = computed(() =>
 const filteredToNothing = computed(
   () => Boolean(query.value.agent) && !hasSeries.value && !suites.value.length && !runs.value.length,
 )
+/**
+ * The latest gate belongs to the newest finished suite that was gated (that is how the API
+ * picks it). Recent suites are newest first, so the first gated, finished one is that suite;
+ * past them, the newest gated point is the closest the series can tell.
+ */
+const gatedSuiteId = computed(() => {
+  const d = data.value
+  if (!d?.latest_gate) return null
+  const recent = d.recent_suites.find((s) => s.status === 'completed' && s.gate_passed !== null)
+  if (recent) return recent.suite_id
+  const points = d.pass_rate_series.flatMap((s) => s.points).filter((p) => p.gate_passed !== null)
+  points.sort((a, b) => (a.finished_at < b.finished_at ? 1 : a.finished_at > b.finished_at ? -1 : 0))
+  return points[0]?.suite_id ?? null
+})
 const threshold = computed(() => {
   const rule = data.value?.latest_gate?.rules.find((r) => r.name === 'min_pass_rate')
-  return typeof rule?.threshold === 'number' ? rule.threshold : null
+  const suiteId = gatedSuiteId.value
+  return typeof rule?.threshold === 'number' && suiteId ? { value: rule.threshold, suiteId } : null
 })
 
 function onAgent(event: Event): void {
