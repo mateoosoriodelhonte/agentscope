@@ -155,6 +155,28 @@ describe('CompareView', () => {
     expect(router.currentRoute.value.query.experiment).toBe('exp-2')
   })
 
+  it('says why the server refused to run an experiment, issue by issue', async () => {
+    const { page } = await open('/compare', {
+      'POST /api/experiments': () =>
+        json(
+          {
+            detail: 'dataset research-assistant@1 cannot be evaluated with this agent',
+            issues: [{ path: '/cases/0/agent', message: 'does not match task_planner', severity: 'error' }],
+          },
+          422,
+        ),
+    })
+    const selects = page.findAll('[aria-labelledby="run-experiment-title"] select')
+    await selects[0]!.setValue('research-assistant@1')
+    await selects[1]!.setValue('research_assistant@v1')
+    await selects[2]!.setValue('research_assistant@v2')
+    await page.findAll('button').find((x) => x.text() === 'Run both and compare')!.trigger('click')
+    await flushPromises()
+    const alert = page.find('[role="alert"]')
+    expect(alert.text()).toContain('Could not compare: dataset research-assistant@1 cannot be evaluated with this agent')
+    expect(alert.findAll('li').map((li) => li.text())).toEqual(['/cases/0/agent does not match task_planner'])
+  })
+
   it('shows a filled-in example when there are fewer than two evaluations', async () => {
     const { page } = await open('/compare', { 'GET /api/evaluations': [suiteItem()] })
     expect(page.find('.example').text()).toContain('agentscope eval --dataset research-assistant --agent research_assistant@v1')

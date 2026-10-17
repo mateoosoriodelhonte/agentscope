@@ -120,6 +120,32 @@ describe('NewRunDrawer', () => {
     })
   })
 
+  it('lists the located reasons the server gave for refusing the run', async () => {
+    fetchMock.mockImplementation(async (input: string) =>
+      input === '/api/agents'
+        ? json(agentsResponse())
+        : json(
+            {
+              detail: 'the request is invalid',
+              issues: [{ path: '/body/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' }],
+            },
+            422,
+          ),
+    )
+    const values = Array.from({ length: 33 }, (_, i) => `v${i}`)
+    const drawer = await openDrawer({
+      agentRef: 'research_assistant@v1',
+      task: 'Which value?',
+      expected: { field: 'answer', match: 'one_of', value: null, values, tolerance: null, max_chars: null },
+    })
+    await submit(drawer)
+    const alerts = drawer.findAll('[role="alert"]').map((a) => a.text())
+    expect(alerts.some((text) => text.includes('/expected/values List should have at most 32 items after validation, not 33'))).toBe(true)
+    expect(alerts.some((text) => text.includes('Could not start the run: the request is invalid'))).toBe(true)
+    // The refused field is marked, as it would be for a problem found before sending.
+    expect(drawer.find('textarea[aria-invalid="true"]').exists()).toBe(true)
+  })
+
   it('shows why the server refused the run', async () => {
     fetchMock.mockImplementation(async (input: string) =>
       input === '/api/agents'

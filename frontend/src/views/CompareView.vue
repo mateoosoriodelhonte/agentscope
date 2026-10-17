@@ -12,6 +12,7 @@ import MetricDeltaTable from '@/components/compare/MetricDeltaTable.vue'
 import TraceDiff from '@/components/compare/TraceDiff.vue'
 import CopyButton from '@/components/ui/CopyButton.vue'
 import ErrorState from '@/components/ui/ErrorState.vue'
+import IssueList from '@/components/ui/IssueList.vue'
 import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import ViewToggle from '@/components/ui/ViewToggle.vue'
@@ -121,7 +122,7 @@ const diffRuns = useResource(
 )
 const creatingError = computed(() => {
   const failure = creating.error.value ?? compareError.value
-  return failure ? describeError(failure).message : null
+  return failure ? describeError(failure) : null
 })
 const showPicker = computed(() => !query.value.experiment && !creating.running.value && !comparing.value)
 
@@ -149,7 +150,12 @@ watch(data, (value) => setPageDetail(value ? value.name : null), { immediate: tr
     <p v-if="creating.running.value || comparing" class="callout info" role="status">
       Computing the comparison… {{ comparing ? '' : jobProgress(creating.job.value) }}
     </p>
-    <p v-if="creatingError" class="callout fail" role="alert">Could not compare: {{ creatingError }}</p>
+    <div v-if="creatingError" class="callout fail" role="alert">
+      <div>
+        Could not compare: {{ creatingError.message }}
+        <IssueList v-if="creatingError.issues.length" :issues="creatingError.issues" />
+      </div>
+    </div>
 
     <template v-if="showPicker">
       <div class="pickers">

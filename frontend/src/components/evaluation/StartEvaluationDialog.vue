@@ -2,8 +2,17 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { api } from '@/api/client'
 import { describeError } from '@/api/errors'
-import { CHECK_NAMES, type AgentsResponse, type CheckName, type DatasetSummary, type GateThresholds, type JobAccepted } from '@/api/types'
+import {
+  CHECK_NAMES,
+  type AgentsResponse,
+  type CheckName,
+  type DatasetSummary,
+  type GateThresholds,
+  type JobAccepted,
+  type ValidationIssue,
+} from '@/api/types'
 import ErrorState from '@/components/ui/ErrorState.vue'
+import IssueList from '@/components/ui/IssueList.vue'
 import Modal from '@/components/ui/Modal.vue'
 import type { FieldIssue } from '@/composables/parseJson'
 
@@ -31,6 +40,8 @@ const required = ref<CheckName[]>([])
 const issues = ref<FieldIssue[]>([])
 const busy = ref(false)
 const error = ref<string | null>(null)
+/** The server's reasons for refusing the evaluation (e.g. cases that do not fit the agent). */
+const errorIssues = ref<ValidationIssue[]>([])
 
 const refOf = (d: DatasetSummary) => `${d.name}@${d.version}`
 const versions = computed(() => catalog.value?.agents.flatMap((a) => a.versions.map((v) => `${v.agent}@${v.version}`)) ?? [])
@@ -61,6 +72,7 @@ watch(
     if (!open) return
     issues.value = []
     error.value = null
+    errorIssues.value = []
     if (datasets.value && catalog.value) applyDefaults()
     else void load()
   },
@@ -112,6 +124,7 @@ async function submit(): Promise<void> {
   if (found.length) return
   busy.value = true
   error.value = null
+  errorIssues.value = []
   try {
     const accepted = await api.createEvaluation({
       agent_ref: agentRef.value,
@@ -121,7 +134,9 @@ async function submit(): Promise<void> {
     })
     emit('started', accepted)
   } catch (e) {
-    error.value = describeError(e).message
+    const described = describeError(e)
+    error.value = described.message
+    errorIssues.value = described.issues
   } finally {
     busy.value = false
   }
@@ -183,7 +198,12 @@ async function submit(): Promise<void> {
       <ul v-if="issues.length" class="callout fail issues" role="alert">
         <li v-for="issue in issues" :key="issue.path"><code>{{ issue.path }}</code> {{ issue.message }}</li>
       </ul>
-      <p v-if="error" class="callout fail" role="alert">Could not start the evaluation: {{ error }}</p>
+      <div v-if="error" class="callout fail" role="alert">
+        <div>
+          Could not start the evaluation: {{ error }}
+          <IssueList v-if="errorIssues.length" :issues="errorIssues" />
+        </div>
+      </div>
     </form>
     <template #footer>
       <button type="button" class="btn" :disabled="busy" @click="emit('close')">Cancel</button>

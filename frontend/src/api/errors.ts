@@ -1,4 +1,5 @@
 import { ApiError, JobFailedError } from './client'
+import type { ValidationIssue } from './types'
 
 /**
  * What went wrong, in the terms an empty state needs: each kind has its own fix.
@@ -13,6 +14,8 @@ export interface DescribedError {
   kind: ErrorKind
   status: number | null
   message: string
+  /** Why a request was refused, by location (a 422's `issues`); empty when not given. */
+  issues: ValidationIssue[]
 }
 
 const MIGRATION = /db upgrade|migration|database revision|no such table|undefinedtable/i
@@ -21,15 +24,16 @@ const UPSTREAM_DOWN = new Set([502, 503, 504])
 export function describeError(error: unknown): DescribedError {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof ApiError) {
-    if (MIGRATION.test(message)) return { kind: 'migration', status: error.status, message }
-    if (error.status === 404) return { kind: 'not_found', status: 404, message }
-    if (UPSTREAM_DOWN.has(error.status)) return { kind: 'unreachable', status: error.status, message }
-    return { kind: 'other', status: error.status, message }
+    const { status, issues } = error
+    if (MIGRATION.test(message)) return { kind: 'migration', status, message, issues }
+    if (status === 404) return { kind: 'not_found', status, message, issues }
+    if (UPSTREAM_DOWN.has(status)) return { kind: 'unreachable', status, message, issues }
+    return { kind: 'other', status, message, issues }
   }
-  if (error instanceof JobFailedError) return { kind: 'other', status: null, message }
+  if (error instanceof JobFailedError) return { kind: 'other', status: null, message, issues: [] }
   // fetch() rejects with a TypeError when nothing answers at all.
-  if (error instanceof TypeError) return { kind: 'unreachable', status: null, message }
-  return { kind: 'other', status: null, message }
+  if (error instanceof TypeError) return { kind: 'unreachable', status: null, message, issues: [] }
+  return { kind: 'other', status: null, message, issues: [] }
 }
 
 /** True for an aborted request: not an error worth showing. */

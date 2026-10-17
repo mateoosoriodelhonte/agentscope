@@ -147,6 +147,29 @@ describe('errors', () => {
     })
   })
 
+  it('keeps the located issues of a 422, named from the request body', async () => {
+    const issues = [
+      { path: '/body/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' },
+      { path: '/cases/0/agent', message: 'agent research_assistant does not match', severity: 'warning' },
+      { path: '/body', message: 'Field required' },
+      { message: 42 },
+    ]
+    fetchMock.mockResolvedValueOnce(json({ detail: 'the request is invalid', issues }, 422))
+    const error = await api.createRun({ agent_ref: 'a@v1', task: 'q' }).catch((e: unknown) => e)
+    expect(error).toMatchObject({ status: 422, message: 'the request is invalid' })
+    expect((error as ApiError).issues).toEqual([
+      { path: '/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' },
+      { path: '/cases/0/agent', message: 'agent research_assistant does not match', severity: 'warning' },
+      { path: '/', message: 'Field required', severity: 'error' },
+    ])
+  })
+
+  it('has no issues when the body carries none', async () => {
+    fetchMock.mockResolvedValueOnce(json({ detail: 'run not found' }, 404))
+    const error = await api.getRun('missing').catch((e: unknown) => e)
+    expect((error as ApiError).issues).toEqual([])
+  })
+
   it('keeps a structured error body for the caller', async () => {
     const body = { detail: { message: 'purge again', result: { deleted: { runs: 2 } } } }
     fetchMock.mockResolvedValueOnce(json(body, 409))

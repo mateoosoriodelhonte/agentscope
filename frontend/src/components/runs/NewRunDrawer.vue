@@ -157,7 +157,16 @@ async function submit(): Promise<void> {
     return
   }
   const done = await job.start(() => api.createRun(body))
-  if (!done) return
+  if (!done) {
+    const described = job.error.value ? describeError(job.error.value) : null
+    if (described?.issues.length) {
+      // The server's located reasons join the form's own list and mark their fields.
+      issues.value = described.issues.map(({ path, message }) => ({ path, message }))
+      await nextTick()
+      issueList.value?.focus()
+    }
+    return
+  }
   closeNewRun()
   await router.push(`/runs/${encodeURIComponent(done.resource_id)}`)
 }

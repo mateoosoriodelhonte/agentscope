@@ -108,6 +108,33 @@ describe('EvaluationsView', () => {
     expect(router.currentRoute.value.fullPath).toBe('/evaluations/suite-new?job=job-e')
   })
 
+  it('says why the server refused to start the evaluation, issue by issue', async () => {
+    const { page } = await open('/evaluations?start=true', {
+      'GET /api/evaluations': SUITES,
+      'GET /api/datasets': [datasetSummary()],
+      'GET /api/agents': agentsResponse(),
+      'POST /api/evaluations': () =>
+        json(
+          {
+            detail: 'dataset research-assistant@1 cannot be evaluated with this agent',
+            issues: [
+              { path: '/cases/0/agent', message: "case agent 'research_assistant' does not match task_planner", severity: 'error' },
+              { path: '/cases/3/expected_tool_calls/0/tool', message: 'unknown tool search_documents', severity: 'error' },
+            ],
+          },
+          422,
+        ),
+    })
+    await page.find('[role="dialog"] form').trigger('submit')
+    await flushPromises()
+    const alert = page.find('[role="dialog"] [role="alert"]')
+    expect(alert.text()).toContain('Could not start the evaluation: dataset research-assistant@1 cannot be evaluated with this agent')
+    expect(alert.findAll('li').map((li) => li.text())).toEqual([
+      "/cases/0/agent case agent 'research_assistant' does not match task_planner",
+      '/cases/3/expected_tool_calls/0/tool unknown tool search_documents',
+    ])
+  })
+
   it('sends the minimum pass rate as the decimal that was typed', async () => {
     const { page, fetchMock } = await open('/evaluations?start=true', {
       'GET /api/evaluations': SUITES,

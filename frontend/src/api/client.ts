@@ -22,9 +22,16 @@ import type {
   SettingsView,
   SuiteListItem,
   SuiteResult,
+  ValidationIssue,
 } from './types'
 
 export class ApiError extends Error {
+  /**
+   * Why the server refused the request, located by path: the `issues` of a 422 body. The
+   * `detail` (the message) only says that the request is invalid, never why.
+   */
+  readonly issues: ValidationIssue[]
+
   constructor(
     readonly status: number,
     message: string,
@@ -33,7 +40,33 @@ export class ApiError extends Error {
   ) {
     super(message)
     this.name = 'ApiError'
+    this.issues = errorIssues(body)
   }
+}
+
+/** Request validation locates fields under /body; forms name them from the body's root. */
+function bodyPath(path: string): string {
+  if (path === '/body') return '/'
+  return path.startsWith('/body/') ? path.slice('/body'.length) : path
+}
+
+/** The `issues` list of an error body (ValidationIssue), skipping anything malformed. */
+function errorIssues(body: unknown): ValidationIssue[] {
+  if (body === null || typeof body !== 'object') return []
+  const raw = (body as { issues?: unknown }).issues
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item: unknown): ValidationIssue[] => {
+    if (item === null || typeof item !== 'object') return []
+    const { path, message, severity } = item as { path?: unknown; message?: unknown; severity?: unknown }
+    if (typeof message !== 'string') return []
+    return [
+      {
+        path: bodyPath(typeof path === 'string' ? path : ''),
+        message,
+        severity: severity === 'warning' ? 'warning' : 'error',
+      },
+    ]
+  })
 }
 
 /**

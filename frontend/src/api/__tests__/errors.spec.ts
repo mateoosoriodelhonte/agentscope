@@ -16,6 +16,11 @@ describe('describeError', () => {
     expect(describeError(error).kind).toBe(kind)
   })
 
+  it('carries the located issues of a refused request', () => {
+    const issue = { path: '/cases/0/agent', message: 'does not match the agent', severity: 'error' }
+    expect(describeError(new ApiError(422, 'cannot be evaluated', { detail: 'x', issues: [issue] })).issues).toEqual([issue])
+    expect(describeError(new TypeError('Failed to fetch')).issues).toEqual([])
+  })
 })
 
 describe('purgeConflict', () => {
