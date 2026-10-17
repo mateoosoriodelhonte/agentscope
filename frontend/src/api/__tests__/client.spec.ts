@@ -94,8 +94,8 @@ describe('api reads', () => {
 describe('api mutations', () => {
   it.each([
     ['createRun', () => api.createRun({ agent_ref: 'research_assistant@v2', task: 'q' }), '/api/runs', { agent_ref: 'research_assistant@v2', task: 'q' }],
-    ['importDataset', () => api.importDataset({ schema_version: 1, name: 'qa', version: '1', description: '', agent: null, cases: [] }), '/api/datasets', { schema_version: 1, name: 'qa', version: '1', description: '', agent: null, cases: [] }],
-    ['validateDataset', () => api.validateDataset({ name: 'qa' }), '/api/datasets/validate', { name: 'qa' }],
+    ['importDataset', () => api.importDataset('{"schema_version": 1, "name": "qa"}'), '/api/datasets', { schema_version: 1, name: 'qa' }],
+    ['validateDataset', () => api.validateDataset('{"name": "qa"}'), '/api/datasets/validate', { name: 'qa' }],
     ['createEvaluation', () => api.createEvaluation({ agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }), '/api/evaluations', { agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }],
     ['createExperiment', () => api.createExperiment({ name: 'x', suite_a: 's1', suite_b: 's2' }), '/api/experiments', { name: 'x', suite_a: 's1', suite_b: 's2' }],
     ['purge', () => api.purge({ confirm: 'PURGE', scope: 'runs' }), '/api/settings/purge', { confirm: 'PURGE', scope: 'runs' }],
@@ -108,6 +108,17 @@ describe('api mutations', () => {
     expect(headers.get('Content-Type')).toBe('application/json')
     expect(headers.get('X-AgentScope-Client')).toBe('1')
     expect(JSON.parse(String(init.body))).toEqual(body)
+  })
+})
+
+describe('dataset documents', () => {
+  it('sends the text exactly as written, so the server applies its strict JSON rules', async () => {
+    // JSON.parse would keep the last duplicate key and turn 1e400 into Infinity (then null).
+    const text = '{"name": "qa", "cases": [{"forbidden_tools": ["write_note"], "forbidden_tools": [], "tolerance": 1e400}]}\n'
+    await api.validateDataset(text)
+    expect(lastCall().init.body).toBe(text)
+    await api.importDataset(text)
+    expect(lastCall().init.body).toBe(text)
   })
 })
 

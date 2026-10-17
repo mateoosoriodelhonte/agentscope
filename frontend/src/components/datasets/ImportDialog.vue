@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { api } from '@/api/client'
 import { describeError } from '@/api/errors'
-import type { Dataset, DatasetSummary, DatasetValidation } from '@/api/types'
+import type { DatasetSummary, DatasetValidation } from '@/api/types'
 import Modal from '@/components/ui/Modal.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { formatBytes, plural } from '@/composables/format'
@@ -11,12 +11,15 @@ import { parseJson, type FieldIssue } from '@/composables/parseJson'
 /*
  * Import a dataset version in two steps: validate (lint without importing), then import.
  * A picked file is read in the browser with FileReader; the only request that carries it
- * is the POST to this machine's AgentScope API.
+ * is the POST to this machine's AgentScope API. Both requests send the text exactly as it
+ * is: the server's strict loader (duplicate keys, non-finite numbers) must see what the
+ * reviewer saw, so the browser parses it only to point out a syntax error early.
  */
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; imported: [summary: DatasetSummary] }>()
 
-const MAX_BYTES = 10 * 1024 * 1024
+/** The API's default request limit for dataset bodies (max_request_bytes). */
+const MAX_BYTES = 5 * 1024 * 1024
 const source = ref('')
 const fileName = ref<string | null>(null)
 const parseIssues = ref<FieldIssue[]>([])
@@ -72,16 +75,24 @@ const issues = computed(() => {
 })
 const canImport = computed(() => validation.value?.valid === true && validatedSource.value === source.value)
 
+/** The body is the text as UTF-8, so that is what counts against the server's limit. */
+function tooLarge(text: string): string | null {
+  const bytes = new TextEncoder().encode(text).length
+  return bytes > MAX_BYTES ? `The dataset is ${formatBytes(bytes)}; the limit is ${formatBytes(MAX_BYTES)}.` : null
+}
+
 async function validate(): Promise<void> {
   error.value = null
   validation.value = null
-  const parsed = parseJson(source.value)
-  parseIssues.value = parsed.issues
-  if (parsed.issues.length) return
+  const text = source.value
+  parseIssues.value = parseJson(text).issues
+  if (parseIssues.value.length) return
+  error.value = tooLarge(text)
+  if (error.value) return
   busy.value = true
   try {
-    validation.value = await api.validateDataset(parsed.value)
-    validatedSource.value = source.value
+    validation.value = await api.validateDataset(text)
+    validatedSource.value = text
   } catch (e) {
     error.value = describeError(e).message
   } finally {
@@ -94,7 +105,8 @@ async function importDataset(): Promise<void> {
   error.value = null
   busy.value = true
   try {
-    const summary = await api.importDataset(JSON.parse(source.value) as Dataset)
+    // The validated text itself: canImport guarantees it has not changed since.
+    const summary = await api.importDataset(source.value)
     emit('imported', summary)
   } catch (e) {
     const described = describeError(e)

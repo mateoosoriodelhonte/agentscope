@@ -1,7 +1,6 @@
 import type {
   AgentsResponse,
   Comparison,
-  Dataset,
   DatasetDetail,
   DatasetSummary,
   DatasetValidation,
@@ -96,6 +95,15 @@ function post<T>(path: string, body: unknown = {}, signal?: AbortSignal): Promis
 }
 
 /**
+ * Posts a document exactly as the user wrote it. Parsing and re-serialising it in the browser
+ * would hide what the server's strict loader rejects (duplicate keys, non-finite numbers) and
+ * store different content than the file.
+ */
+function postText<T>(path: string, text: string): Promise<T> {
+  return request<T>(path, { method: 'POST', body: text })
+}
+
+/**
  * One encoded path segment. "." and ".." survive encodeURIComponent (and their %2E forms are
  * still dot segments to the URL parser), so they would climb out of the intended route.
  */
@@ -158,10 +166,10 @@ export const api = {
   runExportUrl: (runId: string) => `/api/runs/${seg(runId)}/export`,
 
   listDatasets: (signal?: AbortSignal) => request<DatasetSummary[]>('/api/datasets', { signal }),
-  importDataset: (dataset: Dataset) => post<DatasetSummary>('/api/datasets', dataset),
-  /** Lints an untrusted document without importing it. */
-  validateDataset: (document: unknown) =>
-    post<DatasetValidation>('/api/datasets/validate', document),
+  /** Imports the dataset document `source` (JSON text), sent byte for byte. */
+  importDataset: (source: string) => postText<DatasetSummary>('/api/datasets', source),
+  /** Lints an untrusted document (JSON text, sent byte for byte) without importing it. */
+  validateDataset: (source: string) => postText<DatasetValidation>('/api/datasets/validate', source),
   getDataset: async (name: string, version: string, signal?: AbortSignal) =>
     request<DatasetDetail>(`/api/datasets/${seg(name)}/${seg(version)}`, { signal }),
   datasetExportUrl: (name: string, version: string) =>
