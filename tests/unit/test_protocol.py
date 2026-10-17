@@ -167,7 +167,7 @@ def test_nul_and_lone_surrogates_are_replaced_so_traces_stay_storable() -> None:
     )
     decision = parse_decision(raw)
     assert isinstance(decision, FinalDecision)
-    assert decision.output == {"answer": "a�b�c \U0001f600", "k�": 1}
+    assert decision.output == {"answer": "a\ufffdb\ufffdc \U0001f600", "k\ufffd": 1}
     json.dumps(decision.output, ensure_ascii=False).encode("utf-8")  # strict UTF-8 works
 
 
@@ -175,4 +175,4 @@ def test_tool_names_are_sanitized_too() -> None:
     raw = '{"type": "tool_call", "tool": "search\\u0000", "arguments": {}, "rationale": ""}'
     decision = parse_decision(raw)
     assert isinstance(decision, ToolCallDecision)
-    assert decision.tool == "search�"
+    assert decision.tool == "search\ufffd"

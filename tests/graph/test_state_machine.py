@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -23,8 +24,11 @@ from agentscope.providers.base import ModelRequest, ModelResponse, ProviderError
 from agentscope.providers.fake import ConversationView, FakeModelProvider
 from agentscope.runtime.graph import topology
 from agentscope.runtime.runner import AgentRunner, RunRequest
+from agentscope.storage.db import create_db_engine, upgrade
+from agentscope.storage.repository import Repository
 from agentscope.tools.registry import ToolRegistry
 from agentscope.tracing import semconv as sc
+from agentscope.tracing.redaction import Redactor
 
 
 class Out(BaseModel):
@@ -103,6 +107,17 @@ def make_runner(
     return AgentRunner(
         catalog, registry, {"fake": ScriptedProvider(catalog.brains())}
     ), agent_config
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string in a JSON value, object keys included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [*value, *(s for item in value.values() for s in _strings(item))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
 
 
 def edges(trace: TraceRecord) -> list[tuple[str, str]]:
@@ -352,6 +367,36 @@ async def test_failed_spans_carry_an_exportable_error_type(registry: ToolRegistr
     assert "doc-acme-takeover-plan" in (by_kind["tool"].status_message or "")  # local only
     assert by_kind["llm"].attributes[sc.ERROR_TYPE] == "provider_error"
     assert by_kind["run"].attributes[sc.ERROR_TYPE] == "provider_error"
+
+
+async def test_unstorable_characters_never_reach_the_trace_or_break_persistence(
+    registry: ToolRegistry, tmp_path: Path
+) -> None:
+    # A model emitting half of an emoji escape, or a NUL, used to make the stored run
+    # unreadable (500 on GET /api/runs/{id}) or fail the save on PostgreSQL.
+    raw_final = (
+        '{"type": "final", "rationale": "",'
+        ' "output": {"status": "answered", "answer": "2\\u00005 \\ud83d"}}'
+    )
+    runner, agent_config = make_runner(registry, [SEARCH, raw_final])
+    trace = await runner.run(RunRequest(config=agent_config, task="ferry\x00 crossing \ud83d?"))
+    assert trace.status is RunStatus.COMPLETED
+    assert trace.final_output == {"status": "answered", "answer": "2\ufffd5 \ufffd"}
+    assert trace.task == "ferry\ufffd crossing \ufffd?"
+    trace.model_dump_json()  # strict UTF-8 throughout: spans, transitions, invocations
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runs.db'}")
+    upgrade(engine)
+    try:
+        repository = Repository(engine, Redactor())
+        repository.save_trace(trace)
+        stored = repository.get_trace(trace.run_id)
+        assert stored is not None
+        stored.model_dump_json()  # what the API serializes; raised on a lone surrogate
+        assert not any("\x00" in text for text in _strings(stored.model_dump(mode="json")))
+        assert stored.final_output == trace.final_output
+    finally:
+        engine.dispose()
 
 
 async def test_provider_failure(registry: ToolRegistry) -> None:

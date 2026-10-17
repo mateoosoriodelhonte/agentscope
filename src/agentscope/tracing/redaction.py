@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from functools import lru_cache
 from itertools import pairwise
 from typing import Any
@@ -36,29 +37,62 @@ ASSIGNMENT = "[REDACTED:assignment]"
 MIN_SECRET_CHARS = 8
 SUBSTRING_SECRET_CHARS = 16
 
+
+@dataclass(frozen=True)
+class _ValuePattern:
+    kind: str
+    # Literals every match contains: a cheap `in` test skips the regex for most text.
+    hints: tuple[str, ...]
+    pattern: re.Pattern[str]
+    replacement: str
+
+
 # Matches are linear: each starts only where its character class starts (a lookbehind or
 # `\b` rules out starts inside a run), every unbounded run is followed by a character
 # outside its class or by nothing, and a private-key body never extends past another BEGIN.
-_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
-    (
+_VALUE_PATTERNS: tuple[_ValuePattern, ...] = (
+    _ValuePattern(
         "private_key",
+        ("-----BEGIN ",),
         re.compile(
             r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S]){0,8000}?"
             r"-----END [A-Z ]{0,40}PRIVATE KEY-----"
         ),
         "[REDACTED:private_key]",
     ),
-    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"), "[REDACTED:anthropic_key]"),
-    ("openai_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}"), "[REDACTED:openai_key]"),
-    (
+    _ValuePattern(
+        "anthropic_key",
+        ("sk-ant-",),
+        re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"),
+        "[REDACTED:anthropic_key]",
+    ),
+    _ValuePattern(
+        "openai_key",
+        ("sk-",),
+        re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}"),
+        "[REDACTED:openai_key]",
+    ),
+    _ValuePattern(
         "github_token",
+        ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
         re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
         "[REDACTED:github_token]",
     ),
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED:aws_access_key]"),
-    ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), "[REDACTED:slack_token]"),
-    (
+    _ValuePattern(
+        "aws_access_key",
+        ("AKIA", "ASIA"),
+        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        "[REDACTED:aws_access_key]",
+    ),
+    _ValuePattern(
+        "slack_token",
+        ("xox",),
+        re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
+        "[REDACTED:slack_token]",
+    ),
+    _ValuePattern(
         "jwt",
+        ("eyJ",),
         # Not `\b`: '-' is in the class but is a non-word character, so `\b` would let
         # every `eyJ` inside `eyJ-eyJ-...` start a match that rescans to the end.
         re.compile(
@@ -66,9 +100,15 @@ _VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         ),
         "[REDACTED:jwt]",
     ),
-    ("bearer", re.compile(r"\b[Bb]earer\s+[A-Za-z0-9\-._~+/]{12,}=*"), "[REDACTED:bearer]"),
-    (
+    _ValuePattern(
+        "bearer",
+        ("earer",),
+        re.compile(r"\b[Bb]earer\s+[A-Za-z0-9\-._~+/]{12,}=*"),
+        "[REDACTED:bearer]",
+    ),
+    _ValuePattern(
         "url_password",
+        ("://",),
         # scheme://user:password@ — the password only, so the URL stays readable.
         re.compile(
             r"(?<![A-Za-z0-9+.\-])([A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s/?#@:]{0,256}:)"
@@ -77,6 +117,8 @@ _VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         r"\1[REDACTED:url_password]",
     ),
 )
+# No pattern, assignment or configured value matches fewer characters than this.
+_SHORTEST_MATCH = 6
 
 # `name = value` / `name: value` / `"name": "value"`; the value is redacted when the name is
 # secret-like. Names are matched alone, so a harmless `note=` never swallows `password=...`.
@@ -124,6 +166,7 @@ _MARKER = re.compile(r"\[(?:REDACTED|TRUNCATED)(?::[a-z_]+)?\](?:#[0-9]+)?")
 _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
 
 _MAX_DEPTH = 32
+_KEY_CACHE_SIZE = 4096
 
 
 def sanitize_text(text: str) -> str:
@@ -133,7 +176,7 @@ def sanitize_text(text: str) -> str:
     if _UNSTORABLE.search(text) is None:
         return text
     joined = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-    return joined.replace("\x00", "�")
+    return joined.replace("\x00", "\ufffd")
 
 
 @lru_cache(maxsize=4096)
@@ -179,30 +222,34 @@ class Redactor:
         self._substring_secrets = tuple(
             sorted((v for v in usable if len(v) >= SUBSTRING_SECRET_CHARS), key=len, reverse=True)
         )
-        token_secrets = sorted((v for v in usable if len(v) < SUBSTRING_SECRET_CHARS), key=len)
-        self._token_secrets = (
-            re.compile(
-                r"(?<![A-Za-z0-9])(?:"
-                + "|".join(re.escape(v) for v in reversed(token_secrets))
-                + r")(?![A-Za-z0-9])"
-            )
-            if token_secrets
-            else None
+        self._token_secrets = tuple(
+            sorted((v for v in usable if len(v) < SUBSTRING_SECRET_CHARS), key=len, reverse=True)
         )
+        self._token_pattern = re.compile(
+            r"(?<![A-Za-z0-9])(?:"
+            + "|".join(re.escape(v) for v in self._token_secrets)
+            + r")(?![A-Za-z0-9])"
+        )
+        self._clean_keys: set[str] = set()
 
     def is_sensitive_key(self, key: str) -> bool:
         return key.lower() in self._extra or is_secret_name(key)
 
     def redact_text(self, text: str) -> str:
         text = sanitize_text(text)
+        if len(text) < _SHORTEST_MATCH:
+            return text
         for secret in self._substring_secrets:
             if secret in text:
                 text = text.replace(secret, CONFIGURED)
-        if self._token_secrets is not None:
-            text = self._token_secrets.sub(CONFIGURED, text)
-        for _kind, pattern, replacement in _VALUE_PATTERNS:
-            text = pattern.sub(replacement, text)
-        return self._redact_assignments(text)
+        if any(secret in text for secret in self._token_secrets):
+            text = self._token_pattern.sub(CONFIGURED, text)
+        for value in _VALUE_PATTERNS:
+            if any(hint in text for hint in value.hints):
+                text = value.pattern.sub(value.replacement, text)
+        if ":" in text or "=" in text:
+            text = self._redact_assignments(text)
+        return text
 
     def _redact_assignments(self, text: str) -> str:
         parts: list[str] = []
@@ -231,11 +278,23 @@ class Redactor:
             return [self.redact(item, _depth + 1) for item in value]
         return value
 
+    def _redact_key(self, key: str) -> str:
+        """`redact_text` for keys. Payloads repeat the same few keys endlessly, so keys found
+        clean are remembered (only those: a remembered key never holds a secret)."""
+        if key in self._clean_keys:
+            return key
+        redacted = self.redact_text(key)
+        if redacted == key:
+            if len(self._clean_keys) >= _KEY_CACHE_SIZE:
+                self._clean_keys.clear()
+            self._clean_keys.add(key)
+        return redacted
+
     def _redact_mapping(self, value: dict[Any, Any], depth: int) -> dict[str, Any]:
         """Keys are text too: a secret used as a key is renamed to its redaction marker,
         numbered (`#2`, `#3`) when that would collide with another key."""
         items = [(str(k), v) for k, v in value.items()]
-        renamed = [self.redact_text(key) for key, _ in items]
+        renamed = [self._redact_key(key) for key, _ in items]
         taken = {new for (key, _), new in zip(items, renamed, strict=True) if new == key}
         out: dict[str, Any] = {}
         for (key, item), new in zip(items, renamed, strict=True):

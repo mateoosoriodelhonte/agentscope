@@ -343,7 +343,7 @@ def test_unstorable_characters_never_reach_span_names_or_attributes(
     [record] = recorder.finish()
     dumped = record.model_dump_json()  # strict UTF-8: fails on a lone surrogate
     assert "\\u0000" not in dumped
-    assert record.name == "execute_tool bad�name�"
+    assert record.name == "execute_tool bad\ufffdname\ufffd"
 
 
 def test_without_payloads_leaves_the_original_span_untouched(
