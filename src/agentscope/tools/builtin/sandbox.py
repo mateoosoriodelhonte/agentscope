@@ -39,6 +39,12 @@ class _SandboxTool(Tool):
 
     side_effect = SideEffect.SANDBOX_WRITE
 
+    def make_incomplete(self, output: dict[str, Any]) -> dict[str, Any]:
+        """A cut-off confirmation: lists truncated and the detail text lost. (Truncating
+        lists alone changes nothing for most write tools, and an output fault that changes
+        nothing counts as not delivered.)"""
+        return {**super().make_incomplete(output), "detail": ""}
+
     def make_misleading(self, output: dict[str, Any], payload: str) -> dict[str, Any]:
         return {**output, "detail": clip(payload)}
 

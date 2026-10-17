@@ -24,6 +24,7 @@ from agentscope.providers.fake import ConversationView, FakeModelProvider
 from agentscope.runtime.graph import topology
 from agentscope.runtime.runner import AgentRunner, RunRequest
 from agentscope.tools.registry import ToolRegistry
+from agentscope.tracing import semconv as sc
 
 
 class Out(BaseModel):
@@ -247,6 +248,23 @@ async def test_runtime_retry_recovers_a_transient_fault(registry: ToolRegistry) 
     assert inv.outcome is ToolOutcome.OK
     assert [a.outcome for a in inv.attempts] == [ToolOutcome.ERROR, ToolOutcome.OK]
     assert len([s for s in trace.spans if s.kind.value == "tool"]) == 2
+
+
+async def test_an_injection_reaches_the_first_call_with_output_to_carry_it(
+    registry: ToolRegistry,
+) -> None:
+    no_hits = {**SEARCH, "arguments": {"query": "zzzz qqqq"}}
+    trace = await run(
+        registry,
+        [no_hits, SEARCH, FINAL],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.INJECTION, on_call=1)],
+    )
+    first, second = trace.tool_invocations
+    assert [a.fault for a in first.attempts] == [None]  # nothing to inject into
+    assert [a.fault for a in second.attempts] == [FaultKind.INJECTION]
+    spans = {s.span_id: s for s in trace.spans}
+    assert spans[first.attempts[0].span_id].attributes[sc.AS_FAULT_UNDELIVERED] == "injection"
+    assert sc.AS_FAULT_UNDELIVERED not in spans[second.attempts[0].span_id].attributes
 
 
 async def test_tool_timeout_is_an_outcome_not_a_run_status(registry: ToolRegistry) -> None:

@@ -339,11 +339,15 @@ def build_graph(ctx: RunContext) -> Any:
                 },
                 input=call.arguments,
             ) as tool_span:
-                result = await ctx.executor.execute(call, attempt)
+                execution = await ctx.executor.run_attempt(call, attempt)
+                result = execution.result
                 tool_span.set_attributes(
                     {
                         sc.AS_TOOL_OUTCOME: result.outcome.value,
                         sc.AS_FAULT_KIND: result.fault.value if result.fault else None,
+                        sc.AS_FAULT_UNDELIVERED: execution.undelivered.value
+                        if execution.undelivered
+                        else None,
                     }
                 )
                 tool_span.set_output(

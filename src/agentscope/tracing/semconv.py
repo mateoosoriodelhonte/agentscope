@@ -40,6 +40,8 @@ AS_DECISION_EXTRA_KEYS = "agentscope.decision.extra_keys"
 AS_ATTEMPT = "agentscope.tool.attempt"
 AS_TOOL_OUTCOME = "agentscope.tool.outcome"
 AS_FAULT_KIND = "agentscope.fault.kind"
+# An output fault due on this attempt found nothing to act on; it stays owed (no fault.kind).
+AS_FAULT_UNDELIVERED = "agentscope.fault.undelivered"
 AS_MODEL_FAULT = "agentscope.model_fault.kind"
 AS_USAGE_REPORTED = "agentscope.usage.reported"
 AS_GUARDRAIL_ALLOWED = "agentscope.guardrail.allowed"
