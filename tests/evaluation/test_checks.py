@@ -117,6 +117,7 @@ def test_timeout_evidence_points_at_the_timed_out_attempt() -> None:
     assert result.actual == {
         "timeouts": {SEARCH: 1},
         "max_attempts": {SEARCH: 2},
+        "consecutive_timeouts": {SEARCH: 1},
         "status": "completed",
     }
 
@@ -132,7 +133,7 @@ def test_timeout_evidence_points_at_the_timed_out_attempt() -> None:
 def test_error_recovery_records_how_it_recovered(calls: list, via: str) -> None:
     result = run_check(
         CheckName.ERROR_RECOVERY,
-        case(faults=[fault(SEARCH, "error")]),
+        case(faults=[fault(SEARCH, "error")], success_criteria={"recovery_tools": [READ]}),
         trace(calls, output=answer(), retries=1),
     )
     assert result.status is CheckStatus.PASSED

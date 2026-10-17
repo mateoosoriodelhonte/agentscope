@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 from agentscope.domain.datasets import EvalCase
 from agentscope.domain.tools import ToolOutcome
 from agentscope.domain.traces import ToolInvocation, TraceRecord
+
+# Output fields that qualify or explain a result instead of carrying one: a declining output
+# may fill them (why it declined, what it consulted, which risks it saw) and still have no
+# answer. Every other field of an agent's output is an answer field.
+NON_ANSWER_FIELDS = frozenset({"status", "notes", "confidence", "citations", "risks", "goal"})
 
 
 @dataclass(frozen=True)
@@ -39,11 +45,33 @@ class CheckContext:
     # runtime whether the output was valid; it checks independently.
     output_schema: dict[str, Any]
     calls: CallSets
+    # The output fields that carry the agent's answer (for the research assistant `answer`,
+    # for the planner `steps` and `total_hours`). A declining output must leave them empty.
+    answer_fields: tuple[str, ...]
 
     @classmethod
     def build(
-        cls, case: EvalCase, trace: TraceRecord, output_schema: dict[str, Any]
+        cls,
+        case: EvalCase,
+        trace: TraceRecord,
+        output_schema: dict[str, Any],
+        answer_fields: Iterable[str] | None = None,
     ) -> CheckContext:
+        """`answer_fields` defaults to every property the output schema declares, except
+        NON_ANSWER_FIELDS; a caller that knows the agent better can name them instead."""
         return cls(
-            case=case, trace=trace, output_schema=output_schema, calls=CallSets.from_trace(trace)
+            case=case,
+            trace=trace,
+            output_schema=output_schema,
+            calls=CallSets.from_trace(trace),
+            answer_fields=tuple(
+                answer_fields if answer_fields is not None else schema_answer_fields(output_schema)
+            ),
         )
+
+
+def schema_answer_fields(output_schema: dict[str, Any]) -> tuple[str, ...]:
+    properties = output_schema.get("properties")
+    if not isinstance(properties, dict):
+        return ()
+    return tuple(name for name in properties if name not in NON_ANSWER_FIELDS)

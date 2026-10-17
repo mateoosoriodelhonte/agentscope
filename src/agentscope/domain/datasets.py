@@ -9,7 +9,7 @@ deterministic check or by the runner; see docs/EVALUATION.md.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -21,12 +21,14 @@ MAX_CASES = 2000
 
 class MatchMode(StrEnum):
     EXACT = "exact"  # type-strict equality
-    NORMALIZED = "normalized"  # NFKC, case-folded, whitespace collapsed, edge punctuation stripped
+    # NFKC, case-folded, whitespace collapsed, sentence punctuation, quotes and brackets
+    # trimmed at the edges (signs and symbols such as "-", "+", "#" and "%" are kept)
+    NORMALIZED = "normalized"
     CONTAINS = "contains"  # normalized substring of a scalar answer (bounded by max_chars)
     NUMERIC = (
         "numeric"  # |actual - expected| <= tolerance; actual must be a number or numeric string
     )
-    ONE_OF = "one_of"  # normalized equality with exactly one listed value
+    ONE_OF = "one_of"  # normalized (strings) or type-strict (others) equality with an option
 
 
 class ExpectedAnswer(StrictModel):
@@ -99,13 +101,19 @@ DEGRADED_STATUSES = frozenset({"insufficient_evidence", "cannot_complete", "refu
 
 
 class SuccessCriteria(StrictModel):
+    # False lets a run end without an output (max_steps, timeout): schema_validity and
+    # task_completion then do not hold it against the agent.
     must_complete: bool = True
     # Expected value of the final output's `status` field.
     expected_output_status: OutputStatus | None = None
-    # For cases with injected tool failures: True = the agent must recover (a later
-    # successful call to the failed tool or an alternative) and answer; False = it must
-    # degrade gracefully (a declining status, no answer) instead of fabricating one.
+    # For cases with injected tool failures: True = the agent must recover from every
+    # failure (a later successful call to the failed tool or to a declared recovery tool)
+    # and answer; False = it must degrade gracefully (a declining status, no answer) instead
+    # of fabricating one.
     expect_recovery: bool | None = None
+    # Tools whose later success also counts as recovering from a failed tool call. Only
+    # these: a successful call to some unrelated tool does not replace the failed one.
+    recovery_tools: list[Identifier] = Field(default_factory=list, max_length=32)
     # Budgets judged by task_completion (distinct from the runtime's hard limits).
     max_steps_budget: int | None = Field(default=None, ge=1, le=50)
     max_tool_calls: int | None = Field(default=None, ge=0, le=100)
@@ -152,7 +160,7 @@ class EvalCase(StrictModel):
         return self
 
     def case_hash(self) -> str:
-        return content_hash(self.model_dump(mode="json"))
+        return content_hash(_hash_view(self.model_dump(mode="json")))
 
 
 class Dataset(StrictModel):
@@ -173,4 +181,17 @@ class Dataset(StrictModel):
         return self
 
     def content_hash(self) -> str:
-        return content_hash(self.model_dump(mode="json"))
+        document = self.model_dump(mode="json")
+        document["cases"] = [_hash_view(case) for case in document["cases"]]
+        return content_hash(document)
+
+
+def _hash_view(case: dict[str, Any]) -> dict[str, Any]:
+    """A dumped case as it is hashed. `success_criteria.recovery_tools` was added after
+    datasets were first hashed, so it is left out while empty: cases written before it
+    existed keep their hashes, and stored suites, baselines and comparisons still match."""
+    criteria = case.get("success_criteria")
+    if isinstance(criteria, dict) and not criteria.get("recovery_tools"):
+        trimmed = {key: value for key, value in criteria.items() if key != "recovery_tools"}
+        return {**case, "success_criteria": trimmed}
+    return case

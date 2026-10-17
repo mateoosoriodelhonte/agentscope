@@ -6,9 +6,15 @@ from collections.abc import Iterable
 from typing import Any
 
 from agentscope.domain.datasets import EvalCase
-from agentscope.domain.evaluation import CaseResult, CheckName, CheckStatus
+from agentscope.domain.evaluation import (
+    CaseResult,
+    CheckName,
+    CheckResult,
+    CheckStatus,
+    ReasonCode,
+)
 from agentscope.domain.tools import ToolOutcome
-from agentscope.domain.traces import TraceRecord
+from agentscope.domain.traces import RunStatus, TraceRecord
 from agentscope.evaluation.checks import CHECKS
 from agentscope.evaluation.context import CheckContext
 
@@ -18,8 +24,12 @@ def evaluate_case(
     trace: TraceRecord,
     output_schema: dict[str, Any],
     enabled: Iterable[CheckName] | None = None,
+    *,
+    answer_fields: Iterable[str] | None = None,
 ) -> CaseResult:
-    ctx = CheckContext.build(case, trace, output_schema)
+    """`answer_fields` names the output fields that carry the agent's answer; by default
+    they are derived from the output schema (see CheckContext.build)."""
+    ctx = CheckContext.build(case, trace, output_schema, answer_fields)
     names = list(CHECKS) if enabled is None else [n for n in CHECKS if n in set(enabled)]
     results = [CHECKS[name](ctx) for name in names]
     passed = all(r.status is not CheckStatus.FAILED for r in results)
@@ -49,8 +59,20 @@ def evaluate_case(
         tags=list(case.tags),
         injected_fault_outcomes=injected,
         unexpected_tool_errors=unexpected,
-        invalid_output=schema_result is not None and schema_result.status is CheckStatus.FAILED,
+        invalid_output=_invalid_output(schema_result, trace),
         repaired_output=any(e.kind == "output_repaired" for e in trace.guardrail_events),
         unauthorized_tool_attempts=sum(1 for i in ctx.calls.attempted if i.tool not in permitted),
         unauthorized_tool_executions=sum(1 for i in ctx.calls.executed if i.tool not in permitted),
+    )
+
+
+def _invalid_output(schema_result: CheckResult | None, trace: TraceRecord) -> bool:
+    """The model produced an output that broke the schema, or never produced a parsable
+    decision before its repair budget ran out. A run that simply ended without an output
+    (timeout, max_steps, provider error) produced nothing invalid. Judged only while
+    schema_validity is enabled."""
+    if schema_result is None or schema_result.status is not CheckStatus.FAILED:
+        return False
+    return schema_result.reason is ReasonCode.SCHEMA_INVALID or (
+        trace.status is RunStatus.FAILED and trace.error_code == "invalid_decision"
     )

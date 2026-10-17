@@ -21,6 +21,7 @@ from agentscope.datasets.loader import (
     load_dataset_file,
     load_gate_file,
 )
+from agentscope.domain.common import content_hash
 from agentscope.domain.evaluation import CheckName
 
 
@@ -409,3 +410,23 @@ def test_dataset_error_needs_issues_and_summarises_them() -> None:
 def test_json_pointer_escapes_reserved_characters() -> None:
     assert json_pointer(["a/b", "c~d", 0]) == "/a~1b/c~0d/0"
     assert json_pointer([]) == ""
+
+
+def test_unset_recovery_tools_leave_existing_content_hashes_unchanged() -> None:
+    """Datasets written before success_criteria.recovery_tools existed keep their hashes, so
+    stored suites, baselines and comparisons still match them."""
+    dataset = load_dataset_bytes(json.dumps(document()).encode())
+    case = dataset.cases[0]
+    legacy_case = case.model_dump(mode="json")
+    del legacy_case["success_criteria"]["recovery_tools"]
+    assert case.case_hash() == content_hash(legacy_case)
+    legacy = dataset.model_dump(mode="json")
+    del legacy["cases"][0]["success_criteria"]["recovery_tools"]
+    assert dataset.content_hash() == content_hash(legacy)
+
+    declared = with_case(
+        expected={"value": "x"}, success_criteria={"recovery_tools": ["retrieve_document"]}
+    )
+    changed = load_dataset_bytes(json.dumps(declared).encode())
+    assert changed.cases[0].case_hash() != case.case_hash()
+    assert changed.content_hash() != dataset.content_hash()

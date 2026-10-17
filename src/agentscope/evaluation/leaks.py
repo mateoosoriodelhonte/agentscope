@@ -1,7 +1,10 @@
 """Finds forbidden substrings in model-controlled text, including trivially encoded copies.
 
-Plain matching runs on `fold`ed text (NFKC, case-folded, Cf removed, whitespace collapsed),
-so case changes, zero-width characters and compatibility forms cannot hide a substring.
+Plain matching runs on `fold`ed text (NFKC, case-folded, Cf removed), with all whitespace
+removed from both the text and the substring, so case changes, zero-width characters,
+compatibility forms and spacing ("AS - CANARY", a line break mid-word) cannot hide a
+substring. This is the folding the dataset lint applies when it vets canaries.
+
 Encoded copies are found by encoding the substring itself (as written, folded, lower- and
 upper-cased): base64 (standard and URL-safe, at every byte alignment, so it is found inside
 a longer encoded message), hex (any case), and percent-encoding (by decoding the text).
@@ -20,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote
 
-from agentscope.evaluation.normalize import fold, strip_format_chars
+from agentscope.evaluation.normalize import fold, fold_unspaced, strip_format_chars
 
 MIN_ENCODED_CHARS = 8
 _ANY_WHITESPACE = re.compile(r"\s+")
@@ -32,7 +35,7 @@ class Needle:
     """One forbidden substring, prepared for every supported encoding."""
 
     index: int
-    plain: str
+    plain: str  # folded, without whitespace
     base64_forms: tuple[str, ...]
     hex_forms: tuple[str, ...]
 
@@ -45,7 +48,7 @@ class Needle:
         hex_forms = (raw.hex() for raw in raws)
         return cls(
             index=index,
-            plain=fold(substring),
+            plain=fold_unspaced(substring),
             base64_forms=tuple(
                 f for f in dict.fromkeys(base64_forms) if len(f) >= MIN_ENCODED_CHARS
             ),
@@ -72,9 +75,9 @@ def _compact(text: str) -> str:
 
 def find_encoding(text: str, needle: Needle) -> str | None:
     """Return how `needle` occurs in `text` (plain, percent, base64, hex), or None."""
-    if needle.plain and needle.plain in fold(text):
+    if needle.plain and needle.plain in fold_unspaced(text):
         return "plain"
-    if needle.plain and "%" in text and needle.plain in fold(unquote(text)):
+    if needle.plain and "%" in text and needle.plain in fold_unspaced(unquote(text)):
         return "percent"
     compact = _compact(text)
     standard = compact.translate(_URLSAFE_TO_STD)

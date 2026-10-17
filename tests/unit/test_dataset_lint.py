@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -389,3 +390,56 @@ def test_required_calls_must_fit_the_step_limit_and_the_budgets(check: Any) -> N
         "/cases/1/success_criteria/max_tool_calls",
         "/cases/2/success_criteria/max_steps_budget",
     ]
+
+
+def test_one_of_options_that_normalize_alike_are_a_warning(check: Any) -> None:
+    found = check(
+        dataset(
+            {"expected": {"match": "one_of", "values": ["September", "Sept", "sept."]}},
+            {"expected": {"match": "one_of", "values": [1987, 1987.0, "1987"]}},
+            {"expected": {"match": "one_of", "values": ["-3", "3", "C++", "C"]}},
+        )
+    )
+    assert [(sev, path) for sev, path, _ in found] == [
+        ("warning", "/cases/0/expected/values/2"),
+        ("warning", "/cases/1/expected/values/1"),
+    ]
+    assert "same as values/1" in found[0][2]
+
+
+def test_recovery_tools_must_be_permitted_tools(check: Any) -> None:
+    fault = [{"tool": "search_documents", "kind": "error"}]
+    found = check(
+        dataset(
+            {
+                **ANSWER,
+                "faults": fault,
+                "success_criteria": {"recovery_tools": ["retrieve_document"]},
+            },
+            {**ANSWER, "faults": fault, "success_criteria": {"recovery_tools": ["web_search"]}},
+            {
+                **ANSWER,
+                "faults": fault,
+                "permitted_tools": ["search_documents"],
+                "success_criteria": {"recovery_tools": ["retrieve_document"]},
+            },
+        )
+    )
+    assert paths(found) == [
+        "/cases/1/success_criteria/recovery_tools/0",
+        "/cases/2/success_criteria/recovery_tools/0",
+    ]
+
+
+def test_recovery_tools_without_anything_to_recover_from_are_a_warning(check: Any) -> None:
+    found = check(dataset({**ANSWER, "success_criteria": {"recovery_tools": ["search_documents"]}}))
+    assert [(sev, path) for sev, path, _ in found] == [
+        ("warning", "/cases/0/success_criteria/recovery_tools")
+    ]
+
+
+def test_a_hostile_expected_value_lints_in_linear_time(check: Any) -> None:
+    hostile = {"expected": {"match": "normalized", "value": "a" + "!" * 100_000 + "a"}}
+    started = time.perf_counter()
+    check(dataset(hostile))
+    assert time.perf_counter() - started < 2.0

@@ -131,10 +131,12 @@ FAULT_MATRIX: dict[str, dict[str, dict[str, dict[str, tuple[str, ...]]]]] = {
                 "v3": (),
             },
         },
+        # v1 and v2 never re-read the partial record: the status checks and the sum that
+        # follow are not a recovery (only the record itself, or a declared recovery tool, is).
         "incomplete": {
             "incomplete-project-record": {
-                "v1": (_ANSWER, "required_tool_calls"),
-                "v2": (_ANSWER, "required_tool_calls"),
+                "v1": (_ANSWER, "required_tool_calls", _RECOVERY),
+                "v2": (_ANSWER, "required_tool_calls", _RECOVERY),
                 "v3": (),
             },
         },
