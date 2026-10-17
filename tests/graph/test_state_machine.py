@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -23,7 +24,11 @@ from agentscope.providers.base import ModelRequest, ModelResponse, ProviderError
 from agentscope.providers.fake import ConversationView, FakeModelProvider
 from agentscope.runtime.graph import topology
 from agentscope.runtime.runner import AgentRunner, RunRequest
+from agentscope.storage.db import create_db_engine, upgrade
+from agentscope.storage.repository import Repository
 from agentscope.tools.registry import ToolRegistry
+from agentscope.tracing import semconv as sc
+from agentscope.tracing.redaction import Redactor
 
 
 class Out(BaseModel):
@@ -71,6 +76,8 @@ class ScriptedProvider(FakeModelProvider):
         except _RawText as raw:
             if raw.text == "PROVIDER_DOWN":
                 raise ProviderError("connection refused") from None
+            if raw.text == "SLOW":
+                await asyncio.sleep(30)  # outlasts any run deadline used here
             return ModelResponse(content=raw.text, provider="fake", model=request.config.model)
 
 
@@ -100,6 +107,17 @@ def make_runner(
     return AgentRunner(
         catalog, registry, {"fake": ScriptedProvider(catalog.brains())}
     ), agent_config
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string in a JSON value, object keys included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [*value, *(s for item in value.values() for s in _strings(item))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
 
 
 def edges(trace: TraceRecord) -> list[tuple[str, str]]:
@@ -249,6 +267,23 @@ async def test_runtime_retry_recovers_a_transient_fault(registry: ToolRegistry) 
     assert len([s for s in trace.spans if s.kind.value == "tool"]) == 2
 
 
+async def test_an_injection_reaches_the_first_call_with_output_to_carry_it(
+    registry: ToolRegistry,
+) -> None:
+    no_hits = {**SEARCH, "arguments": {"query": "zzzz qqqq"}}
+    trace = await run(
+        registry,
+        [no_hits, SEARCH, FINAL],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.INJECTION, on_call=1)],
+    )
+    first, second = trace.tool_invocations
+    assert [a.fault for a in first.attempts] == [None]  # nothing to inject into
+    assert [a.fault for a in second.attempts] == [FaultKind.INJECTION]
+    spans = {s.span_id: s for s in trace.spans}
+    assert spans[first.attempts[0].span_id].attributes[sc.AS_FAULT_UNDELIVERED] == "injection"
+    assert sc.AS_FAULT_UNDELIVERED not in spans[second.attempts[0].span_id].attributes
+
+
 async def test_tool_timeout_is_an_outcome_not_a_run_status(registry: ToolRegistry) -> None:
     trace = await run(
         registry,
@@ -276,6 +311,94 @@ async def test_run_deadline_keeps_partial_trace(registry: ToolRegistry) -> None:
     assert cancelled, "spans interrupted by the deadline must be marked cancelled"
 
 
+async def test_run_deadline_keeps_the_tool_call_it_interrupted(registry: ToolRegistry) -> None:
+    trace = await run(
+        registry,
+        [SEARCH],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.TIMEOUT, on_call=None)],
+        limits=LimitsOverride(run_timeout_s=0.3),  # the hang outlasts it (tool timeout 2s)
+    )
+    assert trace.status is RunStatus.TIMEOUT
+    (inv,) = trace.tool_invocations
+    assert (inv.tool, inv.permitted, inv.executed) == ("search_documents", True, True)
+    assert inv.outcome is ToolOutcome.TIMEOUT
+    assert inv.arguments == SEARCH["arguments"]
+    [attempt] = inv.attempts
+    assert (attempt.outcome, attempt.fault) == (ToolOutcome.TIMEOUT, FaultKind.TIMEOUT)
+    assert "run deadline" in (attempt.error or "")
+    spans = {s.span_id: s for s in trace.spans}
+    assert spans[attempt.span_id].attributes.get(sc.AS_CANCELLED) is True
+    assert edges(trace)[-1] == ("act", "END")  # act was running, not guard
+
+
+async def test_run_deadline_during_retries_keeps_every_attempt(registry: ToolRegistry) -> None:
+    trace = await run(
+        registry,
+        [SEARCH],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.TIMEOUT, on_call=None)],
+        limits=LimitsOverride(tool_timeout_s=0.2, run_timeout_s=0.3),
+        retry=RetryPolicy(max_tool_retries=3),
+    )
+    (inv,) = trace.tool_invocations
+    assert [a.attempt for a in inv.attempts] == [1, 2]
+    assert [a.outcome for a in inv.attempts] == [ToolOutcome.TIMEOUT, ToolOutcome.TIMEOUT]
+    assert "run deadline" in (inv.attempts[1].error or "")
+
+
+async def test_run_deadline_during_a_model_call_names_the_plan_node(
+    registry: ToolRegistry,
+) -> None:
+    trace = await run(registry, [SEARCH, "SLOW"], limits=LimitsOverride(run_timeout_s=0.3))
+    assert trace.status is RunStatus.TIMEOUT
+    assert edges(trace)[-2:] == [("observe", "plan"), ("plan", "END")]
+    assert [i.outcome for i in trace.tool_invocations] == [ToolOutcome.OK]
+
+
+async def test_failed_spans_carry_an_exportable_error_type(registry: ToolRegistry) -> None:
+    missing = {
+        "type": "tool_call",
+        "tool": "retrieve_document",
+        "arguments": {"doc_id": "doc-acme-takeover-plan"},
+        "rationale": "",
+    }
+    trace = await run(registry, [missing, "PROVIDER_DOWN"])
+    by_kind = {s.kind.value: s for s in trace.spans if s.status.value == "error"}
+    assert by_kind["tool"].attributes[sc.ERROR_TYPE] == "error"
+    assert "doc-acme-takeover-plan" in (by_kind["tool"].status_message or "")  # local only
+    assert by_kind["llm"].attributes[sc.ERROR_TYPE] == "provider_error"
+    assert by_kind["run"].attributes[sc.ERROR_TYPE] == "provider_error"
+
+
+async def test_unstorable_characters_never_reach_the_trace_or_break_persistence(
+    registry: ToolRegistry, tmp_path: Path
+) -> None:
+    # A model emitting half of an emoji escape, or a NUL, used to make the stored run
+    # unreadable (500 on GET /api/runs/{id}) or fail the save on PostgreSQL.
+    raw_final = (
+        '{"type": "final", "rationale": "",'
+        ' "output": {"status": "answered", "answer": "2\\u00005 \\ud83d"}}'
+    )
+    runner, agent_config = make_runner(registry, [SEARCH, raw_final])
+    trace = await runner.run(RunRequest(config=agent_config, task="ferry\x00 crossing \ud83d?"))
+    assert trace.status is RunStatus.COMPLETED
+    assert trace.final_output == {"status": "answered", "answer": "2\ufffd5 \ufffd"}
+    assert trace.task == "ferry\ufffd crossing \ufffd?"
+    trace.model_dump_json()  # strict UTF-8 throughout: spans, transitions, invocations
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'runs.db'}")
+    upgrade(engine)
+    try:
+        repository = Repository(engine, Redactor())
+        repository.save_trace(trace)
+        stored = repository.get_trace(trace.run_id)
+        assert stored is not None
+        stored.model_dump_json()  # what the API serializes; raised on a lone surrogate
+        assert not any("\x00" in text for text in _strings(stored.model_dump(mode="json")))
+        assert stored.final_output == trace.final_output
+    finally:
+        engine.dispose()
+
+
 async def test_provider_failure(registry: ToolRegistry) -> None:
     trace = await run(registry, ["PROVIDER_DOWN"])
     assert trace.status is RunStatus.ERROR
@@ -298,9 +421,22 @@ async def test_unknown_tool_model_fault(registry: ToolRegistry) -> None:
     trace = await run(
         registry, [SEARCH, FINAL], model_faults=[ModelFaultSpec(kind=ModelFaultKind.UNKNOWN_TOOL)]
     )
-    assert (
-        trace.tool_invocations[0].outcome is ToolOutcome.PERMISSION_DENIED
-    )  # not permitted, so never resolved
+    blocked = trace.tool_invocations[0]
+    assert (blocked.tool, blocked.outcome) == ("nonexistent_tool", ToolOutcome.UNKNOWN_TOOL)
+    assert (blocked.permitted, blocked.executed) == (False, False)
+    kinds = [g.kind for g in trace.guardrail_events]
+    assert "unknown_tool" in kinds
+    assert "tool_denied" not in kinds  # not an unauthorized attempt by the agent
+
+
+async def test_an_existing_tool_outside_the_permitted_set_is_still_denied(
+    registry: ToolRegistry,
+) -> None:
+    calc = {"type": "tool_call", "tool": "calculate", "arguments": {}, "rationale": ""}
+    trace = await run(registry, [calc, FINAL])
+    (inv,) = trace.tool_invocations
+    assert inv.outcome is ToolOutcome.PERMISSION_DENIED
+    assert [g.kind for g in trace.guardrail_events] == ["tool_denied"]
 
 
 async def test_concurrent_runs_never_share_spans(registry: ToolRegistry) -> None:

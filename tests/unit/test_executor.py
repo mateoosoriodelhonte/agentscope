@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from agentscope.domain.tools import FaultKind, FaultSpec, ToolCall, ToolOutcome
@@ -118,3 +120,61 @@ async def test_content_faults_stay_schema_valid_but_change_content(registry: Too
     assert injected.output["document"]["body"].endswith(DEFAULT_INJECTION)  # type: ignore[index]
     assert misleading.output != clean.output
     assert incomplete.output["document"]["facts"] == []  # type: ignore[index]
+
+
+async def test_an_output_fault_waits_for_a_call_it_can_act_on(registry: ToolRegistry) -> None:
+    ex = executor(registry, FaultSpec(tool="retrieve_document", kind=FaultKind.INJECTION))
+    missing = await ex.run_attempt(call("retrieve_document", doc_id="doc-does-not-exist"))
+    assert missing.result.outcome is ToolOutcome.ERROR
+    assert missing.result.fault is None
+    assert missing.undelivered is FaultKind.INJECTION
+
+    found = await ex.run_attempt(call("retrieve_document", doc_id="doc-meridian-footbridge"))
+    assert found.result.fault is FaultKind.INJECTION
+    assert found.undelivered is None
+    assert found.result.output["document"]["body"].endswith(DEFAULT_INJECTION)  # type: ignore[index]
+
+    again = await ex.execute(call("retrieve_document", doc_id="doc-meridian-footbridge"))
+    assert again.fault is None  # times=1: delivered once, then spent
+
+
+async def test_an_injection_into_a_search_without_hits_is_not_claimed(
+    registry: ToolRegistry,
+) -> None:
+    ex = executor(registry, FaultSpec(tool="search_documents", kind=FaultKind.INJECTION))
+    empty = await ex.run_attempt(call("search_documents", query="zzzz qqqq"))
+    assert empty.result.outcome is ToolOutcome.OK
+    assert empty.result.output == {"query": "zzzz qqqq", "results": []}
+    assert empty.result.fault is None
+    assert empty.undelivered is FaultKind.INJECTION
+
+    hits = await ex.run_attempt(call("search_documents", query="Meridian Footbridge opened"))
+    assert hits.result.fault is FaultKind.INJECTION
+    assert DEFAULT_INJECTION in hits.result.output["results"][0]["snippet"]  # type: ignore[index]
+
+
+async def test_a_failure_fault_is_always_delivered(registry: ToolRegistry) -> None:
+    ex = executor(registry, FaultSpec(tool="retrieve_document", kind=FaultKind.ERROR))
+    first = await ex.run_attempt(call("retrieve_document", doc_id="doc-does-not-exist"))
+    assert (first.result.outcome, first.result.fault) == (ToolOutcome.ERROR, FaultKind.ERROR)
+    assert first.undelivered is None
+    second = await ex.execute(call("retrieve_document", doc_id="doc-meridian-footbridge"))
+    assert (second.outcome, second.fault) == (ToolOutcome.OK, None)
+
+
+async def test_a_hook_that_edits_its_argument_in_place_is_still_recorded(
+    registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = registry.resolve("retrieve_document", 1)
+    assert tool is not None
+
+    def inject_in_place(output: dict[str, Any], payload: str) -> dict[str, Any]:
+        output["document"]["body"] += f"\n\n{payload}"
+        return output
+
+    monkeypatch.setattr(tool, "inject_instructions", inject_in_place)
+    ex = executor(registry, FaultSpec(tool="retrieve_document", kind=FaultKind.INJECTION))
+    result = await ex.run_attempt(call("retrieve_document", doc_id="doc-meridian-footbridge"))
+    # Never an injected output with no fault on record.
+    assert result.result.output["document"]["body"].endswith(DEFAULT_INJECTION)  # type: ignore[index]
+    assert (result.result.fault, result.undelivered) == (FaultKind.INJECTION, None)

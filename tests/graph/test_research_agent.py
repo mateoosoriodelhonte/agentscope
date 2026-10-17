@@ -95,7 +95,7 @@ async def test_every_version_carries_on_after_an_unknown_tool_response(
     )
     refused = [i for i in trace.tool_invocations if not i.executed]
     assert [(i.tool, i.outcome) for i in refused] == [
-        ("nonexistent_tool", ToolOutcome.PERMISSION_DENIED)
+        ("nonexistent_tool", ToolOutcome.UNKNOWN_TOOL)
     ]
     assert trace.final_output["answer"] == "1911"  # type: ignore[index]
 

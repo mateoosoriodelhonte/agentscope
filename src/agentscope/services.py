@@ -81,12 +81,26 @@ class UnknownSuiteError(LookupError):
 
 
 def build_redactor(settings: Settings) -> Redactor:
-    """Redacts the exact value of every secret in Settings (and the database password)."""
+    """Redacts the exact value of every secret in Settings (and the database password).
+
+    A value too short or too plain to tell apart from ordinary words (a database password
+    such as `agentscope`) is not matched by value: that would rewrite provider labels, task
+    text and datasets wherever the word appears. It is still redacted inside URLs and
+    `password=...` style assignments, and the warning says so."""
     secrets = settings_secrets(settings)  # every SecretStr, including OTLP header values
     password = make_url(settings.effective_database_url).password
     if password:
         secrets.append(str(password))
-    return Redactor(extra_keys=settings.redact_keys, secret_values=secrets)
+    redactor = Redactor(extra_keys=settings.redact_keys, secret_values=secrets)
+    if redactor.ignored_secrets:
+        _log.warning(
+            "%d configured secret value(s) (keys, tokens or the database password) are too "
+            "short or too simple to redact wherever they appear; they are still redacted in "
+            "URLs and key=value text. Use longer random values to have them redacted "
+            "everywhere.",
+            redactor.ignored_secrets,
+        )
+    return redactor
 
 
 def egress_destinations(settings: Settings) -> list[str]:

@@ -80,7 +80,8 @@ class Tool(ABC):
     # Fault hooks: how this tool's output degrades under injected faults. Each receives a
     # JSON-compatible copy of a valid output and must return a payload that still validates
     # against `output_model` (structurally valid, semantically wrong). Structural breakage is
-    # the separate `malformed` fault.
+    # the separate `malformed` fault. Returning the output unchanged means the fault had
+    # nothing to act on (a search without hits): it is not delivered and stays owed.
     def make_incomplete(self, output: dict[str, Any]) -> dict[str, Any]:
         return _truncate_lists(output)
 

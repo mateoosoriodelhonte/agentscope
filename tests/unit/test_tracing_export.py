@@ -283,6 +283,69 @@ def test_export_content_true_keeps_payloads(
     assert sc.EXCEPTION_MESSAGE in (event.attributes or {})
 
 
+ECHOED = "prj-acme-takeover-of-globex-confidential"
+
+
+def record_failures(pipeline: TracingPipeline) -> list[SpanRecord]:
+    """A run whose tool error echoes a task-derived argument; flushed."""
+    recorder = TraceRecorder(Redactor(), pipeline)
+    with recorder.span("invoke_agent demo", SpanKind.RUN) as root:
+        with recorder.span("execute_tool lookup_record", SpanKind.TOOL, parent=root) as tool:
+            tool.fail(f"no project record with id {ECHOED}", error_type="error")
+        with pytest.raises(KeyError), recorder.span("node plan", SpanKind.NODE, parent=root):
+            raise KeyError(ECHOED)
+        root.fail(f"run exceeded 5s while looking up {ECHOED}", error_type="run_timeout")
+    records = recorder.finish()
+    assert pipeline.provider.force_flush()
+    return records
+
+
+def test_without_content_export_status_descriptions_carry_only_the_error_type(
+    make_pipeline: Callable[[SpanExporter], TracingPipeline],
+) -> None:
+    memory = InMemorySpanExporter()
+    records = record_failures(make_pipeline(ContentFilteringExporter(memory)))
+
+    exported = by_name(memory.get_finished_spans())
+    assert {name: span.status.description for name, span in exported.items()} == {
+        "invoke_agent demo": "run_timeout",
+        "execute_tool lookup_record": "error",
+        "node plan": "KeyError",
+    }
+    assert all(not span.status.is_ok for span in exported.values())
+    assert ECHOED not in "\n".join(span.to_json() for span in exported.values())
+    # The local trace keeps the full (redacted) message for debugging.
+    local = {r.name: r for r in records}
+    assert ECHOED in (local["execute_tool lookup_record"].status_message or "")
+    assert local["execute_tool lookup_record"].attributes[sc.ERROR_TYPE] == "error"
+
+
+def test_with_content_export_status_descriptions_keep_the_message(
+    make_pipeline: Callable[[SpanExporter], TracingPipeline],
+) -> None:
+    memory = InMemorySpanExporter()
+    record_failures(make_pipeline(ContentFilteringExporter(memory, export_content=True)))
+    exported = by_name(memory.get_finished_spans())
+    assert ECHOED in (exported["execute_tool lookup_record"].status.description or "")
+
+
+def test_unstorable_characters_never_reach_span_names_or_attributes(
+    make_pipeline: Callable[[SpanExporter], TracingPipeline],
+) -> None:
+    memory = InMemorySpanExporter()
+    recorder = TraceRecorder(Redactor(), make_pipeline(memory))
+    with recorder.span(
+        "execute_tool bad\x00name\ud83d", SpanKind.TOOL, attributes={"note": "a\x00b"}
+    ) as span:
+        span.set_output({"text\ud800": "x\x00y"})
+        span.add_event("tool_retry", {"tool": "t\ud83d"})
+        span.fail("broken \x00", error_type="err\x00")
+    [record] = recorder.finish()
+    dumped = record.model_dump_json()  # strict UTF-8: fails on a lone surrogate
+    assert "\\u0000" not in dumped
+    assert record.name == "execute_tool bad\ufffdname\ufffd"
+
+
 def test_without_payloads_leaves_the_original_span_untouched(
     make_pipeline: Callable[[SpanExporter], TracingPipeline],
 ) -> None:

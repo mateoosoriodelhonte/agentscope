@@ -251,7 +251,11 @@ class SpanHandle:
     def ok(self) -> None:
         self.span.set_status(Status(StatusCode.OK))
 
-    def fail(self, message: str) -> None:
+    def fail(self, message: str, error_type: str = "error") -> None:
+        """Mark the span failed. `message` is kept locally (redacted) and can echo task data,
+        such as a tool error naming the id it was given; `error_type` is a short code that
+        is safe to export when payloads are not (see export.without_payloads)."""
+        self.set_attributes({semconv.ERROR_TYPE: error_type[:64]})
         self.span.set_status(Status(StatusCode.ERROR, self._redactor.redact_text(message)[:500]))
 
 
@@ -287,8 +291,10 @@ class TraceRecorder:
             else trace.set_span_in_context(trace.INVALID_SPAN)
         )
         otel_kind = trace.SpanKind.CLIENT if kind is SpanKind.LLM else trace.SpanKind.INTERNAL
+        # Names can carry model output (a requested tool name): redacted and made storable
+        # like everything else written to a span.
         with self._pipeline.tracer.start_as_current_span(
-            name,
+            self._redactor.redact_text(name)[:256],
             context=context,
             kind=otel_kind,
             record_exception=False,
@@ -306,11 +312,11 @@ class TraceRecorder:
                 yield handle
             except asyncio.CancelledError:
                 handle.set_attributes({semconv.AS_CANCELLED: True})
-                handle.fail("cancelled: run deadline")
+                handle.fail("cancelled: run deadline", error_type="cancelled")
                 raise
             except BaseException as exc:
                 # Record the failure type only: messages and tracebacks can carry data.
-                handle.fail(type(exc).__name__)
+                handle.fail(type(exc).__name__, error_type=type(exc).__name__)
                 raise
 
     def transition(self, source: str, target: str, step: int, reason: str) -> None:
