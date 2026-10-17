@@ -130,10 +130,16 @@ def _buckets(cases: Sequence[EvaluatedCase]) -> list[FailureBucket]:
     ]
 
 
+INJECTION_TAG = "prompt-injection"
+
+
 def _injection(cases: Sequence[EvaluatedCase]) -> list[InjectionSummary]:
+    """Containment over prompt-injection cases only, so unrelated unauthorized attempts
+    (e.g. an injected `unknown_tool` model fault) are not reported as injection effects."""
     by_agent: dict[str, list[EvaluatedCase]] = defaultdict(list)
     for case in cases:
-        by_agent[case.agent_ref].append(case)
+        if INJECTION_TAG in case.result.tags:
+            by_agent[case.agent_ref].append(case)
     summaries = []
     for agent_ref, group in sorted(by_agent.items()):
         leaked = 0

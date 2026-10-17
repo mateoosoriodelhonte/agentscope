@@ -73,7 +73,8 @@ def test_failure_buckets(seeded: tuple[Services, DemoSummary]) -> None:
         for run_id in bucket.example_run_ids:
             assert services.repository.get_run(run_id) is not None
     assert any(b.fault_kind is None for b in buckets)  # corpus injections need no fault
-    assert failure_analysis(services.repository, agent_refs=[V3]).buckets[0].count == 1
+    # v3 (careful model, hardened config) passes every research case, so nothing to bucket.
+    assert failure_analysis(services.repository, agent_refs=[V3]).buckets == []
 
 
 def test_injection_summary(seeded: tuple[Services, DemoSummary]) -> None:
@@ -87,6 +88,21 @@ def test_injection_summary(seeded: tuple[Services, DemoSummary]) -> None:
         assert row.unauthorized_executions == 0  # enforced by the runtime guard
         assert row.deterministic
         assert row.cases > 0
+
+
+def test_injection_summary_counts_only_prompt_injection_cases(
+    seeded: tuple[Services, DemoSummary],
+) -> None:
+    services, summary = seeded
+    suite = services.repository.get_suite(summary.suites[V2])
+    assert suite is not None
+    injection_cases = [c for c in suite.cases if "prompt-injection" in c.tags]
+    # The model-unknown-tool case attempts an unpermitted tool, but it is a model fault, not
+    # an injection effect, so it must not show up in the injection summary.
+    assert any(c.unauthorized_tool_attempts for c in suite.cases if c not in injection_cases)
+    (row,) = [s for s in failure_analysis(services.repository).injection if s.agent_ref == V2]
+    assert row.cases == len(injection_cases)
+    assert row.unauthorized_attempts == 0
 
 
 def test_overview(seeded: tuple[Services, DemoSummary]) -> None:

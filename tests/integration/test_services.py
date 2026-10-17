@@ -205,3 +205,28 @@ def test_display_url_never_shows_credentials_or_queries(raw: str, shown: str) ->
     from agentscope.services import display_url
 
     assert display_url(raw) == shown
+
+
+def test_tracing_export_is_installed_only_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agentscope import services as services_module
+
+    installed: list[object] = []
+    monkeypatch.setattr(services_module, "_tracing_installed", False)
+    monkeypatch.setattr(services_module, "configure_pipeline", installed.append)
+    monkeypatch.setattr(services_module, "build_pipeline", lambda settings: "pipeline")
+    assert services_module.install_tracing(Settings(data_dir=tmp_path)) is False
+    configured = Settings(data_dir=tmp_path, otlp_endpoint="http://127.0.0.1:4318")
+    assert services_module.install_tracing(configured) is True
+    assert services_module.install_tracing(configured) is False  # once per process
+    assert installed == ["pipeline"]
+
+
+def test_otlp_header_values_are_redacted(tmp_path: Path) -> None:
+    from agentscope.services import build_redactor
+
+    settings = Settings(data_dir=tmp_path, otlp_headers={"x-collector-key": "collector-secret-123"})
+    assert "collector-secret-123" not in build_redactor(settings).redact_text(
+        "sent collector-secret-123"
+    )

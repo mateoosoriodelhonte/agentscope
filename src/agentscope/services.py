@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel
 from sqlalchemy.engine import make_url
 
 from agentscope import __version__
@@ -59,7 +60,9 @@ from agentscope.storage.db import create_db_engine, upgrade
 from agentscope.storage.repository import DatasetConflict, Repository, SuiteHeader
 from agentscope.suite_runner import SuiteRunner
 from agentscope.tools.registry import ToolRegistry, default_registry
-from agentscope.tracing.redaction import Redactor
+from agentscope.tracing.export import build_pipeline
+from agentscope.tracing.recorder import configure_pipeline
+from agentscope.tracing.redaction import Redactor, settings_secrets
 
 _log = logging.getLogger(__name__)
 
@@ -79,7 +82,7 @@ class UnknownSuiteError(LookupError):
 
 def build_redactor(settings: Settings) -> Redactor:
     """Redacts the exact value of every secret in Settings (and the database password)."""
-    secrets = [value.get_secret_value() for _, value in settings if isinstance(value, SecretStr)]
+    secrets = settings_secrets(settings)  # every SecretStr, including OTLP header values
     password = make_url(settings.effective_database_url).password
     if password:
         secrets.append(str(password))
@@ -466,10 +469,30 @@ class Services:
         return self.redacted(comparison)
 
 
+_tracing_installed = False
+_tracing_lock = threading.Lock()
+
+
+def install_tracing(settings: Settings) -> bool:
+    """Install an exporting tracer pipeline once per process, only when an OTLP endpoint is
+    configured. Without one, runs use the default in-process pipeline and nothing leaves the
+    machine. Returns True when an exporting pipeline was installed by this call."""
+    global _tracing_installed
+    if not settings.otlp_endpoint:
+        return False
+    with _tracing_lock:
+        if _tracing_installed:
+            return False
+        configure_pipeline(build_pipeline(settings))
+        _tracing_installed = True
+        return True
+
+
 def build_services(settings: Settings | None = None, *, migrate: bool = True) -> Services:
     """With `migrate`: bring the schema to head, turn work a crashed process left `running`
     into errors, and register the packaged datasets."""
     settings = settings or get_settings()
+    install_tracing(settings)
     catalog = default_catalog()
     tools = default_registry()
     redactor = build_redactor(settings)
