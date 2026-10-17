@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import operator
+import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, TypedDict
 
@@ -86,6 +87,9 @@ def build_graph(ctx: RunContext) -> Any:
     def node(name: str, fn: NodeFn) -> Callable[[AgentState], Awaitable[dict[str, Any]]]:
         async def wrapped(state: AgentState) -> dict[str, Any]:
             step = state.get("step", 0)
+            # Set on entry: a run deadline or error that interrupts this node ends the run
+            # from here, not from the node before it.
+            ctx.current_node = name
             with ctx.recorder.span(
                 f"node {name}",
                 SpanKind.NODE,
@@ -96,7 +100,6 @@ def build_graph(ctx: RunContext) -> Any:
                 span.set_attributes({sc.AS_ROUTE: update["route"]})
                 span.ok()
             ctx.step = update.get("step", step)
-            ctx.last_node = name
             target = "END" if update["route"] == END else update["route"]
             ctx.recorder.transition(name, target, ctx.step, update["reason"])
             return update
@@ -304,13 +307,15 @@ def build_graph(ctx: RunContext) -> Any:
             )
             return {"result": result.model_dump(mode="json"), "route": "observe", "reason": reason}
 
-        permission = check_permission(call.tool, ctx.permitted)
-        if not permission.allowed:
-            return blocked(ToolOutcome.PERMISSION_DENIED, "tool_denied", permission.reason, False)
+        # Existence first: a tool that does not exist (a hallucinated or corrupted name) is
+        # unknown, not a denied attempt at something real, so it never counts as one.
         if ctx.executor.resolve(call.tool) is None:
             return blocked(
                 ToolOutcome.UNKNOWN_TOOL, "unknown_tool", f"unknown tool '{call.tool}'", False
             )
+        permission = check_permission(call.tool, ctx.permitted)
+        if not permission.allowed:
+            return blocked(ToolOutcome.PERMISSION_DENIED, "tool_denied", permission.reason, False)
         problem = ctx.executor.validate_arguments(call)
         if problem is not None:
             return blocked(
@@ -326,77 +331,102 @@ def build_graph(ctx: RunContext) -> Any:
         step = state.get("step", 0)
         attempts: list[ToolAttempt] = []
         result: ToolResult | None = None
-        for attempt in range(1, retry.max_tool_retries + 2):
-            with ctx.recorder.span(
-                f"execute_tool {call.tool}",
-                SpanKind.TOOL,
-                parent=span,
-                attributes={
-                    sc.GEN_AI_OPERATION_NAME: "execute_tool",
-                    sc.GEN_AI_TOOL_NAME: call.tool,
-                    sc.GEN_AI_TOOL_CALL_ID: call.call_id,
-                    sc.AS_ATTEMPT: attempt,
-                },
-                input=call.arguments,
-            ) as tool_span:
-                execution = await ctx.executor.run_attempt(call, attempt)
-                result = execution.result
-                tool_span.set_attributes(
-                    {
-                        sc.AS_TOOL_OUTCOME: result.outcome.value,
-                        sc.AS_FAULT_KIND: result.fault.value if result.fault else None,
-                        sc.AS_FAULT_UNDELIVERED: execution.undelivered.value
-                        if execution.undelivered
-                        else None,
-                    }
-                )
-                tool_span.set_output(
-                    {
-                        "outcome": result.outcome.value,
-                        "output": result.output,
-                        "error": result.error,
-                    }
-                )
-                if result.outcome is ToolOutcome.OK:
-                    tool_span.ok()
-                else:
-                    tool_span.fail(result.error or result.outcome.value)
+
+        def record(attempt: int, outcome: ToolResult, span_id: str) -> None:
             attempts.append(
                 ToolAttempt(
                     attempt=attempt,
-                    outcome=result.outcome,
-                    fault=result.fault,
-                    duration_ms=result.duration_ms,
-                    error=result.error,
-                    span_id=tool_span.span_id,
+                    outcome=outcome.outcome,
+                    fault=outcome.fault,
+                    duration_ms=outcome.duration_ms,
+                    error=outcome.error,
+                    span_id=span_id,
                 )
             )
-            if result.outcome is ToolOutcome.OK or result.outcome not in retry.retry_on:
-                break
-            if attempt <= retry.max_tool_retries:
-                span.add_event(
-                    "tool_retry",
-                    {
-                        "tool": call.tool,
-                        "after_outcome": result.outcome.value,
-                        "retry.source": "runtime",
+
+        try:
+            for attempt in range(1, retry.max_tool_retries + 2):
+                started = time.perf_counter()
+                with ctx.recorder.span(
+                    f"execute_tool {call.tool}",
+                    SpanKind.TOOL,
+                    parent=span,
+                    attributes={
+                        sc.GEN_AI_OPERATION_NAME: "execute_tool",
+                        sc.GEN_AI_TOOL_NAME: call.tool,
+                        sc.GEN_AI_TOOL_CALL_ID: call.call_id,
+                        sc.AS_ATTEMPT: attempt,
                     },
+                    input=call.arguments,
+                ) as tool_span:
+                    try:
+                        execution = await ctx.executor.run_attempt(call, attempt)
+                    except asyncio.CancelledError:
+                        # The run deadline cut this attempt short. The guard approved the
+                        # call and it was running, so it stays on the record (the span is
+                        # marked cancelled on the way out).
+                        elapsed = (time.perf_counter() - started) * 1000
+                        result = ctx.executor.interrupted(call, attempt, elapsed)
+                        tool_span.set_attributes(
+                            {
+                                sc.AS_TOOL_OUTCOME: result.outcome.value,
+                                sc.AS_FAULT_KIND: result.fault.value if result.fault else None,
+                            }
+                        )
+                        record(attempt, result, tool_span.span_id)
+                        raise
+                    result = execution.result
+                    tool_span.set_attributes(
+                        {
+                            sc.AS_TOOL_OUTCOME: result.outcome.value,
+                            sc.AS_FAULT_KIND: result.fault.value if result.fault else None,
+                            sc.AS_FAULT_UNDELIVERED: execution.undelivered.value
+                            if execution.undelivered
+                            else None,
+                        }
+                    )
+                    tool_span.set_output(
+                        {
+                            "outcome": result.outcome.value,
+                            "output": result.output,
+                            "error": result.error,
+                        }
+                    )
+                    if result.outcome is ToolOutcome.OK:
+                        tool_span.ok()
+                    else:
+                        tool_span.fail(result.error or result.outcome.value)
+                record(attempt, result, tool_span.span_id)
+                if result.outcome is ToolOutcome.OK or result.outcome not in retry.retry_on:
+                    break
+                if attempt <= retry.max_tool_retries:
+                    span.add_event(
+                        "tool_retry",
+                        {
+                            "tool": call.tool,
+                            "after_outcome": result.outcome.value,
+                            "retry.source": "runtime",
+                        },
+                    )
+        finally:
+            # Also on cancellation: checks must see an approved call even when the run
+            # ended while it was executing.
+            if attempts and result is not None:
+                ctx.invocations.append(
+                    ToolInvocation(
+                        call_id=call.call_id,
+                        step=step,
+                        tool=call.tool,
+                        arguments=call.arguments,
+                        permitted=True,
+                        executed=True,
+                        outcome=result.outcome,
+                        attempts=attempts,
+                        output=result.output,
+                        span_id=attempts[0].span_id,
+                    )
                 )
         assert result is not None
-        ctx.invocations.append(
-            ToolInvocation(
-                call_id=call.call_id,
-                step=step,
-                tool=call.tool,
-                arguments=call.arguments,
-                permitted=True,
-                executed=True,
-                outcome=result.outcome,
-                attempts=attempts,
-                output=result.output,
-                span_id=attempts[0].span_id,
-            )
-        )
         suffix = f" after {len(attempts)} attempts" if len(attempts) > 1 else ""
         return {
             "result": result.model_dump(mode="json"),

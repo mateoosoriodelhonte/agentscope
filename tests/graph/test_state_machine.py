@@ -72,6 +72,8 @@ class ScriptedProvider(FakeModelProvider):
         except _RawText as raw:
             if raw.text == "PROVIDER_DOWN":
                 raise ProviderError("connection refused") from None
+            if raw.text == "SLOW":
+                await asyncio.sleep(30)  # outlasts any run deadline used here
             return ModelResponse(content=raw.text, provider="fake", model=request.config.model)
 
 
@@ -294,6 +296,49 @@ async def test_run_deadline_keeps_partial_trace(registry: ToolRegistry) -> None:
     assert cancelled, "spans interrupted by the deadline must be marked cancelled"
 
 
+async def test_run_deadline_keeps_the_tool_call_it_interrupted(registry: ToolRegistry) -> None:
+    trace = await run(
+        registry,
+        [SEARCH],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.TIMEOUT, on_call=None)],
+        limits=LimitsOverride(run_timeout_s=0.3),  # the hang outlasts it (tool timeout 2s)
+    )
+    assert trace.status is RunStatus.TIMEOUT
+    (inv,) = trace.tool_invocations
+    assert (inv.tool, inv.permitted, inv.executed) == ("search_documents", True, True)
+    assert inv.outcome is ToolOutcome.TIMEOUT
+    assert inv.arguments == SEARCH["arguments"]
+    [attempt] = inv.attempts
+    assert (attempt.outcome, attempt.fault) == (ToolOutcome.TIMEOUT, FaultKind.TIMEOUT)
+    assert "run deadline" in (attempt.error or "")
+    spans = {s.span_id: s for s in trace.spans}
+    assert spans[attempt.span_id].attributes.get(sc.AS_CANCELLED) is True
+    assert edges(trace)[-1] == ("act", "END")  # act was running, not guard
+
+
+async def test_run_deadline_during_retries_keeps_every_attempt(registry: ToolRegistry) -> None:
+    trace = await run(
+        registry,
+        [SEARCH],
+        faults=[FaultSpec(tool="search_documents", kind=FaultKind.TIMEOUT, on_call=None)],
+        limits=LimitsOverride(tool_timeout_s=0.2, run_timeout_s=0.3),
+        retry=RetryPolicy(max_tool_retries=3),
+    )
+    (inv,) = trace.tool_invocations
+    assert [a.attempt for a in inv.attempts] == [1, 2]
+    assert [a.outcome for a in inv.attempts] == [ToolOutcome.TIMEOUT, ToolOutcome.TIMEOUT]
+    assert "run deadline" in (inv.attempts[1].error or "")
+
+
+async def test_run_deadline_during_a_model_call_names_the_plan_node(
+    registry: ToolRegistry,
+) -> None:
+    trace = await run(registry, [SEARCH, "SLOW"], limits=LimitsOverride(run_timeout_s=0.3))
+    assert trace.status is RunStatus.TIMEOUT
+    assert edges(trace)[-2:] == [("observe", "plan"), ("plan", "END")]
+    assert [i.outcome for i in trace.tool_invocations] == [ToolOutcome.OK]
+
+
 async def test_provider_failure(registry: ToolRegistry) -> None:
     trace = await run(registry, ["PROVIDER_DOWN"])
     assert trace.status is RunStatus.ERROR
@@ -316,9 +361,22 @@ async def test_unknown_tool_model_fault(registry: ToolRegistry) -> None:
     trace = await run(
         registry, [SEARCH, FINAL], model_faults=[ModelFaultSpec(kind=ModelFaultKind.UNKNOWN_TOOL)]
     )
-    assert (
-        trace.tool_invocations[0].outcome is ToolOutcome.PERMISSION_DENIED
-    )  # not permitted, so never resolved
+    blocked = trace.tool_invocations[0]
+    assert (blocked.tool, blocked.outcome) == ("nonexistent_tool", ToolOutcome.UNKNOWN_TOOL)
+    assert (blocked.permitted, blocked.executed) == (False, False)
+    kinds = [g.kind for g in trace.guardrail_events]
+    assert "unknown_tool" in kinds
+    assert "tool_denied" not in kinds  # not an unauthorized attempt by the agent
+
+
+async def test_an_existing_tool_outside_the_permitted_set_is_still_denied(
+    registry: ToolRegistry,
+) -> None:
+    calc = {"type": "tool_call", "tool": "calculate", "arguments": {}, "rationale": ""}
+    trace = await run(registry, [calc, FINAL])
+    (inv,) = trace.tool_invocations
+    assert inv.outcome is ToolOutcome.PERMISSION_DENIED
+    assert [g.kind for g in trace.guardrail_events] == ["tool_denied"]
 
 
 async def test_concurrent_runs_never_share_spans(registry: ToolRegistry) -> None:

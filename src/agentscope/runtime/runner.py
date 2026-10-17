@@ -236,15 +236,15 @@ class AgentRunner:
             except TimeoutError:
                 status, error_code = RunStatus.TIMEOUT, "run_timeout"
                 error = f"run exceeded {limits.run_timeout_s:g}s"
-                recorder.transition(ctx.last_node, "END", ctx.step, "run deadline passed")
+                recorder.transition(ctx.current_node, "END", ctx.step, "run deadline passed")
             except GraphRecursionError:
                 status, error_code = RunStatus.ERROR, "internal_recursion_limit"
                 error = "graph recursion backstop reached"
-                recorder.transition(ctx.last_node, "END", ctx.step, "recursion backstop")
+                recorder.transition(ctx.current_node, "END", ctx.step, "recursion backstop")
             except Exception as exc:  # never leak tracebacks into stored traces
                 status, error_code = RunStatus.ERROR, "internal_error"
                 error = f"runtime error: {type(exc).__name__}"
-                recorder.transition(ctx.last_node, "END", ctx.step, "runtime error")
+                recorder.transition(ctx.current_node, "END", ctx.step, "runtime error")
             final_output = (
                 last.get("candidate") if status in (RunStatus.COMPLETED, RunStatus.FAILED) else None
             )

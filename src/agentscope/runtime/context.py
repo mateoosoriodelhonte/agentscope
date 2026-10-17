@@ -59,7 +59,8 @@ class RunContext:
     guardrails: list[GuardrailEvent] = field(default_factory=list)
     usage: UsageAccumulator = field(default_factory=UsageAccumulator)
     step: int = 0
-    last_node: str = "START"
+    # The node running now, or the last one that ran: where an interrupted run ends from.
+    current_node: str = "START"
     awaiting_decision_repair: bool = False
     _calls: int = 0
 
