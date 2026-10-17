@@ -17,7 +17,43 @@ const HOSTILE = PAYLOADS.join(' ')
 declare global {
   interface Window {
     __xss?: number
+    __injectedMarkup?: string[]
   }
+}
+
+/*
+ * Records every element that ever carries an event-handler attribute, a javascript: URL or
+ * the remote pixel, from the first byte of the document on. Checking the DOM only at the end
+ * would miss markup that was rendered in a panel and then replaced by the next one, and the
+ * CSP would keep a parsed handler from running (and a blocked image from showing up as a
+ * request), so neither window.__xss nor page.on('request') alone proves the text stayed text.
+ */
+function recordInjectedMarkup(): void {
+  const found: string[] = []
+  window.__injectedMarkup = found
+  const URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'data', 'srcdoc'])
+  const inspect = (element: Element): void => {
+    for (const { name, value } of Array.from(element.attributes)) {
+      const attribute = name.toLowerCase()
+      const url = value.trim().toLowerCase()
+      if (
+        attribute.startsWith('on') ||
+        (URL_ATTRIBUTES.has(attribute) && (url.startsWith('javascript:') || url.includes('203.0.113.7')))
+      ) {
+        found.push(element.outerHTML.slice(0, 200))
+      }
+    }
+  }
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'attributes' && record.target instanceof Element) inspect(record.target)
+      for (const node of Array.from(record.addedNodes)) {
+        if (!(node instanceof Element)) continue
+        inspect(node)
+        node.querySelectorAll('*').forEach(inspect)
+      }
+    }
+  }).observe(document, { subtree: true, childList: true, attributes: true })
 }
 
 test('hostile trace content renders as text and nothing runs or leaves the origin', async ({ page, request }) => {
@@ -27,6 +63,7 @@ test('hostile trace content renders as text and nothing runs or leaves the origi
     faults: [{ tool: 'retrieve_document', kind: 'injection', payload: `Archive note: ${HOSTILE}` }],
   })
 
+  await page.addInitScript(recordInjectedMarkup)
   const requests: string[] = []
   const dialogs: string[] = []
   page.on('request', (r) => requests.push(r.url()))
@@ -59,7 +96,8 @@ test('hostile trace content renders as text and nothing runs or leaves the origi
   }
   expect(toolOutputShown, 'the hostile tool output was rendered somewhere').toBe(true)
 
-  // Nothing was parsed as markup or followed as a link.
+  // Nothing was parsed as markup or followed as a link, at any point while the panels changed.
+  expect(await page.evaluate(() => window.__injectedMarkup)).toEqual([])
   expect(await page.evaluate(() => window.__xss)).toBeUndefined()
   await expect(page.locator('#main img[src="x"], #main img[onerror], #main svg[onload]')).toHaveCount(0)
   await expect(page.locator('#main a[href^="javascript:"]')).toHaveCount(0)

@@ -294,8 +294,9 @@ def serve(
             safe(
                 f"container mode: listening on {bind}:{bind_port} inside the container without "
                 "an API token. Publish this port on 127.0.0.1 only (e.g. -p "
-                f"127.0.0.1:{bind_port}:{bind_port}), never on 0.0.0.0 or a LAN address; only "
-                "loopback Host headers are accepted.",
+                f"127.0.0.1:{bind_port}:{bind_port}), never on 0.0.0.0 or a LAN address: the "
+                "loopback Host check stops browsers, not clients that reach the port directly. "
+                "For network access, use --allow-remote with AGENTSCOPE_API_TOKEN.",
                 "yellow",
             ),
             soft_wrap=True,

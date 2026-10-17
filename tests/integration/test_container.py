@@ -2,9 +2,11 @@
 
 `agentscope serve --container` binds every interface of the container, needs no API token,
 and keeps the loopback Host check. A port published as `127.0.0.1:8765:8765` delivers
-requests whose Host header is `127.0.0.1:8765`, so the dashboard works from the host machine.
-A request that reaches the container any other way (another container on the network, a
-port published on a LAN address, a DNS-rebinding page) carries another Host and is refused.
+requests whose Host header is `127.0.0.1:8765`, so the dashboard works from the host machine,
+while a browser sent there under any other name (a DNS-rebinding page, a LAN or container
+host name) is refused. The Host check is no authentication: a client that reaches the port
+directly can send a loopback Host header itself. That is why the port must be published on
+127.0.0.1 only, as the warning says, and why --allow-remote still needs the token.
 
 The CI docker job also evaluates the packaged dataset inside the image; the last tests pin
 that command's gate inputs.
@@ -66,9 +68,10 @@ def test_container_mode_binds_every_interface_without_a_token(uvicorn: FakeUvico
     [call] = uvicorn.calls
     assert call["host"] == "0.0.0.0"
     assert call["port"] == 8765
-    # The warning names the only safe way to publish the port.
+    # The warning names the only safe way to publish the port, and why.
     assert "container mode" in result.stderr
     assert "127.0.0.1:8765:8765" in result.stderr
+    assert "not clients that reach the port directly" in " ".join(result.stderr.split())
     assert "remote mode" not in result.stderr
 
 

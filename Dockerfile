@@ -5,7 +5,11 @@
 #
 # Publish the port on 127.0.0.1 ONLY. The container runs `agentscope serve --container`:
 # it listens on 0.0.0.0 inside its own network namespace without an API token, and accepts
-# only loopback Host headers, which is what a port published on 127.0.0.1 delivers.
+# only loopback Host headers, which is what a port published on 127.0.0.1 delivers. The Host
+# check stops browsers (DNS rebinding), not a client that reaches the port directly and sends
+# a loopback Host itself: publishing on 0.0.0.0 or a LAN address would expose an
+# unauthenticated API. For network access, run `agentscope serve --container --allow-remote
+# --allowed-host <name>` with AGENTSCOPE_API_TOKEN set.
 # For PostgreSQL, see docker-compose.yml.
 
 # --- 1. dashboard ---------------------------------------------------------------------------

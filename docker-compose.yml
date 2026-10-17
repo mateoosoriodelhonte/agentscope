@@ -7,7 +7,8 @@
 #
 # Exposure: only the dashboard/API port is published, and only on the host's loopback
 # interface (127.0.0.1). Never change it to "8765:8765" or "0.0.0.0:8765:8765": the app runs
-# in container mode, without an API token, and relies on that. PostgreSQL is never published;
+# in container mode, without an API token, and relies on that (its loopback Host check stops
+# browsers, not other clients, which can send any Host header). PostgreSQL is never published;
 # it sits on an internal network that only the app can reach and that has no route out.
 #
 # Local Ollama models: add docker-compose.ollama.yml (see that file).

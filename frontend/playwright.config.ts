@@ -18,6 +18,13 @@ export const BASE_URL = `http://127.0.0.1:${PORT}`
 // variable, so they never create directories of their own.
 const dataDir = (process.env.AGENTSCOPE_E2E_DATA_DIR ??= mkdtempSync(join(tmpdir(), 'agentscope-e2e-')))
 
+// The server runs on default settings only. Playwright passes this process's environment to
+// the web server, so a developer's AGENTSCOPE_* variables (a PostgreSQL URL the seed would
+// write into, egress hosts, container mode's wildcard bind) are dropped here.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('AGENTSCOPE_') && key !== 'AGENTSCOPE_E2E_DATA_DIR') delete process.env[key]
+}
+
 export default defineConfig({
   testDir: './e2e',
   outputDir: './test-results/e2e',
@@ -65,7 +72,9 @@ export default defineConfig({
     url: `${BASE_URL}/api/health`,
     // Default settings otherwise: the settings page lists the default local Ollama target.
     env: { AGENTSCOPE_DATA_DIR: dataDir },
-    reuseExistingServer: !process.env.CI,
+    // Always a server of our own: one already listening on the port would serve some other
+    // database, and the specs (and the README screenshots) would see or change its data.
+    reuseExistingServer: false,
     timeout: 180_000,
     stdout: 'ignore',
     stderr: 'pipe',

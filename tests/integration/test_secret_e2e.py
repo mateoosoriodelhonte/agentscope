@@ -233,7 +233,8 @@ def test_planted_secrets_never_leave_redacted(
 
     # 4. Disk: the SQLite database, its WAL and every other file AgentScope wrote.
     files = stored_bytes(secured)
-    assert "agentscope.db" in files
+    # The WAL still holds the latest pages while a connection is open: search it too.
+    assert {"agentscope.db", "agentscope.db-wal"} <= files.keys()
     for name, content in files.items():
         assert_clean(name, content)
 
