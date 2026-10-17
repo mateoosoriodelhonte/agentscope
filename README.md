@@ -22,13 +22,8 @@ failure modes, not a measurement of any real model.
 | **Settings** | |
 | ![Settings with storage inventory and egress list, light theme](docs/images/settings-light.png) | |
 
-The screenshots are generated from the seeded demo by `npm run screenshots`
-([CONTRIBUTING.md](CONTRIBUTING.md#regenerating-screenshots)). They were captured before the
-pre-release fixes listed in the [changelog](CHANGELOG.md#fixed-before-release), so some
-details differ from a fresh 1.0.0 seed: the Overview chart now draws one line per agent
-version and dataset with the gate minimum only on the line it applies to, the Failures
-resilience counts follow the corrected recovery rules, and the Failures table marks
-simulated agent versions. The walkthrough below was checked against a fresh seed.
+The screenshots are generated from the seeded demo of release 1.0.0 by `npm run screenshots`
+([CONTRIBUTING.md](CONTRIBUTING.md#regenerating-screenshots)). The walkthrough below was checked against a fresh seed.
 
 ## Features
 

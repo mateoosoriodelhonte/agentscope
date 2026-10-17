@@ -375,6 +375,7 @@ _CHANGE_ORDER = (
     "still_failing_changed",
     "still_failing_same",
     "content_changed",
+    "harness_error",
     "added",
     "removed",
 )
