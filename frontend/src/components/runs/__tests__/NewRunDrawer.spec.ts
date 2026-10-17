@@ -66,6 +66,58 @@ describe('NewRunDrawer', () => {
     expect(drawer.find('[role="dialog"]').exists()).toBe(false)
   })
 
+  it('can be closed while the run executes, and links to the run when it finishes', async () => {
+    let state: 'running' | 'succeeded' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, finished_at: null }),
+    })
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' })
+    await submit(drawer)
+    expect(drawer.find('[role="dialog"] .progress').text()).toContain('Running the agent')
+    const close = drawer.find('[role="dialog"] .modal-head .close')
+    expect(close.attributes('disabled')).toBeUndefined()
+    await close.trigger('click')
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+    expect(drawer.find('.run-notice').text()).toContain('Run in progress')
+
+    // Shown again, it is the same form, and a second run cannot be started meanwhile.
+    await drawer.findAll('.run-notice button').find((b) => b.text() === 'Show')!.trigger('click')
+    await flushPromises()
+    expect((drawer.find('textarea.task').element as HTMLTextAreaElement).value).toBe('Who founded the library?')
+    expect(drawer.find('[role="dialog"] .modal-foot .btn.primary').attributes('disabled')).toBeDefined()
+    await submit(drawer)
+    expect(calls(fetchMock, 'POST', '/api/runs')).toHaveLength(1)
+    await drawer.find('[role="dialog"]').trigger('keydown', { key: 'Escape' })
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+
+    state = 'succeeded'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run finished'), { timeout: 3000 })
+    // Closed, the drawer does not navigate away from what the user is looking at.
+    expect(router.currentRoute.value.path).toBe('/runs')
+    expect(drawer.find('.run-notice a').attributes('href')).toBe('/runs/run-9')
+    await drawer.findAll('.run-notice button').find((b) => b.text() === 'Dismiss')!.trigger('click')
+    expect(drawer.find('.run-notice').exists()).toBe(false)
+  })
+
+  it('reports a run that failed after its drawer was closed', async () => {
+    let state: 'running' | 'failed' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, error: state === 'failed' ? 'provider unreachable' : null }),
+    })
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' })
+    await submit(drawer)
+    await drawer.find('[role="dialog"] .modal-foot .btn').trigger('click')
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+    state = 'failed'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run failed: provider unreachable'), {
+      timeout: 3000,
+    })
+  })
+
   it('lists what to fix instead of sending an invalid form', async () => {
     const drawer = await openDrawer()
     await drawer.findAll('button').find((b) => b.text() === 'Add tool fault')!.trigger('click')

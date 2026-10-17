@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, shallowRef, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { describeError } from '@/api/errors'
 import {
@@ -13,7 +13,7 @@ import {
 } from '@/api/types'
 import ErrorState from '@/components/ui/ErrorState.vue'
 import Modal from '@/components/ui/Modal.vue'
-import { closeNewRun, newRun } from '@/composables/newRun'
+import { closeNewRun, newRun, reopenNewRun } from '@/composables/newRun'
 import { useJob } from '@/composables/useJob'
 import {
   buildExpected,
@@ -34,10 +34,19 @@ import {
  * Starts one run: a built-in agent version or a hand-written config, a task, optional tool
  * and model faults, and an optional expected answer. Submits POST /api/runs, polls the job,
  * then opens the trace.
+ *
+ * A run can take up to its run timeout and cannot be cancelled, so the drawer never locks
+ * the app while it executes: closing it keeps polling here (the drawer stays mounted), a
+ * notice shows the progress, and it links to the run when it finishes instead of navigating
+ * away from whatever the user moved on to. Only a second submission is blocked meanwhile.
  */
 const MAX_FAULTS = 10
 const router = useRouter()
 const job = useJob()
+/** The form (newRun.opened) that started the job in flight; null when no job runs. */
+const startedFor = ref<number | null>(null)
+/** How a run ended while its form was not on screen; shown until dismissed. */
+const finished = shallowRef<{ runId: string } | { error: string } | null>(null)
 
 const catalog = shallowRef<AgentsResponse | null>(null)
 const catalogError = shallowRef<unknown>(null)
@@ -133,6 +142,11 @@ function issueFor(path: string): string | undefined {
   return issues.value.find((issue) => issue.path === path)?.message
 }
 
+/** The job in flight was started from the form now on screen. */
+const ownJob = computed(() => newRun.open && startedFor.value === newRun.opened)
+/** A run still executing while its form is closed (or replaced by a newer one). */
+const backgroundRun = computed(() => job.running.value && !ownJob.value)
+
 async function submit(): Promise<void> {
   if (job.running.value) return
   const found: FieldIssue[] = []
@@ -156,15 +170,29 @@ async function submit(): Promise<void> {
     issueList.value?.focus()
     return
   }
+  const form = newRun.opened
+  startedFor.value = form
+  finished.value = null
   const done = await job.start(() => api.createRun(body))
+  startedFor.value = null
+  // The same form still on screen: report there, or open the trace, as before.
+  const onScreen = newRun.open && newRun.opened === form
   if (!done) {
-    const described = job.error.value ? describeError(job.error.value) : null
-    if (described?.issues.length) {
+    const failure = job.error.value
+    if (!failure) return // polling stopped; nothing ended
+    const described = describeError(failure)
+    if (!onScreen) {
+      finished.value = { error: described.message }
+    } else if (described.issues.length) {
       // The server's located reasons join the form's own list and mark their fields.
       issues.value = described.issues.map(({ path, message }) => ({ path, message }))
       await nextTick()
       issueList.value?.focus()
     }
+    return
+  }
+  if (!onScreen) {
+    finished.value = { runId: done.resource_id }
     return
   }
   closeNewRun()
@@ -186,7 +214,8 @@ const progress = computed(() => {
 </script>
 
 <template>
-  <Modal :open="newRun.open" title="New run" variant="drawer" :busy="job.running.value" @close="closeNewRun">
+  <!-- Closing never waits for the run: it keeps executing and the notice below follows it. -->
+  <Modal :open="newRun.open" title="New run" variant="drawer" @close="closeNewRun">
     <ErrorState v-if="catalogError" :error="catalogError" title="Could not load the agents" compact @retry="loadCatalog" />
     <form v-else id="new-run-form" class="form" novalidate @submit.prevent="submit">
       <p v-if="newRun.prefill.source" class="callout info source">Prefilled from {{ newRun.prefill.source }}</p>
@@ -359,15 +388,37 @@ const progress = computed(() => {
         </div>
       </div>
       <p v-if="submitError" class="callout fail" role="alert">Could not start the run: {{ submitError }}</p>
-      <p v-if="job.running.value" class="progress" role="status">{{ progress }}</p>
+      <p v-if="job.running.value && ownJob" class="progress" role="status">
+        {{ progress }}
+        <span class="hint">You can close this drawer: the run keeps going, and a notice links to it when it finishes.</span>
+      </p>
+      <p v-else-if="job.running.value" class="progress" role="status">
+        Another run is still in progress. Start this one when it finishes.
+      </p>
     </form>
     <template #footer>
-      <button type="button" class="btn" :disabled="job.running.value" @click="closeNewRun">Cancel</button>
+      <button type="button" class="btn" @click="closeNewRun">{{ job.running.value ? 'Close' : 'Cancel' }}</button>
       <button type="submit" form="new-run-form" class="btn primary" :disabled="job.running.value || !catalog">
         {{ job.running.value ? 'Running…' : 'Start run' }}
       </button>
     </template>
   </Modal>
+  <div class="run-notice-region" aria-live="polite">
+    <div v-if="backgroundRun" class="run-notice panel">
+      <span>Run in progress: {{ progress }}</span>
+      <button type="button" class="btn ghost" @click="reopenNewRun">Show</button>
+    </div>
+    <div v-else-if="finished" class="run-notice panel" :class="{ failed: 'error' in finished }">
+      <template v-if="'runId' in finished">
+        <span>The run finished.</span>
+        <RouterLink :to="`/runs/${encodeURIComponent(finished.runId)}`" class="btn" @click="finished = null">
+          Open the trace
+        </RouterLink>
+      </template>
+      <span v-else>The run failed: {{ finished.error }}</span>
+      <button type="button" class="btn ghost" @click="finished = null">Dismiss</button>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -456,7 +507,34 @@ legend {
   color: var(--text-muted);
   font-size: 13px;
 }
+.progress .hint {
+  display: block;
+}
 .source {
   font-size: 12.5px;
+}
+/* Below the modal layer: a run's progress never covers a dialog. */
+.run-notice-region {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 25;
+  max-width: min(440px, calc(100vw - 32px));
+}
+.run-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  box-shadow: 0 8px 24px var(--shadow);
+  font-size: 13px;
+}
+.run-notice.failed {
+  border-left-color: var(--fail);
+}
+.run-notice > span {
+  flex: 1 1 200px;
 }
 </style>
