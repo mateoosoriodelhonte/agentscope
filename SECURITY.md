@@ -217,8 +217,8 @@ Limitations:
   pattern is stored as written. Do not put real secrets in tasks or datasets.
 - **No encryption at rest.** Stored data is protected by file permissions (SQLite) or by
   PostgreSQL's own access control.
-- **`/api/docs` does not render.** FastAPI's Swagger UI page references scripts and styles on
-  `cdn.jsdelivr.net`, which the CSP blocks. The OpenAPI document is available at
+- **No interactive API docs page.** FastAPI's Swagger UI loads scripts and styles from a CDN,
+  which the CSP blocks, so it is disabled. The OpenAPI document is served locally at
   `/api/openapi.json`.
 - **Evaluating a dataset file does not refuse secret-shaped values.** Only import refuses
   them; `agentscope eval --dataset FILE` runs the file as given and stores redacted copies.

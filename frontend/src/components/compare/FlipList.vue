@@ -21,6 +21,7 @@ const FLIPS: { change: CaseChange; title: string; collapsed?: boolean }[] = [
 ]
 const APART: { change: CaseChange; title: string; note: string }[] = [
   { change: 'content_changed', title: 'Content changed', note: 'same id, different case: not compared' },
+  { change: 'harness_error', title: 'Harness error', note: 'AgentScope failed on one side: not compared' },
   { change: 'removed', title: 'Only in A', note: 'not in B' },
   { change: 'added', title: 'Only in B', note: 'not in A' },
 ]

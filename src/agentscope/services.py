@@ -209,8 +209,13 @@ def validation_report(dataset: Dataset | None, issues: Sequence[Issue]) -> Datas
 
 
 def _changed_paths(before: Any, after: Any, path: tuple[str | int, ...] = ()) -> Iterator[str]:
-    """JSON pointers where redaction changed a value (it keeps keys and list lengths)."""
+    """JSON pointers where redaction changed the document: a rewritten value, or a key that
+    was renamed because the key itself looked like a secret. A renamed key is reported at its
+    parent object, so the pointer never repeats the secret-shaped key."""
     if isinstance(before, dict) and isinstance(after, dict):
+        if set(map(str, before)) != set(map(str, after)):
+            yield json_pointer(path)
+            return
         for key, value in before.items():
             yield from _changed_paths(value, after.get(str(key)), (*path, key))
     elif isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
@@ -472,7 +477,7 @@ class Services:
                 config_hash=config.config_hash(),
                 effective_config_hash=self.runner.effective_config_hash(config),
                 checks_enabled=enabled,
-                environment=environment_fingerprint(config),
+                environment=environment_fingerprint(config, self.runner.resolved_content(config)),
                 started_at=utcnow(),
             )
             await asyncio.to_thread(self.repository.create_suite, header)

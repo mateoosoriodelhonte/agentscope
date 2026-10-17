@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from agentscope.domain.agents import AgentConfig
-from agentscope.domain.common import Slug, StrictModel
+from agentscope.domain.common import Slug, StorableText, StrictModel
 from agentscope.domain.datasets import Dataset, EvalCase, ExpectedAnswer
 from agentscope.domain.evaluation import CaseResult, GateResult, GateThresholds
 from agentscope.domain.tools import FaultSpec, ModelFaultSpec, ToolSpec
@@ -94,7 +94,7 @@ class AgentSelector(StrictModel):
 
 
 class RunCreate(AgentSelector):
-    task: str = Field(min_length=1, max_length=4000)
+    task: StorableText = Field(min_length=1, max_length=4000)
     faults: list[FaultSpec] = Field(default_factory=list, max_length=10)
     model_faults: list[ModelFaultSpec] = Field(default_factory=list, max_length=10)
     # Optional expectation: the run is then evaluated as an ad-hoc test case.

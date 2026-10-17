@@ -13,7 +13,7 @@ from typing import Any, Literal, Self
 
 from pydantic import Field, JsonValue, model_validator
 
-from agentscope.domain.common import Identifier, Slug, StrictModel, content_hash
+from agentscope.domain.common import Identifier, Slug, StorableText, StrictModel, content_hash
 from agentscope.domain.tools import FaultSpec, ModelFaultSpec
 
 MAX_CASES = 2000
@@ -132,8 +132,8 @@ class EvalCase(StrictModel):
     """A single test case (named EvalCase so pytest does not try to collect it)."""
 
     id: Slug
-    title: str = Field(default="", max_length=200)
-    task: str = Field(min_length=1, max_length=4000)
+    title: StorableText = Field(default="", max_length=200)
+    task: StorableText = Field(min_length=1, max_length=4000)
     agent: Identifier | None = None
     expected: ExpectedAnswer | None = None
     permitted_tools: list[Identifier] | None = Field(default=None, max_length=32)

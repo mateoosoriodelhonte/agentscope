@@ -206,5 +206,12 @@ def test_unknown_api_route_is_json_404(client: TestClient) -> None:
     assert response.json() == {"detail": "not found"}
 
 
+def test_no_cdn_backed_docs_page_but_a_local_openapi_document(client: TestClient) -> None:
+    assert client.get("/api/docs").status_code == 404
+    spec = client.get("/api/openapi.json")
+    assert spec.status_code == 200
+    assert "/api/runs" in spec.json()["paths"]
+
+
 def test_jobs_are_404_when_unknown(client: TestClient) -> None:
     assert client.get("/api/jobs/00000000-0000-0000-0000-000000000000").status_code == 404

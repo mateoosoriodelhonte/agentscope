@@ -2,7 +2,6 @@
 import { computed, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api } from '@/api/client'
-import type { AgentConfig } from '@/api/types'
 import TopologyDiagram from '@/components/agents/TopologyDiagram.vue'
 import CopyButton from '@/components/ui/CopyButton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
@@ -13,7 +12,7 @@ import Metric from '@/components/ui/Metric.vue'
 import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import ViewToggle from '@/components/ui/ViewToggle.vue'
-import { canonicalJson, formatTimestamp, shortId } from '@/composables/format'
+import { shortId } from '@/composables/format'
 import { openNewRun } from '@/composables/newRun'
 import { setPageDetail } from '@/composables/usePageMeta'
 import { param, useQueryState } from '@/composables/useQueryState'
@@ -28,35 +27,8 @@ const { state: query, set } = useQueryState({ graph: param.enum(['chart', 'table
 const info = computed(() => catalog.data.value?.agents.find((a) => a.name === props.agent) ?? null)
 const config = computed(() => info.value?.versions.find((v) => v.version === props.version) ?? null)
 
-/** What config_hash covers: every field but the label and description. */
-const behaviour = (c: AgentConfig) => canonicalJson({ ...c, label: '', description: '' })
-/** Distinct recorded configurations checked before giving up. */
-const MAX_CANDIDATES = 5
-
-/**
- * The config hash is computed by the server (canonical JSON of the config), so it is read
- * from a recorded run rather than recomputed here. A run that names this agent@version may
- * still have used a hand-edited config (the New run editor keeps the name), so the run's
- * recorded config must equal the built-in one before its hash is shown as this version's.
- * A page of runs is fetched in case the server ignores the version filter.
- */
-const latestRun = useResource(
-  async (signal) => {
-    const target = config.value
-    if (!target) return null
-    const runs = (await api.listRuns({ agent: props.agent, agent_version: props.version, limit: 50 }, signal)).items
-    const checked = new Set<string>()
-    for (const run of runs) {
-      if (run.agent !== props.agent || run.agent_version !== props.version || checked.has(run.config_hash)) continue
-      if (checked.size >= MAX_CANDIDATES) break
-      checked.add(run.config_hash)
-      const detail = await api.getRun(run.run_id, signal)
-      if (behaviour(detail.trace.config) === behaviour(target)) return run
-    }
-    return null
-  },
-  () => (config.value ? `${agentRef.value}|${behaviour(config.value)}` : null),
-)
+/** Hashes the server computed for this built-in version (exact; never recomputed here). */
+const hashes = computed(() => info.value?.version_hashes?.[props.version] ?? null)
 const tools = computed(() => {
   const specs = catalog.data.value?.tools ?? []
   return (config.value?.tools ?? []).map((name) => ({ name, spec: specs.find((t) => t.name === name) ?? null }))
@@ -105,18 +77,14 @@ watch(
         <Metric label="Tool schema version" :value="String(config.tool_schema_version)" />
         <div class="hash">
           <dt>Config hash</dt>
-          <dd v-if="latestRun.data.value" class="mono">
-            <span :title="latestRun.data.value.config_hash">{{ shortId(latestRun.data.value.config_hash.replace('sha256:', ''), 16) }}</span>
-            <CopyButton :value="latestRun.data.value.config_hash" label="Copy config hash" />
-            <span class="faint source">
-              as recorded by
-              <RouterLink :to="`/runs/${encodeURIComponent(latestRun.data.value.run_id)}`">run {{ shortId(latestRun.data.value.run_id) }}</RouterLink>,
-              {{ formatTimestamp(latestRun.data.value.started_at) }}
+          <dd v-if="hashes" class="mono">
+            <span :title="hashes.config_hash">{{ shortId(hashes.config_hash.replace('sha256:', ''), 16) }}</span>
+            <CopyButton :value="hashes.config_hash" label="Copy config hash" />
+            <span class="faint source" :title="hashes.effective_config_hash">
+              effective {{ shortId(hashes.effective_config_hash.replace('sha256:', ''), 12) }}
             </span>
           </dd>
-          <dd v-else-if="latestRun.loading.value" class="faint">loading…</dd>
-          <dd v-else-if="latestRun.error.value" class="faint">could not be read from the recorded runs</dd>
-          <dd v-else class="faint">not recorded yet: the server computes it on the first run of this version</dd>
+          <dd v-else class="faint">not reported by this server</dd>
         </div>
       </dl>
 

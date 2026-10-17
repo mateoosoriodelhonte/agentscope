@@ -249,15 +249,12 @@ def test_planted_secrets_never_leave_redacted(
     assert CONFIGURED_MARKER in exported
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known limit of redaction: research_assistant's scripted model builds its search "
-    "query by lower-casing and tokenizing the task ('sk proj q7vx2...'), and no exact-value "
-    "or pattern redactor can recognise such a derived copy. The exact secret never leaks.",
-)
-async def test_derived_copies_of_a_secret_are_not_recognised(
+async def test_the_model_never_sees_a_secret_so_cannot_derive_copies_of_it(
     secured: Services, pipeline: Pipeline
 ) -> None:
+    """The scripted research model lower-cases and tokenizes the task into its search query.
+    It receives the redacted task, so no mangled copy of the key ('sk proj q7vx2...') that
+    pattern redaction could not recognise reaches storage either."""
     request = RunRequest(config=secured.catalog.resolve("research_assistant@v2"), task=TASK)
     await secured.run_case(request)
     derived = KEY.removeprefix("sk-proj-").lower().encode()

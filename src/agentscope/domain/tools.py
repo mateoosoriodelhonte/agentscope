@@ -56,8 +56,10 @@ class FaultSpec(StrictModel):
     """A controlled failure applied to a tool during a run.
 
     `on_call` targets the n-th call (1-based, counting retries) of that tool; `None` means
-    every call. `times` bounds how many consecutive calls are affected from `on_call`
-    (`None` = all subsequent calls).
+    every call. For failure faults (timeout, error, permission_denied), `times` bounds how
+    many consecutive calls fail from `on_call`. For output faults (malformed, incomplete,
+    misleading, injection), `times` counts deliveries: the fault stays owed from `on_call`
+    until it has actually rewritten that many outputs. `None` = no limit.
     """
 
     tool: Identifier

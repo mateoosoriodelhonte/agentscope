@@ -14,13 +14,16 @@ from langgraph.errors import GraphRecursionError
 
 from agentscope.agents.base import AgentCatalog
 from agentscope.config import ModelRate
-from agentscope.domain.agents import AgentConfig, Limits
+from agentscope.domain.agents import AgentConfig, Limits, ProviderName
 from agentscope.domain.datasets import LimitsOverride
+from agentscope.domain.evaluation import ResolvedContent
 from agentscope.domain.tools import FaultSpec, ModelFaultSpec
 from agentscope.domain.traces import CostEstimate, RunStatus, SpanKind, TokenUsage, TraceRecord
+from agentscope.evaluation.fingerprint import resolved_content
 from agentscope.providers.base import ChatMessage, ModelProvider
+from agentscope.providers.fake import FAKE_BRAIN_VERSION
 from agentscope.runtime.context import RunContext
-from agentscope.runtime.graph import build_graph, recursion_limit
+from agentscope.runtime.graph import build_graph, recursion_limit, topology
 from agentscope.runtime.model_faults import FaultyModelProvider
 from agentscope.runtime.prompts import build_system_prompt
 from agentscope.runtime.protocol import decision_schema
@@ -129,6 +132,22 @@ class AgentRunner:
         specs = self.tools.specs(sorted(tools), config.tool_schema_version)
         return self.catalog.get(config.agent).effective_config_hash(config, specs)
 
+    def resolved_content(self, config: AgentConfig) -> ResolvedContent:
+        """Per-component hashes of what `effective_config_hash` covers, from the same inputs,
+        so a comparison can name the resolved component that changed (prompt text, a tool
+        schema, the output schema, the graph, or the scripted brain)."""
+        definition = self.catalog.get(config.agent)
+        tools = effective_tools(config.tools, None, ())
+        return resolved_content(
+            prompt=definition.prompt(config.prompt_version),
+            tool_specs=self.tools.specs(sorted(tools), config.tool_schema_version),
+            output_schema=definition.output_schema(),
+            graph=topology(config.graph),
+            fake_brain_version=FAKE_BRAIN_VERSION
+            if config.model.provider is ProviderName.FAKE
+            else None,
+        )
+
     async def run(self, request: RunRequest) -> TraceRecord:
         config = request.config
         self.catalog.validate(config)
@@ -206,7 +225,9 @@ class AgentRunner:
                 "step": 0,
                 "messages": [
                     ChatMessage(role="system", content=system_prompt),
-                    ChatMessage(role="user", content=request.task),
+                    # The model gets the redacted task: a secret pasted into a task is never
+                    # sent to a provider, and nothing the model derives from it can carry it.
+                    ChatMessage(role="user", content=self.redactor.redact_text(request.task)),
                 ],
                 "decision_repairs": 0,
                 "output_repairs": 0,

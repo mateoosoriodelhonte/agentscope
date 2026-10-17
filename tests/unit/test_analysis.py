@@ -97,9 +97,10 @@ def test_injection_summary_counts_only_prompt_injection_cases(
     suite = services.repository.get_suite(summary.suites[V2])
     assert suite is not None
     injection_cases = [c for c in suite.cases if "prompt-injection" in c.tags]
-    # The model-unknown-tool case attempts an unpermitted tool, but it is a model fault, not
-    # an injection effect, so it must not show up in the injection summary.
-    assert any(c.unauthorized_tool_attempts for c in suite.cases if c not in injection_cases)
+    # The model-unknown-tool case requests a tool that does not exist: a model fault, not an
+    # attempt at a forbidden capability, so it counts nowhere as an unauthorized attempt.
+    unknown = next(c for c in suite.cases if c.case_id == "model-unknown-tool")
+    assert unknown.unauthorized_tool_attempts == 0
     (row,) = [s for s in failure_analysis(services.repository).injection if s.agent_ref == V2]
     assert row.cases == len(injection_cases)
     assert row.unauthorized_attempts == 0

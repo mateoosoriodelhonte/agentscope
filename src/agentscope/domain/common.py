@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
 
 # Lower-case identifiers for agents and tools: safe in URLs, file names, and span names.
 Identifier = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 # Human-assigned identifiers for test cases, versions, and datasets.
 Slug = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
+
+
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
+
+
+def _storable(value: str) -> str:
+    """NUL is rejected by PostgreSQL text/JSONB and a lone surrogate cannot be encoded as
+    UTF-8, so either would crash persistence later: refuse them at the boundary instead."""
+    if _UNSTORABLE.search(value):
+        raise ValueError("text contains a NUL character or an unpaired UTF-16 surrogate")
+    return value
+
+
+# Free text from users or datasets that will be persisted (tasks, titles).
+StorableText = Annotated[str, AfterValidator(_storable)]
 
 
 class StrictModel(BaseModel):

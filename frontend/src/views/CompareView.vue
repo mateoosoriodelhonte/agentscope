@@ -438,6 +438,9 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
         <p v-if="!data.deterministic" class="callout warn" role="note">
           At least one side used a non-deterministic model: flips may be noise. Re-run to confirm before trusting them.
         </p>
+        <p v-for="(warning, i) in data.warnings ?? []" :key="`warning-${i}`" class="callout warn" role="note">
+          {{ warning }}
+        </p>
 
         <ConfigDiff :diff="data.config_diff" :confounded="data.confounded" />
 

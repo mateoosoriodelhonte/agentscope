@@ -71,6 +71,7 @@ def test_mutated_datasets_give_a_dataset_or_a_dataset_error(
 slugs = st.from_regex(r"[A-Za-z0-9][A-Za-z0-9._-]{0,15}", fullmatch=True)
 identifiers = st.from_regex(r"[a-z][a-z0-9_]{0,15}", fullmatch=True)
 texts = st.text(max_size=40)
+STORABLE = st.characters(blacklist_characters="\x00", blacklist_categories=("Cs",))
 finite = st.floats(allow_nan=False, allow_infinity=False)
 numbers = st.integers(-(10**12), 10**12) | finite
 json_values = st.recursive(
@@ -163,8 +164,9 @@ def cases(draw: st.DrawFn) -> EvalCase:
     forbidden = [t for t in draw(st.lists(identifiers, max_size=3)) if t not in (permitted or [])]
     return EvalCase(
         id=draw(slugs),
-        title=draw(st.text(max_size=20)),
-        task=draw(st.text(min_size=1, max_size=60)),
+        # Tasks and titles are StorableText: NUL is refused at the boundary by design.
+        title=draw(st.text(alphabet=STORABLE, max_size=20)),
+        task=draw(st.text(alphabet=STORABLE, min_size=1, max_size=60)),
         agent=draw(st.none() | identifiers),
         expected=draw(st.none() | answers),
         permitted_tools=permitted,
