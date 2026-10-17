@@ -525,3 +525,12 @@ def test_a_comparison_with_one_simulated_side_says_so(capsys: pytest.CaptureFixt
     shown = capsys.readouterr().out
     assert "A: Simulated model" in shown
     assert "flips may be noise" in shown
+
+
+def test_compare_text_output_groups_every_case_change() -> None:
+    """Every change except still_passing (summarized as a count) gets its own group, so no
+    case silently disappears from the human-readable comparison."""
+    from agentscope.cli.evaluate import _CHANGE_ORDER
+    from agentscope.domain.experiments import CaseChange
+
+    assert set(_CHANGE_ORDER) | {"still_passing"} == {c.value for c in CaseChange}

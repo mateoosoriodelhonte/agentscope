@@ -33,7 +33,7 @@ from agentscope.tracing.redaction import Redactor
 MAX_PAYLOAD_CHARS = 64 * 1024
 MAX_STRING_LEAF = 8 * 1024
 
-AttributeValue = str | bool | int | float
+AttributeValue = str | bool | int | float | list[str]
 
 
 def _ns_to_datetime(ns: int | None) -> datetime:
@@ -239,6 +239,8 @@ class SpanHandle:
                 continue  # absent means "not reported" — never write a placeholder
             if isinstance(value, str):
                 value = self._redactor.redact_text(value)[:4096]
+            elif isinstance(value, list):
+                value = [self._redactor.redact_text(item)[:4096] for item in value]
             self.span.set_attribute(key, value)
 
     def add_event(self, name: str, attributes: Mapping[str, AttributeValue] | None = None) -> None:

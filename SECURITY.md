@@ -31,10 +31,11 @@ supply-chain measures below).
 ### Loopback binding and the Host check (DNS rebinding)
 
 `agentscope serve` binds `127.0.0.1` by default and refuses a non-loopback bind unless remote
-mode is on (exit 2). `LocalOnlyMiddleware` (`src/agentscope/api/security.py`) rejects any
-request whose `Host` header, parsed IPv6-aware, is not `127.0.0.1`, `localhost` or `::1`
-(plus explicit `--allowed-host` values; `*` is ignored) with `400 invalid host header`. A
-rebinding attack reaches the server with the attacker's hostname in `Host`, so it is refused.
+mode or [container mode](#container-mode) is on (exit 2). `LocalOnlyMiddleware`
+(`src/agentscope/api/security.py`) rejects any request whose `Host` header, parsed
+IPv6-aware, is not `127.0.0.1`, `localhost` or `::1` (plus explicit `--allowed-host` values;
+`*` is ignored) with `400 invalid host header`. A rebinding attack reaches the server with the
+attacker's hostname in `Host`, so it is refused.
 
 ### Mutation guard (cross-site request forgery)
 
@@ -84,12 +85,28 @@ cut to 500 characters and redacted.
 
 ### Redaction at write time
 
-Payloads, attributes, events and status messages are redacted when written to a span; the
-repository redacts every model again before saving it; everything returned to the CLI or the
-API is a redacted copy. Redaction covers the exact values of configured secrets, values under
-sensitive key names, and secret-shaped strings (API keys, tokens, JWTs, bearer credentials,
-private keys, password assignments). Checks still judge the unredacted in-memory trace, so a
-leak is detected even when the stored copy is redacted. Details:
+The task is redacted before it is sent to the model, so a secret pasted into a task never
+reaches a provider. Span names, payloads, attributes, events and status messages are
+redacted when written to a span; the repository redacts every model again before saving it;
+everything returned to the CLI or the API is a redacted copy. Redaction covers:
+
+- the exact values of configured secrets (every `SecretStr` setting and the database
+  password), provided they are distinctive enough not to be ordinary words: 16 or more
+  characters are matched anywhere, 8 to 15 characters with at least two character classes
+  are matched as whole tokens, and weaker values are not matched by value (one warning gives
+  their number, never the values);
+- values under secret-like key names, matched by word (`api_key`, `AWS_SECRET_ACCESS_KEY`,
+  `githubToken`, `session_id`, ...) or listed in `AGENTSCOPE_REDACT_KEYS`;
+- secret-shaped strings (provider keys, GitHub, AWS and Slack tokens, JWTs, bearer
+  credentials, PEM private keys) and the password in `scheme://user:password@host`;
+- the value in `name=value`, `name: value` and `"name": "value"` text when the name is
+  secret-like (the name is kept);
+- object keys, which are renamed to their redacted form when they contain a secret.
+
+NUL characters and unpaired surrogates become U+FFFD, and every pattern runs in linear time
+on hostile input. Checks still judge the unredacted in-memory trace, so a leak is detected
+even when the stored copy is redacted. Configured URLs shown by `GET /api/settings` have
+everything up to the last `@` masked and their query and fragment dropped. Details:
 [docs/TRACING.md](docs/TRACING.md#redaction-at-write-time).
 
 ### Egress policy and no telemetry
@@ -124,8 +141,8 @@ absolute URLs ([docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md)).
 `create_task`, `send_email` and `delete_record` only append to a per-run, in-memory sandbox
 that is discarded after the run. No built-in agent's toolset includes them, so no
 configuration of a built-in agent can permit them. The runtime guard executes a call only if
-the tool is in the run's effective permitted set (the agent's tools, narrowed by the case),
-exists, and receives arguments that validate strictly; anything else is recorded and never
+the tool exists, is in the run's effective permitted set (the agent's tools, narrowed by the
+case), and receives arguments that validate strictly; anything else is recorded and never
 executed. `tests/injection/` shows that a model that obeys every injected instruction
 (`scripted-compliant`) executes no unauthorized tool.
 
@@ -148,28 +165,56 @@ escaping the directory skipped), accepts UTF-8 only, and rejects duplicate keys,
 `Infinity`, integers beyond ±(2^53 − 1), unpaired surrogates and nesting deeper than 32,
 before strict Pydantic validation with bounded strings and collections and no user-supplied
 regular expressions. Lint refuses contradictory cases, and import refuses any value the
-redactor would rewrite ([docs/EVALUATION.md](docs/EVALUATION.md#loading-and-lint)).
+redactor would rewrite and any key it would rename, without echoing the key
+([docs/EVALUATION.md](docs/EVALUATION.md#loading-and-lint)). The dashboard sends the file's
+text byte for byte (picked files must be valid UTF-8), so it gets exactly the same checks as
+the CLI.
+
+Free text that is persisted (`EvalCase.task`, `EvalCase.title`, the `task` of
+`POST /api/runs` and `agentscope run`) refuses NUL characters and unpaired surrogates at the
+boundary: PostgreSQL rejects NUL and strict UTF-8 cannot encode a lone surrogate, so either
+would otherwise fail a save later. Model output and tool text are sanitized instead (the
+characters become U+FFFD), so a model cannot make a stored run unreadable.
 
 ### Bounded execution
 
 Every run is bounded: `max_steps` ≤ 50, `tool_timeout_s` ≤ 30, `run_timeout_s` ≤ 600,
 `request_timeout_s` ≤ 600, at most 3 tool retries, decision repairs and output repairs,
 `max_output_tokens` ≤ 4096 (always sent to real providers), tool outputs ≤
-`max_tool_output_chars`, model replies ≤ 100,000 characters. Per-case overrides can only
-tighten limits. The API runs at most 2 jobs at once with 16 queued (`429` beyond that).
-Provider status probes have a 2-second request timeout and a 5-second overall deadline.
+`max_tool_output_chars`, model replies ≤ 100,000 characters with a decision object nested at
+most 32 levels deep. Runtime retries apply only to `timeout`, `error` and `malformed`
+outcomes; a configuration that asks to retry anything else is refused. Per-case overrides
+can only tighten limits. The API runs at most 2 jobs at once with 16 queued (`429` beyond
+that). Provider status probes have a 2-second request timeout and a 5-second overall
+deadline. Parsing model replies, normalizing answers and redacting text all run in linear
+time, so a hostile reply or dataset value cannot stall a worker.
 
 ### Container mode
 
-The Docker setup runs `agentscope serve --container`, which listens on all interfaces inside
-the container without an API token while the Host check still accepts only loopback names.
-Publish the port on `127.0.0.1` only, as the provided Compose file does; publishing it on all
-interfaces would expose an unauthenticated API to your network.
+The Docker image runs `agentscope serve --container` (also `AGENTSCOPE_CONTAINER=true`),
+which binds `0.0.0.0` inside the container's own network namespace without an API token,
+while the Host check still accepts only loopback names. Publish the port on `127.0.0.1` only
+(`-p 127.0.0.1:8765:8765`), as `docker-compose.yml` does. The Host check stops browsers, not
+a client that reaches the port directly and sends a loopback `Host` itself, so publishing on
+`0.0.0.0` or a LAN address would expose an unauthenticated API to your network; the server
+prints a warning saying so at startup. Container mode refuses `--allowed-host` without remote
+mode; for network access use `--container --allow-remote --allowed-host <name>` with
+`AGENTSCOPE_API_TOKEN`.
 
-### Data at rest
+The image runs as the unprivileged user `agentscope` (uid 10001) with its data in `/data`
+(mode `0700`). The Compose file also runs the app with a read-only root filesystem, all
+capabilities dropped and `no-new-privileges`, keeps PostgreSQL on an internal network with no
+published port and no route out, and never publishes the optional Ollama service.
 
-The SQLite database directory is set to mode `0700` and the database file is created `0600`,
-with a `.gitignore` containing `*` in the directory. See [PRIVACY.md](PRIVACY.md).
+### Data at rest and data integrity
+
+- A SQLite database directory that AgentScope creates itself gets mode `0700` and a
+  `.gitignore` containing `*`; an existing directory (a project root, `/tmp`) is left as it
+  is. The database file is created `0600`. See [PRIVACY.md](PRIVACY.md).
+- Work in flight records its owner and a heartbeat, and recovery marks it interrupted only
+  when its process is gone, so one process can never turn another's live suite into an error
+  ([ARCHITECTURE.md](ARCHITECTURE.md#liveness-and-recovery)).
+- Purge never deletes the built-in datasets, which every evaluation of a built-in agent needs.
 
 ## Remote mode
 
@@ -214,14 +259,26 @@ Limitations:
 - **The local API has no authentication.** Loopback is not a user boundary: any process or
   user on the machine that can connect to the port can read and change AgentScope's data.
 - **Redaction is pattern-based.** A secret that matches no configured value, key name or
-  pattern is stored as written. Do not put real secrets in tasks or datasets.
+  pattern is stored as written, and a configured secret too short or too plain to match by
+  value (for example a database password `agentscope`) is redacted only inside URLs and
+  `name=value` text. Do not put real secrets in tasks or datasets, and use long random values
+  for configured secrets. The assignment rule also redacts harmless prose such as
+  `token: field` in stored copies (checks are unaffected), and a dataset containing such text
+  is refused on import.
+- **An undelivered injection is not flagged.** When an injection fault never finds output to
+  ride on (the faulted tool keeps failing, or returns nothing to inject into), the injection
+  checks pass without having been exercised. The trace shows it at most as
+  `agentscope.fault.undelivered` on the tool spans, and not even that on attempts taken by an
+  injected `timeout`, `error` or `permission_denied` fault (only the run's recorded fault list
+  then shows that the injection was scheduled).
 - **No encryption at rest.** Stored data is protected by file permissions (SQLite) or by
   PostgreSQL's own access control.
-- **`/api/docs` does not render.** FastAPI's Swagger UI page references scripts and styles on
-  `cdn.jsdelivr.net`, which the CSP blocks. The OpenAPI document is available at
+- **No interactive API docs page.** FastAPI's Swagger UI loads scripts and styles from a CDN,
+  which the CSP blocks, so it is disabled. The OpenAPI document is served locally at
   `/api/openapi.json`.
 - **Evaluating a dataset file does not refuse secret-shaped values.** Only import refuses
-  them; `agentscope eval --dataset FILE` runs the file as given and stores redacted copies.
+  them; `agentscope eval --dataset FILE` runs the file as given (the model still receives each
+  task redacted) and stores redacted copies.
 
 ## Supply chain
 
@@ -231,4 +288,5 @@ Limitations:
   exactly what `package-lock.json` pins.
 - GitHub Actions in `.github/workflows/ci.yml` are pinned to full commit SHAs, and the
   workflow token is read-only (`permissions: contents: read`).
-- CI runs `npm audit --omit=dev --audit-level=high` on every push and pull request.
+- CI runs `npm audit --omit=dev --audit-level=high` on every push to `main` and every pull
+  request.

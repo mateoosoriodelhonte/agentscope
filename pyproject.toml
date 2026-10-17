@@ -1,6 +1,6 @@
 [project]
 name = "agentscope"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first platform to debug, evaluate, and compare AI agents."
 readme = "README.md"
 license = "MIT"

@@ -173,7 +173,9 @@ def build_graph(ctx: RunContext) -> Any:
             llm.set_attributes(
                 {
                     sc.GEN_AI_RESPONSE_MODEL: response.model,
-                    sc.GEN_AI_RESPONSE_FINISH_REASONS: response.finish_reason,
+                    sc.GEN_AI_RESPONSE_FINISH_REASONS: [response.finish_reason]
+                    if response.finish_reason
+                    else None,
                     sc.GEN_AI_USAGE_INPUT_TOKENS: response.usage.input_tokens
                     if response.usage
                     else None,

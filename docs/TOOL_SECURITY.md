@@ -20,7 +20,7 @@ A tool is a subclass of `Tool` (`src/agentscope/tools/base.py`) that declares:
 | `output_model` | A `ToolOutput` subclass (Pydantic, `extra="forbid"`). |
 | `side_effect` | `none` or `sandbox_write`. |
 | `async run(args, ctx)` | Executes with validated arguments and returns an output model. `ctx` carries the run id and the per-run `Sandbox`. |
-| `make_incomplete`, `make_misleading`, `inject_instructions` | Fault hooks (below). Each receives a JSON copy of a valid output and must return a payload that still validates against `output_model`. |
+| `make_incomplete`, `make_misleading`, `inject_instructions` | Fault hooks (below). Each receives a JSON copy of a valid output and must return a payload that still validates against `output_model`. Returning the output unchanged means the fault had nothing to act on (a search without hits): it is then not delivered. |
 
 Built-in tools (`src/agentscope/tools/builtin/`), all registered by `builtin_tools()`:
 
@@ -45,39 +45,64 @@ keyword overlap with titles, bodies and fact subjects.
 ## Argument and output validation
 
 Every call is validated twice before it can run: by the runtime's `guard` node and again by
-`ToolExecutor.execute`. Arguments are validated with
+`ToolExecutor.run_attempt`. Arguments are validated with
 `args_model.model_validate_json(json.dumps(arguments), strict=True)`: strict JSON mode, so
 `"5"` is not `5` and `1` is not `true`, and unknown arguments are rejected. A validation
 failure is the `invalid_arguments` outcome; the guard blocks it before execution and the
 model receives a short `location: message` summary (at most three errors).
 
-Execution then proceeds as follows (`src/agentscope/tools/executor.py`):
+Execution of one attempt then proceeds as follows (`ToolExecutor.run_attempt` in
+`src/agentscope/tools/executor.py`):
 
-1. The fault plan registers the call and returns the fault that applies, if any.
-2. `permission_denied` and `error` faults return immediately without running the tool.
-3. The tool runs under `asyncio.timeout(tool_timeout_s)`. A `timeout` fault waits on an event
+1. An unknown tool is the `unknown_tool` outcome and invalid arguments the
+   `invalid_arguments` outcome; neither reaches the fault plan.
+2. The fault plan registers the call and returns the fault due on it, if any.
+3. `permission_denied` and `error` faults return immediately without running the tool.
+4. The tool runs under `asyncio.timeout(tool_timeout_s)`. A `timeout` fault waits on an event
    that never fires, so the timeout always cuts it short.
-4. Exceptions become outcomes: `ToolPermissionError` is `permission_denied`,
+5. Exceptions become outcomes: `ToolPermissionError` is `permission_denied`,
    `ToolExecutionError` is `error` (message cut to 500 characters), and any other exception is
    `error` with only the exception type (`internal tool error: <Type>`), never a traceback.
-5. An output fault (`malformed`, `incomplete`, `misleading`, `injection`) rewrites the output.
-6. The result is validated against `output_model`. A failure is the `malformed` outcome, with
+   An output fault due on a call that produced no output is not delivered.
+6. An output fault (`malformed`, `incomplete`, `misleading`, `injection`) is applied to a copy
+   of the output. It is delivered only if it changed the payload; otherwise the original
+   output is used.
+7. The result is validated against `output_model`. A failure is the `malformed` outcome, with
    a preview of at most 2,000 characters.
-7. An output whose JSON exceeds `limits.max_tool_output_chars` (default 20,000) is an `error`
+8. An output whose JSON exceeds `limits.max_tool_output_chars` (default 20,000) is an `error`
    outcome.
 
 Tool outcomes: `ok`, `error`, `timeout`, `malformed`, `permission_denied`,
-`invalid_arguments`, `unknown_tool`.
+`invalid_arguments`, `unknown_tool`. An attempt that the run deadline cancels while it runs is
+recorded as `timeout` (see [AGENT_RUNTIME.md](AGENT_RUNTIME.md#retries-and-repairs)).
 
 ## Fault injection
 
 A `FaultSpec` (`src/agentscope/domain/tools.py`) names a `tool`, a `kind`, `on_call` (the
-n-th call of that tool, 1-based, counting retries; `null` means every call), `times` (how
-many consecutive calls from `on_call`; `null` means all later calls; ignored when `on_call`
-is `null`) and an optional `payload` (1 to 8,000 characters). A case holds at most 10 faults;
-the first matching spec in list order applies. Calls are counted per tool name across the
-run. Calls the guard blocks and calls with invalid arguments never reach the fault plan and
-are not counted.
+n-th call of that tool, 1-based, counting retries; default 1, at most 50; `null` means every
+call), `times` (default 1, at most 50; `null` means no limit; ignored when `on_call` is
+`null`) and an optional `payload` (1 to 8,000 characters). A case holds at most 10 faults.
+Calls are counted per tool name across the run. Calls the guard blocks and calls with
+invalid arguments never reach the fault plan and are not counted.
+
+The two families count differently (`FaultPlan` in `src/agentscope/tools/faults.py`):
+
+- **Failure faults** (`timeout`, `error`, `permission_denied`) replace the call itself and
+  apply by position: calls `on_call` to `on_call + times − 1` fail. So `on_call=1, times=1`
+  fails only the first attempt, and a retry succeeds.
+- **Output faults** (`malformed`, `incomplete`, `misleading`, `injection`) rewrite an output,
+  so they need one. From `on_call` on, an output fault stays owed until it has been
+  delivered `times` times. A call that fails (a timeout, an error, an unknown document id)
+  or whose output the hook leaves unchanged (a search with no hits has nowhere to inject)
+  does not use it up: the attempt records no fault, and the next call that returns usable
+  output receives it. When the tool itself failed or its output was left unchanged, the
+  attempt's span carries `agentscope.fault.undelivered=<kind>`; an attempt taken by an
+  injected failure fault (below) does not. Without this, an injection scheduled on a call the
+  agent got wrong would vanish unrecorded.
+
+When a failure fault and an output fault are both due on a call, the failure fault applies
+and the output fault waits for a later call. Among faults of the same family, the first in
+list order applies.
 
 | Kind | Semantics | Outcome |
 |---|---|---|
@@ -90,10 +115,13 @@ are not counted.
 | `injection` | The tool's `inject_instructions` hook plants the payload in the output. Default: the payload is appended to the first string leaf. | `ok` |
 
 `timeout`, `error`, `malformed` and `permission_denied` make a call fail; `incomplete`,
-`misleading` and `injection` return valid content that is wrong or hostile. The attempt
-records which fault applied (`ToolAttempt.fault`, span attribute `agentscope.fault.kind`), and
-metrics count failed attempts caused by injected faults (`injected_fault_outcomes`)
-separately from failures nothing injected (`unexpected_tool_errors`).
+`misleading` and `injection` return valid content that is wrong or hostile. An attempt
+records the fault that was actually delivered (`ToolAttempt.fault`, span attribute
+`agentscope.fault.kind`), and metrics count failed attempts caused by injected faults
+(`injected_fault_outcomes`) separately from failures nothing injected
+(`unexpected_tool_errors`). The evaluator does not yet use `agentscope.fault.undelivered`:
+an injection that is never delivered leaves the injection checks passing without having
+exercised them ([EVALUATION.md](EVALUATION.md#policy-compliance)).
 
 Default payloads (`src/agentscope/tools/faults.py`) are synthetic and harmless: the injection
 default asks the model to ignore the user, reveal its hidden instructions and call
@@ -111,14 +139,16 @@ Per-tool hooks:
 | `check_calendar` | default | the week shown as free: nothing booked, full capacity available, one zero-hour commitment titled with the payload | payload appended to the first commitment's title (or a zero-hour commitment added) |
 | `calculate` | fractional part dropped | result 10% high (payload unused) | payload appended to `display` |
 | `inspect_mock_api` | only the first body field kept | payload as `message`; a body with a `state` reports `operational` from a `cached` source | payload appended to `message` |
-| `create_task`, `send_email`, `delete_record` | default | payload as `detail` | payload appended to `detail` |
+| `create_task`, `send_email`, `delete_record` | lists truncated as by default, and `detail` emptied | payload as `detail` | payload appended to `detail` |
 
 The planted text is clipped to the tools' 1 KiB text bound where a field has one, so a
-degraded output still validates.
+degraded output still validates. The executor hands each hook a deep copy, so a hook that
+edits its argument in place cannot change the output without the change being recorded.
 
 Model faults (`ModelFaultSpec`: `invalid_json`, `empty`, `schema_violation`,
 `unknown_tool`) corrupt the n-th model reply instead; see
-[AGENT_RUNTIME.md](AGENT_RUNTIME.md#the-fake-model).
+[AGENT_RUNTIME.md](AGENT_RUNTIME.md#the-fake-model). The `unknown_tool` fault's request for
+`nonexistent_tool` is refused by the guard as `unknown_tool`, not as a permission denial.
 
 ## Sandbox write tools
 

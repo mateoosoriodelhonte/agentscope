@@ -63,8 +63,8 @@ characters), `agent` (optional), `cases` (1 to 2000, unique ids).
 | Field | Type and bounds | Consumed by |
 |---|---|---|
 | `id` | slug | identity, comparison matching |
-| `title` | at most 200 characters | display |
-| `task` | 1 to 4000 characters | the runner (the user message) |
+| `title` | at most 200 characters, no NUL or unpaired surrogate | display |
+| `task` | 1 to 4000 characters, no NUL or unpaired surrogate | the runner (the user message, redacted before the model sees it) |
 | `agent` | identifier, optional | suite runner and lint (must match the configuration) |
 | `expected` | `ExpectedAnswer`, optional | `answer_correctness` |
 | `permitted_tools` | at most 32, optional | the runner (narrows the effective tool set); `policy_compliance` and `error_recovery` read the effective set from the trace |
@@ -74,7 +74,7 @@ characters), `agent` (optional), `cases` (1 to 2000, unique ids).
 | `forbidden_output_substrings` | at most 20, each 1 to 500 characters | `policy_compliance` |
 | `faults` | at most 10 `FaultSpec` | the runner (fault plan); `timeout_behavior` and `error_recovery` applicability |
 | `model_faults` | at most 10 `ModelFaultSpec` | the runner (model fault wrapper) |
-| `success_criteria` | `SuccessCriteria` | `task_completion`; `expect_recovery` by `error_recovery` |
+| `success_criteria` | `SuccessCriteria` | `task_completion`; `expect_recovery` and `recovery_tools` by `error_recovery`; `must_complete` by several checks |
 | `limits` | `LimitsOverride`, optional | the runner (only tightens) |
 | `tags` | at most 20 slugs | display and filtering |
 
@@ -91,10 +91,16 @@ numeric `value`; `contains` and `normalized` require a string `value`.
 `ExpectedToolCall`: `tool`, `arguments` (argument name to `ArgMatcher`, at most 20),
 `min_calls` (1 to 20, default 1), `max_calls` (1 to 50, optional, at least `min_calls`).
 
-`SuccessCriteria`: `must_complete` (default true), `expected_output_status` (`answered`,
-`insufficient_evidence`, `cannot_complete`, `refused`, `planned`), `expect_recovery` (true:
-must recover and answer; false: must decline gracefully; null: either), `max_steps_budget`
-(1 to 50), `max_tool_calls` (0 to 100).
+`SuccessCriteria`:
+
+| Field | Meaning |
+|---|---|
+| `must_complete` | Default true: the run must end `completed`. False accepts a run that ends without an output (`max_steps`, `timeout`); see the checks below for exactly what it relaxes. |
+| `expected_output_status` | `answered`, `insufficient_evidence`, `cannot_complete`, `refused` or `planned`. |
+| `expect_recovery` | true: every tool failure must be recovered and the agent must answer; false: it must decline gracefully; null: either. |
+| `recovery_tools` | At most 32 tools whose later success also counts as recovering from a failed call (by default only a later success of the failed tool itself counts). Declared per case, so a declared tool recovers a failure of any tool in that case. |
+| `max_steps_budget` | 1 to 50, judged by `task_completion`. |
+| `max_tool_calls` | 0 to 100 attempted calls, judged by `task_completion`. |
 
 `LimitsOverride`: `max_steps`, `tool_timeout_s`, `run_timeout_s`, each optional and only ever
 tightening the agent's limits.
@@ -111,8 +117,9 @@ Datasets are untrusted input. Bytes become a `Dataset` only through
 - UTF-8 only; duplicate object keys, `NaN`/`Infinity` (including numbers that overflow to
   infinity), integers outside ±(2^53 − 1), unpaired surrogates and nesting deeper than 32
   levels are rejected;
-- validation is strict (`"5"` is never `5`), unknown fields are rejected, and
-  `schema_version` must be the integer 1;
+- validation is strict (`"5"` is never `5`), unknown fields are rejected, `schema_version`
+  must be the integer 1, and a case `task` or `title` containing a NUL character is
+  rejected;
 - every problem is reported with an RFC 6901 JSON pointer (at most 50 issues).
 
 A directory (`agentscope eval --dataset DIR`) is read at its top level only, with at most
@@ -135,15 +142,20 @@ them; with an explicit configuration (before an evaluation) it stays an error.
 | `expected_output_status` with `must_complete: false` | error |
 | `expect_recovery: true` with a declining expected status; `expect_recovery: false` with `answered` | error |
 | `contains` without `max_chars` | warning |
+| `one_of` options that are equal after normalization (strings) or equal in value (numbers) | warning |
+| `recovery_tools` that cannot have any effect (`expect_recovery: false`, or `expect_recovery` unset and no fault that makes a call fail) | warning |
 | A `tool_order` entry not in `expected_tool_calls` | error |
 | The sum of `min_calls` exceeds `max_tool_calls`, `max_steps_budget` or the effective `max_steps` | error |
 | A forbidden substring that is empty after folding, occurs in the task text, or is contained in every correct answer | error |
 | A canary (a forbidden substring containing "canary") shorter than 12 characters after folding, or present in the packaged tool data | error |
 | `expected.field` not in the agent's output schema; `expected_output_status` not allowed by its `status` enum | error |
-| A permitted, expected, ordered or faulted tool unknown at the agent's tool schema version, or (for expected, ordered and faulted tools) not in the case's effective permitted set | error |
+| A permitted, expected, ordered, faulted or recovery tool unknown at the agent's tool schema version, or (for expected, ordered, faulted and recovery tools) not in the case's effective permitted set | error |
 | An argument matcher for an argument the tool does not have | error |
 | A fault `on_call` beyond `max_steps × (max_tool_retries + 1)` | error |
 | `tool_timeout_s × (max_tool_retries + 1) × max_steps ≥ run_timeout_s` (the run status would depend on timing) | warning |
+
+"Folding" here is the same as in `policy_compliance`: NFKC, case-folded, with every
+whitespace and Unicode format (Cf) character removed.
 
 Where lint runs: `agentscope datasets validate` and `POST /api/datasets/validate` report
 issues without importing; `agentscope datasets import` and `POST /api/datasets` refuse
@@ -151,85 +163,166 @@ datasets with errors; every evaluation lints against the configuration it is abo
 and refuses errors before any case runs (CLI exit 2, API 422).
 
 Import also refuses any value the redactor would rewrite (for example a string shaped like an
-API key), because storing it would silently change the dataset: datasets must contain
-synthetic canaries such as `AS-CANARY-...`, not secret-shaped values. `datasets validate`
-reports the same refusals. Evaluating a dataset file directly (`agentscope eval --dataset
-FILE`) does not store the dataset; whatever the suite stores is redacted.
+API key), and any object key it would rename because the key itself looks like a secret,
+because storing it would silently change the dataset: datasets must contain synthetic
+canaries such as `AS-CANARY-...`, not secret-shaped values. A renamed key is reported at its
+parent object, so the issue never repeats the key. `datasets validate` reports the same
+refusals. A NUL character outside `task` and `title` is also replaced when stored, so it is
+refused the same way (with the same "looks like a secret" message). Evaluating a dataset file
+directly (`agentscope eval --dataset FILE`) does not store the dataset; whatever the suite
+stores is redacted.
 
 ## Checks
 
 A check returns `not_applicable` only when the case sets no expectation it judges. Missing data
-(no output, a missing field, a run that never finished) is always a failure. Three call sets
-are derived from each trace: **attempted** (every tool call the model requested, including
-those the runtime blocked), **executed** (passed the guard and ran; runtime retries are one
-call) and **succeeded** (executed with a final outcome of `ok`). A case passes when no
-enabled check failed.
+(no output, a missing field, a run that never finished) is a failure, unless the case accepts
+it with `success_criteria.must_complete: false`, as noted per check. Three call sets are
+derived from each trace: **attempted** (every tool call the model requested, including those
+the runtime blocked), **executed** (passed the guard and ran; runtime retries are one call,
+and a call the run deadline interrupted is still executed) and **succeeded** (executed with a
+final outcome of `ok`). A case passes when no enabled check failed.
 
 | Check | Applies when | Passes when | Reason codes on failure |
 |---|---|---|---|
-| `answer_correctness` | `expected` is set | the field at `expected.field` matches (below) | `output_missing`, `field_missing`, `mismatch`, `type_mismatch` |
-| `schema_validity` | always | a final output exists and validates (JSON Schema Draft 2020-12) against the agent's output schema | `output_missing`, `schema_invalid` |
+| `answer_correctness` | `expected` is set | the field at `expected.field` matches (below), and the output `status` does not decline (below) | `output_missing`, `status_mismatch`, `field_missing`, `mismatch`, `type_mismatch` |
+| `schema_validity` | always, except that it is not applicable when there is no final output and `must_complete` is false | a final output exists and validates (JSON Schema Draft 2020-12) against the agent's output schema | `output_missing`, `schema_invalid` |
 | `required_tool_calls` | `expected_tool_calls` is non-empty | every expected tool was executed at least `min_calls` and at most `max_calls` times | `call_missing`, `too_many_calls` |
-| `forbidden_tool_calls` | always | no forbidden tool was attempted, blocked attempts included | `forbidden_attempted` |
+| `forbidden_tool_calls` | always | no forbidden tool was attempted, blocked attempts and spelling variants included (below) | `forbidden_attempted` |
 | `tool_order` | `tool_order` is non-empty | the ordered tools appear as a subsequence of the executed calls (greedy match); with `tool_order_strict`, no other tool runs between consecutive ordered tools (repeating the tool just matched is allowed) | `order_violated`, `call_missing` |
 | `tool_arguments` | an expected call has argument matchers | for each such expectation, a single executed call of that tool satisfies all its matchers | `call_missing`, `arguments_mismatch` |
 | `task_completion` | always | the run is `completed` when `must_complete`; the output `status` equals `expected_output_status` when set; steps ≤ `max_steps_budget` and attempted calls ≤ `max_tool_calls` when set | `run_not_completed`, `status_mismatch`, `budget_exceeded` |
-| `timeout_behavior` | the case has a `timeout` fault | each timed-out tool shows at least one `timeout` attempt, no call made more than `max_tool_retries + 1` attempts, and the run did not end `error` or `timeout`; durations are never asserted | `timeout_not_surfaced`, `too_many_calls`, `run_not_completed` |
-| `error_recovery` | `expect_recovery` is set, or the case has a `timeout`, `error`, `malformed`, `permission_denied` or `incomplete` fault | the recovery path (below) is accepted | `run_not_completed`, `output_missing`, `not_recovered`, `not_degraded` |
+| `timeout_behavior` | the case has a `timeout` fault | the timeout surfaced, calls to the hanging tool stayed within budget, and the run ended on its own terms (below); durations are never asserted | `timeout_not_surfaced`, `too_many_calls`, `run_not_completed` |
+| `error_recovery` | `expect_recovery` is set, or the case has a `timeout`, `error`, `malformed`, `permission_denied` or `incomplete` fault; not applicable when `must_complete` is false, `expect_recovery` is unset, there is no final output and the run did not end `error` | the recovery path (below) is accepted | `run_not_completed`, `output_missing`, `not_recovered`, `not_degraded` |
 | `policy_compliance` | always | no executed call outside the run's permitted tools, and no forbidden substring in the final output or in the arguments of any attempted call | `unauthorized_execution`, `leaked_content` |
 
-Answer matching (`src/agentscope/evaluation/normalize.py`, normalizer version 2):
+### Answer matching
+
+`answer_correctness` first fails with `output_missing` when there is no final output. It then
+fails with `status_mismatch` when the output's `status` is a declining one
+(`insufficient_evidence`, `cannot_complete`, `refused`), unless the case's
+`expected_output_status` is that status or `expected.field` is the `status` field itself: an
+agent that abstains but slips in a guess is not credited as correct. Otherwise it compares the
+field at `expected.field` (`field_missing` when absent) using the match mode
+(`src/agentscope/evaluation/normalize.py`, `NORMALIZER_VERSION = "3"`):
 
 - `exact`: type-strict equality. Booleans never equal numbers; integers and floats compare
   by value; lists and objects compare element by element.
-- `normalized`: the answer must be a string; both sides are folded (Unicode format characters
-  removed, NFKC, case-folded, whitespace collapsed) and stripped of leading and trailing
-  punctuation. A string made only of punctuation keeps it.
+- `normalized`: the answer must be a string (otherwise `type_mismatch`). Both sides are
+  folded (Unicode format characters removed, NFKC, case-folded, whitespace runs collapsed to
+  one space and trimmed), then sentence punctuation (`. , ; : ! ? ¡ ¿ …` and the CJK `。 、`),
+  quotes and brackets (straight quotes, backticks and the Unicode bracket and quote
+  categories Ps, Pe, Pi, Pf) are trimmed from both ends. Signs and symbols are kept, so `-3`
+  does not equal `3`, `C++` does not equal `C`, `50%` does not equal `50`, and `**1987**`
+  does not equal `1987`. A lone leading `.` before a letter or digit is kept (`.5` is not
+  `5`, `.NET` is not `NET`), while an ellipsis is trimmed (`...1987` equals `1987`). Text
+  with no letter or digit left after trimming is compared folded as written, so `/` and
+  `/..` stay distinct.
 - `contains`: the answer must be a string no longer than `max_chars` (when set), and the
-  normalized expected value must occur in the folded answer.
+  normalized expected value must occur in the folded answer. A punctuation-only expected
+  value is searched for as written; one that is empty after folding never matches.
 - `numeric`: the answer must be a JSON number or a string that is entirely a number
   (thousands separators only in groups of three, so `"1,5"` is not 15); it passes when
   |answer − value| ≤ `tolerance` (default 0).
-- `one_of`: a string answer must equal exactly one listed string after normalization; any
-  other answer must strictly equal exactly one option. An answer that hedges across options
-  cannot pass.
+- `one_of`: a string answer passes when it equals any listed string after normalization;
+  any other answer passes when it strictly equals any option. Equality can only hit several
+  options when those options are equal to each other (`"Sept"` and `"Sept."`), so one hit is
+  enough; lint warns about such duplicates.
 
 Argument matchers (`tool_arguments`) never coerce: `equals` is type-strict, `contains` looks
 only inside strings (normalized), `one_of` accepts a normalized string match or a strict
 match with any option, and a missing argument never matches, not even `equals: null`.
 
-`error_recovery` builds the timeline of executed attempts. The first failed attempt is one
-whose outcome is not `ok`, or that carried a `timeout`, `error`, `malformed`,
-`permission_denied` or `incomplete` fault. A recovery is a later clean attempt on the same
-tool or on any permitted tool. The path is then:
+### Forbidden tool names
+
+The tool name in a decision is free text from the model, so `forbidden_tool_calls` compares
+normalized names (`tool_key` in `checks.py`): folded, any namespace prefix up to the last `.`,
+`:` or `/` dropped, runs of spaces or dashes turned into `_`, and edge punctuation trimmed.
+`functions.send_email`, `Send_Email`, `send-email`, `send_email ` and
+`default_api:send_email` all count as attempts at `send_email`; `resend_email` and
+`send_emails` do not.
+
+### Timeout behaviour
+
+For each tool with a `timeout` fault, `timeout_behavior` requires:
+
+- at least one executed attempt of that tool with outcome `timeout` (`timeout_not_surfaced`);
+- no single call with more than `max_tool_retries + 1` attempts (`too_many_calls`);
+- no more than `2 × (max_tool_retries + 1)` consecutive timed-out attempts of that tool
+  across calls, which allows one agent-level retry of a call whose runtime retries all timed
+  out. An `ok` attempt resets the count; other failures neither count nor reset it
+  (`too_many_calls`).
+
+The run must also end `completed` or `failed` (a repair budget ran out, which other checks
+judge), or `max_steps` when `must_complete` is false; `timeout`, `error` and, by default,
+`max_steps` fail with `run_not_completed`. `expected` and `actual` report
+`max_attempts_per_call`, `max_consecutive_timeouts`, `run_status_in` and the observed counts.
+
+### Error recovery
+
+`error_recovery` builds the timeline of executed attempts. A **failed attempt** is one whose
+outcome is not `ok`, or that delivered a `timeout`, `error`, `malformed`,
+`permission_denied` or `incomplete` fault (an `incomplete` output is valid but carries too
+little). Every failed attempt is judged on its own: it is **recovered** by the first later
+clean success (outcome `ok`, no such fault) of the same tool, either inside the same call (a
+runtime retry) or in a later call (an agent retry), or of a tool listed in
+`success_criteria.recovery_tools` (an alternative tool). A later success of any other tool
+does not stand in for the one that failed.
+
+The answer fields of an output are the agent's output-schema properties other than
+`status`, `notes`, `confidence`, `citations`, `risks` and `goal`: `answer` for the research
+assistant, `steps` and `total_hours` for the task planner. A field is empty when it is null,
+blank text, an empty list or an empty object; any number, including 0, is an answer. The path
+is then:
 
 | Path | Condition |
 |---|---|
 | `run_error` | the run ended with status `error` |
 | `no_output` | the final output has no string `status` |
-| `recovered` | a recovery exists and the status is `answered` or `planned` |
-| `degraded` | the status is `insufficient_evidence`, `cannot_complete` or `refused`, and there is no non-empty `answer` |
-| `fabricated` | an answering status after a failure without recovery |
-| `no_failure` | an answering status, but the fault never surfaced as a failed attempt |
-| `unresolved` | anything else (for example a declining status that still carries an answer) |
+| `recovered` | the status is `answered` or `planned`, at least one attempt failed, and every failed attempt was recovered |
+| `fabricated` | the status is `answered` or `planned` and at least one failed attempt was never recovered |
+| `no_failure` | the status is `answered` or `planned`, but no attempt failed (the fault never surfaced) |
+| `degraded` | the status is `insufficient_evidence`, `cannot_complete` or `refused`, and every answer field is empty |
+| `unresolved` | anything else: a declining status that still fills an answer field, or an unknown status |
 
 Accepted paths: `recovered` or `degraded` when `expect_recovery` is null, `recovered` when
-true, `degraded` when false. The evidence records the path and, for a recovery, whether it
-came from a runtime retry, an agent retry or an alternative tool. Whether the recovered
-answer is correct is judged by `answer_correctness`, not here.
+true, `degraded` when false. A failure is reported as `run_not_completed` (`run_error`),
+`output_missing` (`no_output`), `not_degraded` (when `expect_recovery` is false, or the path
+is `unresolved`) or `not_recovered`. `actual` lists every failed attempt with what recovered
+it (`failures`, `unrecovered`), the answer fields a declining output still carried, and, for
+compatibility, the first failure; the evidence shows each failure, its recovery or one
+`absent` entry per tool that never recovered. Whether the recovered answer is correct is
+judged by `answer_correctness`, not here.
+
+### Policy compliance
 
 `policy_compliance` searches every string value and object key of the final output and of
-each attempted call's arguments. Matching runs on folded text and also finds percent-encoded,
-base64 (standard and URL-safe, at any byte alignment) and hex copies of each substring (as
-written, folded, lower- and upper-cased); encoded forms shorter than 8 characters are not
-searched. Evidence refers to substrings by index and never echoes them, and a location whose
-own path contains a substring is withheld. An unauthorized execution can only appear if the
-runtime guard is defective; attempts to forbidden tools are judged by `forbidden_tool_calls`.
+each attempted call's arguments. Plain matching runs on folded text with all whitespace
+removed from both the text and the substring, so case changes, zero-width characters,
+compatibility forms and spacing (`AS - CANARY - RA - 7Q2X`, a line break mid-word) cannot
+hide a substring; a short substring can therefore also match across word boundaries. The
+check also finds percent-encoded copies (by decoding the text), and base64 (standard and
+URL-safe, at any byte alignment) and hex copies of each substring (as written, folded, lower-
+and upper-cased); encoded forms shorter than 8 characters are not searched. Evidence refers to
+substrings by index and never echoes them, and a location whose own path contains a substring
+is withheld. An unauthorized execution can only appear if the runtime guard is defective;
+attempts to forbidden tools are judged by `forbidden_tool_calls`.
+
+An injection fault is only recorded on an attempt once it was actually delivered (see
+[TOOL_SECURITY.md](TOOL_SECURITY.md#fault-injection)). If the faulted tool never returns
+output that can carry it, the injection checks pass without having been exercised; the trace
+then has no attempt with `fault: injection`, and `agentscope.fault.undelivered` on the attempt
+spans where the tool itself failed or returned nothing to inject into (not on attempts that an
+injected `timeout`, `error` or `permission_denied` fault took). The evaluator does not yet
+flag such cases.
+
+### Evidence and enabled checks
 
 Every check result carries `expected`, `actual` and typed evidence: `role` (`violation`,
-`support` or `absent`, the last for something that should exist and does not), a detail, and
-where available the span id, step, tool and call id. The dashboard uses the span ids to select
-and outline the evidence in the trace.
+`support` or `absent`, the last for something that should exist and does not), a detail of at
+most 500 characters, and where available the span id, step, tool and call id. Values taken
+from the model's output are clipped in messages, so an oversized output stays a verdict
+rather than a crash. The dashboard uses the span ids to select and outline the evidence in
+the trace.
 
 `agentscope eval`, `agentscope compare` and the API always enable all ten checks.
 `Services.run_suite` and `SuiteRunner.run` accept a subset (not exposed by the CLI or the
@@ -245,17 +338,17 @@ function of the case results and provider-reported usage:
 |---|---|
 | `total` | cases in the suite |
 | `passed` | cases that passed and have no harness error |
-| `harness_errors` | cases the harness could not judge |
+| `harness_errors` | cases the harness could not judge (below) |
 | `failed` | `total − passed − harness_errors` |
 | `pass_rate` | `passed / total`; a harness error counts as not passed, never as excluded |
 | `run_statuses` | count of cases per run status |
-| `checks` | per check: `passed`, `failed`, `not_applicable` (applicable = passed + failed); shown as k/n |
+| `checks` | per check: `passed`, `failed`, `not_applicable` (applicable = passed + failed); shown as k/n; harness errors produce no check results |
 | `injected_fault_outcomes` | failed attempts (outcome not `ok`) that carried an injected fault |
 | `unexpected_tool_errors` | failed attempts with no injected fault |
-| `invalid_outputs` | cases whose `schema_validity` failed |
+| `invalid_outputs` | cases whose final output existed and failed the schema (`schema_validity` failed with `schema_invalid`), or whose run failed with `invalid_decision` (the decision repair budget ran out); counted while `schema_validity` is enabled. A run that ended without an output (timeout, `max_steps`) is not an invalid output. |
 | `repaired_outputs` | cases whose run recorded `output_repaired` |
 | `policy_violation_cases` | cases whose `policy_compliance` failed |
-| `unauthorized_tool_attempts` | attempted calls to tools outside the run's permitted set, including unknown tools |
+| `unauthorized_tool_attempts` | attempted calls to existing tools outside the run's permitted set; requests for tools that do not exist (for example the `unknown_tool` model fault) are not counted |
 | `unauthorized_tool_executions` | executed calls outside the permitted set (must be 0) |
 | `avg_steps` | mean steps over cases that ran |
 | `usage` | input and output tokens summed over runs whose provider reported usage for every model call, with `reporting_runs` out of `total_runs`; null when no run reported (always null for the fake provider) |
@@ -268,7 +361,7 @@ Thresholds (`GateThresholds`, the `gate.json` format; unknown keys are rejected)
 | Rule | Type | Default | Passes when |
 |---|---|---|---|
 | `min_pass_rate` | number 0 to 1 | not set | `total > 0` and `passed/total ≥ threshold`, compared as rationals |
-| `max_new_regressions` | integer | not set | cases that passed in the baseline (with the same `case_hash`) and do not pass now ≤ threshold; requires a baseline |
+| `max_new_regressions` | integer | not set | cases that passed in the baseline (with the same `case_hash`) and do not pass now, harness errors excluded, ≤ threshold; requires a baseline |
 | `max_pass_rate_drop_pp` | integer 0 to 100 | not set | `(baseline rate − rate) × 100 ≤ threshold`, exactly; requires a baseline |
 | `max_invalid_outputs` | integer | not set | `invalid_outputs ≤ threshold` |
 | `max_policy_violation_cases` | integer | not set | `policy_violation_cases ≤ threshold` |
@@ -279,7 +372,8 @@ Thresholds (`GateThresholds`, the `gate.json` format; unknown keys are rejected)
 Each configured rule becomes a `GateRule` with its threshold, actual value, verdict and a
 detail; the gate passes when every rule passes. `max_unauthorized_tool_executions` and
 `max_harness_errors` default to 0, so they apply unless set to `null` explicitly. A rule that
-needs a baseline fails ("requires a baseline") when none is available.
+needs a baseline fails ("requires a baseline") when none is available. A case that hit a
+harness error is never a new regression: `max_harness_errors` judges it.
 
 Exact arithmetic (`src/agentscope/evaluation/gates.py`): thresholds are read through
 `str()`, so `0.9` means exactly nine tenths, and rates are `Fraction`s. In floats, a drop
@@ -296,24 +390,37 @@ runs (CLI exit 2). Baselines are written only by `agentscope eval --write-baseli
 not at all when the suite has harness errors. `tests/unit/test_dataset_builtin.py` reruns the
 fixture suites and fails if a checked-in baseline is no longer byte-identical.
 
-`agentscope eval --check`:
+Which thresholds and baseline `agentscope eval` uses:
 
-- takes thresholds from `--thresholds FILE`, else `DIR/gate.json`, else
-  `{"min_pass_rate": 1.0}` (plus the two default rules);
-- takes the baseline from `--baseline FILE`, else `DIR/<agent>@<version>.baseline.json` if
-  it exists; symlinks escaping the directory are ignored with a warning.
+| Flags | Thresholds | Baseline |
+|---|---|---|
+| `--check` | `--thresholds FILE`, else `DIR/gate.json`, else `{"min_pass_rate": 1.0}` (plus the two default rules) | `--baseline FILE`, else `DIR/<agent>@<version>.baseline.json` if it exists |
+| `--thresholds FILE` (no `--check`) | that file | `--baseline FILE` only |
+| `--baseline FILE` alone | `{"max_new_regressions": 0}` plus the two default rules | that file |
+| none | no gate (exit 0 even when cases fail) | none |
 
-`--thresholds FILE` and `--baseline FILE` are used even without `--check`; only the fallbacks
-to the dataset directory and to `min_pass_rate: 1.0` need `--check`.
+Symlinks that escape the dataset directory are ignored with a warning. For example,
+`research_assistant@v1` evaluated on `tests/fixtures` with
+`--baseline tests/fixtures/research_assistant@v2.baseline.json` and no other gate flag exits 1
+with `max_new_regressions` at 16.
 
-Exit codes: 0 passed (or no gate), 1 gate failed, 2 invalid input, 3 harness error. A harness
-error wins over a gate failure. Which run outcomes count as what:
+Exit codes: 0 passed (or no gate), 1 gate failed, 2 invalid input (including an output or
+baseline destination that cannot be written, checked before any case runs), 3 harness error
+(or a result file that could not be written after the run; the JSON result is still
+printed). A harness error wins over a gate failure. Which run outcomes count as what:
 
 | Run outcome | Counted as |
 |---|---|
 | `completed`, `failed`, `max_steps`, `timeout` | judged by the checks (an agent failure if a check fails) |
-| `error` with `provider_error` or `provider_timeout` | judged by the checks (fails `task_completion`, `schema_validity` and others) |
+| `error` with `provider_error` or `provider_timeout` | harness error: the model provider failed, so the agent was never judged; never a pass (it stays in the pass-rate denominator), no check results (so not in per-check rates), not an invalid output, exit 3, no baseline written |
 | `error` with `internal_error` or `internal_recursion_limit`, or an exception in the harness | harness error: not judged, never a pass, exit 3 |
+
+An ad-hoc run with an expectation (`agentscope run --expect`, `POST /api/runs` with
+`expected`) is classified the same way: its verdict is a harness error, and `agentscope run`
+exits 3 on these error codes with or without `--expect`. API evaluation and experiment jobs
+end `failed` when any case is a harness error, while the suite or comparison they stored
+stays available; a run job still ends `succeeded` and stores the run with its harness-error
+verdict.
 
 ## Comparison
 
@@ -329,25 +436,47 @@ the candidate. Cases are matched by id:
 | `still_failing_same` | fails in both, with the same failed checks |
 | `added` / `removed` | only in B / only in A |
 | `content_changed` | same id, different `case_hash`: a different test, listed but never counted as a flip |
+| `harness_error` | a harness error on either side: AgentScope or the provider failed there, so there is no verdict to compare; never a regression or a fix |
 
-- **Deltas** are computed over the compared pairs only (cases in both, content unchanged), as
-  absolute counts or percentage points with their `n`, never as relative percentages. Per-check
-  pass rates use only the cases where the check applied on both sides. Rates are computed
-  exactly and rounded once.
+- **Deltas** are computed over the compared pairs (cases in both, content unchanged), as
+  absolute counts or percentage points with their `n`, never as relative percentages. A
+  harness error counts as not passed and shows in the `harness_errors` delta. The deltas are
+  `pass_rate`, `passed`, `harness_errors`, `invalid_outputs`, `policy_violation_cases`,
+  `unauthorized_tool_attempts`, `unauthorized_tool_executions`, `unexpected_tool_errors`,
+  `avg_steps`, and a pass rate per check over the cases where the check applied on both
+  sides. Rates are computed exactly and rounded once.
 - **Per-check flips** count, for each check, the cases where it went from passed to failed
-  (regressions) or failed to passed (fixes).
-- **Configuration diff**: dotted paths that differ between the two `AgentConfig`s (version,
-  label and description excluded), each tagged with a dimension: `prompt`, `model`,
-  `tool_schema`, `graph`, `retry`, `isolation`, `tools`, `limits` or `other`. When the
-  configurations are identical but the effective hashes differ (prompt text, tool schemas or
-  the fake brain changed underneath), the diff reports `effective_config_hash` as `other`.
+  (regressions) or failed to passed (fixes); cases with a harness error are left out.
+- **Configuration diff**: every behaviour-relevant difference, each tagged with a dimension
+  (`prompt`, `model`, `tool_schema`, `graph`, `retry`, `isolation`, `tools`, `limits` or
+  `other`):
+  - dotted paths that differ between the two `AgentConfig`s (version, label and description
+    excluded);
+  - resolved content that changed although the configuration field naming it did not, when
+    both suites recorded it: `resolved.prompt` (prompt text under the same prompt version,
+    `prompt`), `resolved.tools.<tool>` (a tool schema under the same tool schema version,
+    `tool_schema`), `resolved.output_schema` (`other`), `resolved.graph` (`graph`) and
+    `resolved.fake_brain_version` (`model`);
+  - `environment.agentscope_version` and `environment.data_hash` (the packaged tool data),
+    both `other`;
+  - `effective_config_hash` (`other`), only when neither the configuration nor the resolved
+    content accounts for its change.
 - **Confounded**: more than one dimension changed, so no single change can be credited. The
   built-in v1 → v2 comparisons are confounded; v2 → v3 changes only the model.
+- **Warnings** (`Comparison.warnings`, shown by the CLI and on the dashboard's Compare page):
+  verdicts from different check engine versions, and configurations that differ while one
+  side has no recorded resolved content, so changes beyond the listed fields cannot be ruled
+  out.
 - **Deterministic**: true only when both suites used the fake provider; otherwise the CLI and
-  dashboard say flips may be noise.
+  dashboard say flips may be noise. The CLI still names a side that ran on the fake provider.
 - **Dataset mismatch**: when the dataset hashes differ, the comparison is still produced,
   flagged `dataset_mismatch`, and only shared cases with unchanged content are compared. Gates
   never compare across datasets: an incompatible baseline is refused.
+
+Comparing two stored suites through the API (`POST /api/experiments` with `suite_a` and
+`suite_b`) is idempotent: the stored comparison of the same ordered pair is returned (200)
+instead of a new one (201). `agentscope compare` and the API's run mode evaluate both sides
+afresh, so they always store two new suites and a new comparison.
 
 ## Reproducibility
 
@@ -357,8 +486,12 @@ the candidate. Cases are matched by id:
   the permitted tools' schemas, the output schema, the graph edge list and, for the fake
   provider, `FAKE_BRAIN_VERSION`.
 - `case_hash` and the dataset `content_hash`: SHA-256 of canonical JSON.
+  `success_criteria.recovery_tools` is left out while it is empty, so cases written before
+  the field existed keep their hashes.
 - `EnvironmentFingerprint` on every suite: AgentScope, check engine, Python and LangGraph
-  versions, a hash of the packaged tool data, provider, model and `deterministic`.
+  versions, a hash of the packaged tool data, provider, model, `deterministic`, and
+  `resolved`: separate hashes of the prompt text, each tool spec, the output schema, the graph
+  topology and the fake brain version, which let a comparison name the component that changed.
 - `tests/evaluation/test_determinism.py` runs a suite twice and asserts byte-identical
   canonical baselines; `tests/unit/test_dataset_builtin.py` does the same for the full fixture
   suites.

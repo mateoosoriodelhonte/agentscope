@@ -99,7 +99,9 @@ def create_app(
     app = FastAPI(
         title="AgentScope",
         version=__version__,
-        docs_url="/api/docs",
+        # Swagger UI loads its assets from a CDN, which the strict CSP (correctly) blocks;
+        # the OpenAPI document below is served locally instead.
+        docs_url=None,
         redoc_url=None,
         openapi_url="/api/openapi.json",
         lifespan=lifespan,

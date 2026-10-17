@@ -157,7 +157,7 @@ class SuiteRunner:
             config_hash=config.config_hash(),
             effective_config_hash=self._runner.effective_config_hash(config),
             checks_enabled=enabled,
-            environment=environment_fingerprint(config),
+            environment=environment_fingerprint(config, self._runner.resolved_content(config)),
             started_at=started,
             finished_at=utcnow(),
             cases=results,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from agentscope.domain.common import Identifier, Slug, StrictModel, content_hash
 from agentscope.domain.tools import ToolOutcome
@@ -47,6 +47,15 @@ class RetryPolicy(StrictModel):
     # Corrective re-prompts after a final output that fails schema validation
     # (validated graph only).
     max_output_repairs: int = Field(default=0, ge=0, le=3)
+
+    @field_validator("retry_on")
+    @classmethod
+    def _only_retryable(cls, value: list[ToolOutcome]) -> list[ToolOutcome]:
+        refused = sorted(o.value for o in value if o not in RETRYABLE_OUTCOMES)
+        if refused:
+            allowed = sorted(o.value for o in RETRYABLE_OUTCOMES)
+            raise ValueError(f"cannot retry on {refused}; retryable outcomes are {allowed}")
+        return value
 
 
 class Limits(StrictModel):

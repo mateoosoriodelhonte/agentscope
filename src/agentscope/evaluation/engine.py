@@ -61,7 +61,13 @@ def evaluate_case(
         unexpected_tool_errors=unexpected,
         invalid_output=_invalid_output(schema_result, trace),
         repaired_output=any(e.kind == "output_repaired" for e in trace.guardrail_events),
-        unauthorized_tool_attempts=sum(1 for i in ctx.calls.attempted if i.tool not in permitted),
+        # A request for a tool that does not exist (e.g. an injected unknown_tool model fault)
+        # is not an attempt to use a forbidden capability, so it is not counted here.
+        unauthorized_tool_attempts=sum(
+            1
+            for i in ctx.calls.attempted
+            if i.tool not in permitted and i.outcome is not ToolOutcome.UNKNOWN_TOOL
+        ),
         unauthorized_tool_executions=sum(1 for i in ctx.calls.executed if i.tool not in permitted),
     )
 

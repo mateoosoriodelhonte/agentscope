@@ -22,7 +22,7 @@ from agentscope.config import Settings
 from agentscope.datasets.issues import DatasetError
 from agentscope.datasets.packaged import builtin_datasets, load_builtin_dataset
 from agentscope.domain.common import utcnow
-from agentscope.domain.datasets import Dataset
+from agentscope.domain.datasets import Dataset, ExpectedAnswer, MatchMode
 from agentscope.evaluation.checks import CHECKS
 from agentscope.evaluation.fingerprint import environment_fingerprint
 from agentscope.runtime.runner import AgentRunner
@@ -186,6 +186,19 @@ def test_import_refuses_rewritten_content(services: Services) -> None:
     with pytest.raises(DatasetError, match="synthetic canaries"):
         services.import_dataset(leaky)
     assert services.repository.get_dataset("leaky", "1") is None
+
+
+def test_import_refuses_a_secret_shaped_key_without_echoing_it(services: Services) -> None:
+    key = "sk-ant-api03-" + "Q" * 24
+    case = RESEARCH.cases[0].model_copy(
+        update={"expected": ExpectedAnswer(match=MatchMode.EXACT, value={key: None})}
+    )
+    leaky = Dataset(name="leaky-key", agent="research_assistant", cases=[case])
+    with pytest.raises(DatasetError) as info:
+        services.import_dataset(leaky)
+    assert "synthetic canaries" in str(info.value)
+    assert key not in str(info.value)
+    assert services.repository.get_dataset("leaky-key", "1") is None
 
 
 async def test_a_cancelled_suite_is_marked_errored(services: Services) -> None:

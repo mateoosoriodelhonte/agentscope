@@ -517,6 +517,16 @@ export interface EnvironmentFingerprint {
   provider: string
   model: string
   deterministic: boolean
+  // Per-component hashes of the resolved content (prompt, tools, output schema, graph, brain).
+  resolved?: ResolvedContent | null
+}
+
+export interface ResolvedContent {
+  prompt: string
+  tools: Record<string, string>
+  output_schema: string
+  graph: string
+  fake_brain_version: string | null
 }
 
 export type SuiteStatus = 'running' | 'completed' | 'error'
@@ -553,6 +563,7 @@ export type CaseChange =
   | 'added'
   | 'removed'
   | 'content_changed'
+  | 'harness_error'
 
 export type ConfigDimension =
   | 'prompt'
@@ -624,6 +635,8 @@ export interface Comparison {
   cases: CaseComparison[]
   config_diff: ConfigDifference[]
   confounded: boolean
+  // Caveats the server attached (e.g. resolved content changed without a config change).
+  warnings?: string[]
 }
 
 // --- api/schemas.py: agents, tools, providers --------------------------------------------
@@ -636,6 +649,13 @@ export interface AgentInfo {
   output_schema: Record<string, JsonValue>
   prompts: Record<string, string>
   versions: AgentConfig[]
+  // Server-computed hashes per built-in version (keyed by AgentConfig.version).
+  version_hashes?: Record<string, ConfigHashes>
+}
+
+export interface ConfigHashes {
+  config_hash: string
+  effective_config_hash: string
 }
 
 export interface AgentsResponse {

@@ -375,6 +375,7 @@ _CHANGE_ORDER = (
     "still_failing_changed",
     "still_failing_same",
     "content_changed",
+    "harness_error",
     "added",
     "removed",
 )
@@ -401,6 +402,8 @@ def _render_comparison(comparison: Comparison, simulated: Sequence[str] = ()) ->
         console.print(safe("Non-deterministic: flips may be noise."))
     if comparison.dataset_mismatch:
         console.print(safe("dataset content differs: only shared, unchanged cases compared", "red"))
+    for warning in comparison.warnings:
+        console.print(safe(f"warning: {warning}", "yellow"))
 
     if comparison.config_diff:
         note = " (confounded: attribution not possible)" if comparison.confounded else ""

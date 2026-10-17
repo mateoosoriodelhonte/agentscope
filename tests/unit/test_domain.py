@@ -66,3 +66,22 @@ def test_dataset_rejects_duplicate_ids_and_conflicting_tools() -> None:
         dataset.content_hash()
         == Dataset(name="d", cases=[EvalCase(id="c1", task="t")]).content_hash()
     )
+
+
+@pytest.mark.parametrize("bad", ["a\x00b", "lone \ud800 surrogate"])
+def test_unstorable_text_is_refused_at_the_boundary(bad: str) -> None:
+    with pytest.raises(ValidationError):  # NUL: ours; lone surrogates: Pydantic itself
+        EvalCase(id="c1", task=bad)
+    from agentscope.api.schemas import RunCreate
+
+    with pytest.raises(ValidationError):
+        RunCreate(agent_ref="research_assistant", task=bad)
+
+
+def test_retry_policy_only_accepts_retryable_outcomes() -> None:
+    from agentscope.domain.tools import ToolOutcome
+
+    RetryPolicy(retry_on=[ToolOutcome.TIMEOUT, ToolOutcome.MALFORMED])
+    for outcome in (ToolOutcome.PERMISSION_DENIED, ToolOutcome.INVALID_ARGUMENTS, ToolOutcome.OK):
+        with pytest.raises(ValidationError, match="cannot retry on"):
+            RetryPolicy(retry_on=[outcome])
