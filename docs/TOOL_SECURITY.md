@@ -94,10 +94,11 @@ The two families count differently (`FaultPlan` in `src/agentscope/tools/faults.
   so they need one. From `on_call` on, an output fault stays owed until it has been
   delivered `times` times. A call that fails (a timeout, an error, an unknown document id)
   or whose output the hook leaves unchanged (a search with no hits has nowhere to inject)
-  does not use it up: the attempt records no fault, its span carries
-  `agentscope.fault.undelivered=<kind>`, and the next call that returns usable output
-  receives it. Without this, an injection scheduled on a call the agent got wrong would
-  vanish unrecorded.
+  does not use it up: the attempt records no fault, and the next call that returns usable
+  output receives it. When the tool itself failed or its output was left unchanged, the
+  attempt's span carries `agentscope.fault.undelivered=<kind>`; an attempt taken by an
+  injected failure fault (below) does not. Without this, an injection scheduled on a call the
+  agent got wrong would vanish unrecorded.
 
 When a failure fault and an output fault are both due on a call, the failure fault applies
 and the output fault waits for a later call. Among faults of the same family, the first in

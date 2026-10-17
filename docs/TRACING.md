@@ -83,7 +83,7 @@ General OpenTelemetry attribute:
 | `agentscope.tool.attempt` | tool | attempt number (1-based) |
 | `agentscope.tool.outcome` | tool | `ok`, `error`, `timeout`, `malformed`, `permission_denied`, ... |
 | `agentscope.fault.kind` | tool | the injected tool fault delivered on this attempt, if any |
-| `agentscope.fault.undelivered` | tool | an output fault that was due on this attempt but had nothing to act on (the tool failed, or the fault would not have changed the output); it stays owed |
+| `agentscope.fault.undelivered` | tool | an output fault that was due on this attempt but had nothing to act on (the tool itself failed, or the fault would not have changed the output); it stays owed. Not set when an injected `timeout`, `error` or `permission_denied` fault took the attempt |
 | `agentscope.guardrail.allowed` | `guardrail tool_policy` | always false (only blocked calls get this span) |
 | `agentscope.guardrail.findings` | `guardrail content_scan` | number of signatures found |
 | `agentscope.observation.delimited` | observe | whether the result was delivered as untrusted data |

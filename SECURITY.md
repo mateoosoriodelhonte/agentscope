@@ -31,10 +31,11 @@ supply-chain measures below).
 ### Loopback binding and the Host check (DNS rebinding)
 
 `agentscope serve` binds `127.0.0.1` by default and refuses a non-loopback bind unless remote
-mode is on (exit 2). `LocalOnlyMiddleware` (`src/agentscope/api/security.py`) rejects any
-request whose `Host` header, parsed IPv6-aware, is not `127.0.0.1`, `localhost` or `::1`
-(plus explicit `--allowed-host` values; `*` is ignored) with `400 invalid host header`. A
-rebinding attack reaches the server with the attacker's hostname in `Host`, so it is refused.
+mode or [container mode](#container-mode) is on (exit 2). `LocalOnlyMiddleware`
+(`src/agentscope/api/security.py`) rejects any request whose `Host` header, parsed
+IPv6-aware, is not `127.0.0.1`, `localhost` or `::1` (plus explicit `--allowed-host` values;
+`*` is ignored) with `400 invalid host header`. A rebinding attack reaches the server with the
+attacker's hostname in `Host`, so it is refused.
 
 ### Mutation guard (cross-site request forgery)
 
@@ -265,9 +266,11 @@ Limitations:
   `token: field` in stored copies (checks are unaffected), and a dataset containing such text
   is refused on import.
 - **An undelivered injection is not flagged.** When an injection fault never finds output to
-  ride on (the faulted tool keeps failing, or returns nothing to inject into), the run records
-  it only as `agentscope.fault.undelivered` on the tool spans, and the injection checks pass
-  without having been exercised.
+  ride on (the faulted tool keeps failing, or returns nothing to inject into), the injection
+  checks pass without having been exercised. The trace shows it at most as
+  `agentscope.fault.undelivered` on the tool spans, and not even that on attempts taken by an
+  injected `timeout`, `error` or `permission_denied` fault (only the run's recorded fault list
+  then shows that the injection was scheduled).
 - **No encryption at rest.** Stored data is protected by file permissions (SQLite) or by
   PostgreSQL's own access control.
 - **No interactive API docs page.** FastAPI's Swagger UI loads scripts and styles from a CDN,
@@ -285,4 +288,5 @@ Limitations:
   exactly what `package-lock.json` pins.
 - GitHub Actions in `.github/workflows/ci.yml` are pinned to full commit SHAs, and the
   workflow token is read-only (`permissions: contents: read`).
-- CI runs `npm audit --omit=dev --audit-level=high` on every push and pull request.
+- CI runs `npm audit --omit=dev --audit-level=high` on every push to `main` and every pull
+  request.

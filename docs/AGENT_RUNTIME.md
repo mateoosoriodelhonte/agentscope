@@ -55,8 +55,9 @@ From `topology()` in `src/agentscope/runtime/graph.py`:
 | `finish` | `END` | always | both |
 
 The edge list is part of the effective configuration hash, so a change to the topology shows
-up in comparisons (as an `effective_config_hash` difference) even when the configuration
-itself is unchanged.
+up in comparisons even when the configuration itself is unchanged: as a `resolved.graph`
+difference when both suites recorded their resolved content, otherwise as an
+`effective_config_hash` difference.
 
 The guard checks existence first, so a request for a tool that does not exist (a hallucinated
 name, or the `unknown_tool` model fault's `nonexistent_tool`) is refused as `unknown_tool`

@@ -310,8 +310,10 @@ attempts to forbidden tools are judged by `forbidden_tool_calls`.
 An injection fault is only recorded on an attempt once it was actually delivered (see
 [TOOL_SECURITY.md](TOOL_SECURITY.md#fault-injection)). If the faulted tool never returns
 output that can carry it, the injection checks pass without having been exercised; the trace
-shows this as `agentscope.fault.undelivered` on the attempt spans and no attempt with
-`fault: injection`. The evaluator does not yet flag such cases.
+then has no attempt with `fault: injection`, and `agentscope.fault.undelivered` on the attempt
+spans where the tool itself failed or returned nothing to inject into (not on attempts that an
+injected `timeout`, `error` or `permission_denied` fault took). The evaluator does not yet
+flag such cases.
 
 ### Evidence and enabled checks
 
@@ -410,7 +412,7 @@ printed). A harness error wins over a gate failure. Which run outcomes count as 
 | Run outcome | Counted as |
 |---|---|
 | `completed`, `failed`, `max_steps`, `timeout` | judged by the checks (an agent failure if a check fails) |
-| `error` with `provider_error` or `provider_timeout` | harness error: the model provider failed, so the agent was never judged; not counted in pass rates, per-check rates or `invalid_outputs`, exit 3, no baseline written |
+| `error` with `provider_error` or `provider_timeout` | harness error: the model provider failed, so the agent was never judged; never a pass (it stays in the pass-rate denominator), no check results (so not in per-check rates), not an invalid output, exit 3, no baseline written |
 | `error` with `internal_error` or `internal_recursion_limit`, or an exception in the harness | harness error: not judged, never a pass, exit 3 |
 
 An ad-hoc run with an expectation (`agentscope run --expect`, `POST /api/runs` with

@@ -224,7 +224,7 @@ loaded implicitly. List and object values are JSON, for example
 |---|---|---|
 | `AGENTSCOPE_DATA_DIR` | `.agentscope` | Directory for the SQLite database (`~` expanded). |
 | `AGENTSCOPE_DATABASE_URL` | unset | SQLAlchemy URL of another database (e.g. PostgreSQL). Secret: masked in `/api/settings` and `db info`, and redacted from traces (its password too, when it is distinctive enough; see [TRACING.md](TRACING.md#redaction-at-write-time)). |
-| `AGENTSCOPE_HOST` | `127.0.0.1` | Default bind address for `serve`. A non-loopback value requires remote mode. |
+| `AGENTSCOPE_HOST` | `127.0.0.1` | Default bind address for `serve`. A non-loopback value requires remote mode. Ignored in container mode, which binds `0.0.0.0` unless `--host` is given. |
 | `AGENTSCOPE_PORT` | `8765` | Default port for `serve` (1 to 65535); also used in the dashboard links the CLI prints. |
 | `AGENTSCOPE_ALLOW_REMOTE` | `false` | Remote mode, as `serve --allow-remote`. |
 | `AGENTSCOPE_API_TOKEN` | unset | Bearer token required on every request in remote mode (at least 16 characters). Secret. |

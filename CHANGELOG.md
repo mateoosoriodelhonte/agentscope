@@ -39,8 +39,8 @@ First release (V1): a local-first platform to debug, evaluate and compare AI age
 - Tool faults `timeout`, `error`, `malformed`, `incomplete`, `misleading`, `injection`,
   `permission_denied`, and model faults `invalid_json`, `empty`, `schema_violation`,
   `unknown_tool`, targeted by call number. Failure faults apply by call position; output
-  faults stay owed until they are actually delivered, and an undelivered fault is visible on
-  the trace.
+  faults stay owed until they are actually delivered, and an attempt whose tool failed or left
+  nothing to rewrite is marked `agentscope.fault.undelivered` on its span.
 
 **Model providers**
 - Deterministic fake provider with the `scripted-careful`, `scripted-naive` and
@@ -53,8 +53,9 @@ First release (V1): a local-first platform to debug, evaluate and compare AI age
   probes.
 
 **Tracing**
-- One OpenTelemetry span per run, node, model call, tool attempt and guardrail decision, with
-  GenAI semantic-convention attributes (`gen_ai.response.finish_reasons` as a string array)
+- One OpenTelemetry span per run, node, model call and tool attempt, plus a guardrail span for
+  each blocked tool call and each tool output the scanner flags, with GenAI
+  semantic-convention attributes (`gen_ai.response.finish_reasons` as a string array)
   and `error.type` on failed spans; a single non-global tracer provider and per-run span
   collection.
 - Redaction at write time: configured secrets that are distinctive enough to match by value,

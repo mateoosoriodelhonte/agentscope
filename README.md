@@ -64,8 +64,9 @@ simulated agent versions. The walkthrough below was checked against a fresh seed
   from `AGENTSCOPE_*` settings.
 
 **Tracing** ([docs/TRACING.md](docs/TRACING.md))
-- One OpenTelemetry span per run, node, model call, tool attempt and guardrail decision,
-  with GenAI semantic-convention attributes. Payloads are redacted when they are written to
+- One OpenTelemetry span per run, node, model call and tool attempt, plus a guardrail span for
+  each blocked tool call and each tool output the heuristic scanner flags, with GenAI
+  semantic-convention attributes. Payloads are redacted when they are written to
   a span. Token usage is shown only when a provider reports it; cost only from rates you
   configure.
 - Optional OTLP/HTTP export, off by default, without payloads or error messages by default.
@@ -83,8 +84,9 @@ simulated agent versions. The walkthrough below was checked against a fresh seed
 **Storage, API, CLI and dashboard** ([ARCHITECTURE.md](ARCHITECTURE.md))
 - SQLite by default (the database file created `0600`; a data directory AgentScope creates is
   made `0700`), PostgreSQL optional; Alembic migrations; work in flight records its owner and
-  a heartbeat, so only work whose process died is marked interrupted; purge that compacts the
-  database and keeps the built-in datasets.
+  a heartbeat, so only work whose process is gone (or, when that cannot be checked, has been
+  silent for 5 minutes) is marked interrupted; purge that compacts the database and keeps the
+  built-in datasets.
 - A FastAPI REST API with paged lists and in-memory background jobs, and a Typer CLI, both on
   one shared services layer.
 - A Vue 3 dashboard: overview, runs, trace explorer with evidence links, evaluations,
@@ -190,11 +192,11 @@ already present 5 suites, 2 experiments, 4 runs`.
    `forbidden_tool_calls` and `policy_compliance`; B failed nothing).
 4. **Find the first divergence.** The trace diff aligns the two runs step by step. Its
    callout reads that step 1 of both runs made a `tool_call:search_documents` decision but
-   the tool result differs (v2 uses tool schema 2, whose search returns verified sources
-   only). Press **Next** (or `n` while the diff has focus) for the other three divergences:
-   v1's steps 2 and 3 (`send_email` and `delete_record`, both blocked) have no counterpart in
-   v2, and the final decision differs because v1's answer copies its hidden instructions into
-   `notes`.
+   the tool result differs (v2 uses tool schema 2, whose search leaves out unverified
+   sources unless asked for them). Press **Next** (or `n` while the diff has focus) for the
+   other three divergences: v1's steps 2 and 3 (`send_email` and `delete_record`, both
+   blocked) have no counterpart in v2, and the final decision differs because v1's answer
+   copies its hidden instructions into `notes`.
 5. **Inspect the evidence span.** Click v1's step 2 to open its trace, then activate the
    failed `forbidden_tool_calls` check in the verdict panel. The trace selects and outlines
    the `guardrail tool_policy` span that blocked `send_email`.
@@ -204,7 +206,8 @@ evaluation whose gate failed (on a freshly seeded database that is `task_planner
 compared with `task_planner@v2`). The ad-hoc run `demo-injection-compliant-model` shows the
 limit of runtime containment: under v2, a model that obeys every embedded instruction
 (`scripted-compliant`) attempts `send_email`, which is blocked (0 executions), but it still
-copies its hidden instructions into the answer, which `policy_compliance` reports as a leak.
+copies its hidden instructions into its final output (`notes`), which `policy_compliance`
+reports as a leak.
 
 ## CLI
 
