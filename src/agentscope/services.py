@@ -162,17 +162,21 @@ def display_url(raw: str) -> str:
 
     A password may itself contain '/', '?' or '#', so the authority cannot be found by
     cutting at the first of those: everything up to the last '@' is masked instead (at worst
-    a path containing '@' is hidden too, never a credential shown).
+    a path containing '@' is hidden too, never a credential shown). An '@' after the first
+    '?' or '#' cannot be placed: it either ends a password containing '?' or '#', or belongs
+    to a query or fragment (e.g. `?user=a@b&key=...`), and neither may be shown, so only the
+    scheme is kept.
     """
     scheme, separator, rest = raw.partition("://")
     if not separator:
         scheme, rest = "", raw
+    query = min((i for i in map(rest.find, "?#") if i >= 0), default=len(rest))
+    if "@" in rest[query:]:
+        return f"{scheme}{separator}***"
+    rest = rest[:query]
     if "@" in rest:
         rest = "***@" + rest.rsplit("@", 1)[1]
-    end = min((i for i in map(rest.find, "/?#") if i >= 0), default=len(rest))
-    authority, path = rest[:end], rest[end:]
-    path = path.split("?", 1)[0].split("#", 1)[0]
-    return f"{scheme}{separator}{authority}{path}"
+    return f"{scheme}{separator}{rest}"
 
 
 def _otlp_statement(settings: Settings) -> str:

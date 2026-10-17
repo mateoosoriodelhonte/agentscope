@@ -281,7 +281,7 @@ def _suite_owned_by_a_dead_process() -> str:
     from agentscope.evaluation.checks import CHECKS
     from agentscope.evaluation.fingerprint import environment_fingerprint
     from agentscope.services import build_services
-    from agentscope.storage.liveness import process_owner
+    from agentscope.storage.liveness import this_host
     from agentscope.storage.models import SuiteRunRow
     from agentscope.storage.repository import SuiteHeader
 
@@ -308,7 +308,7 @@ def _suite_owned_by_a_dead_process() -> str:
     with services.repository.session() as session, session.begin():
         row = session.get(SuiteRunRow, uuid.UUID(suite_id))
         assert row is not None
-        row.owner = f"{process_owner().rpartition(':')[0]}:{child.pid}"
+        row.owner = f"{this_host()}:{child.pid}"
     services.repository.engine.dispose()
     return suite_id
 

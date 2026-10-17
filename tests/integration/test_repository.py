@@ -44,7 +44,7 @@ from agentscope.domain.experiments import (
 from agentscope.domain.tools import FaultKind, FaultSpec, ModelFaultKind, ModelFaultSpec
 from agentscope.domain.traces import RunStatus, SpanKind, SpanRecord, SpanStatus, TraceRecord
 from agentscope.storage.db import create_db_engine, upgrade
-from agentscope.storage.liveness import owner_alive, process_owner
+from agentscope.storage.liveness import owner_alive, process_owner, this_host
 from agentscope.storage.models import SuiteRunRow
 from agentscope.storage.repository import (
     TRUNCATED,
@@ -734,13 +734,56 @@ def test_running_suites_record_their_owner_and_heartbeat(repo: Repository) -> No
 def test_owner_alive_probes_processes_on_this_host() -> None:
     child = subprocess.Popen([sys.executable, "-c", ""])
     child.wait()  # reaped: its pid names no process any more
-    host = process_owner().rpartition(":")[0]
+    host = this_host()
     assert owner_alive(process_owner()) is True
     assert owner_alive(f"{host}:{child.pid}") is False
+    assert owner_alive(f"{host}:{child.pid}:a1b2c3d4e5f6") is False
+    assert owner_alive(f"{host}:{os.getppid()}:a1b2c3d4e5f6") is True  # the parent lives
     assert owner_alive(f"{host}:0") is None
     assert owner_alive("another-host.example:1") is None
+    assert owner_alive("another-host.example:1:a1b2c3d4e5f6") is None
     assert owner_alive(None) is None
     assert owner_alive("garbage") is None
+
+
+def test_an_earlier_process_with_this_pid_is_gone() -> None:
+    """A server restarted in its container is pid 1 again: the suites its predecessor left
+    running carry the same host and pid, but not this process's incarnation."""
+    mine = process_owner()
+    host, pid, incarnation = mine.rsplit(":", 2)
+    assert (host, pid) == (this_host(), str(os.getpid()))
+    predecessor = f"{host}:{pid}:{'0' * len(incarnation)}"
+    assert predecessor != mine
+    assert owner_alive(predecessor) is False
+    assert owner_alive(f"{host}:{pid}") is True  # no incarnation recorded: cannot tell
+
+
+def test_recovery_marks_suites_an_earlier_process_with_this_pid_left(repo: Repository) -> None:
+    header = make_header()
+    repo.create_suite(header)
+    host, pid, _ = process_owner().rsplit(":", 2)
+    _set_owner(repo, header.suite_id, f"{host}:{pid}:000000000000", datetime.now(UTC))
+    assert repo.mark_interrupted() == {"runs": 0, "suite_runs": 1}
+    suite = repo.get_suite(header.suite_id)
+    assert suite is not None
+    assert suite.status == "error"
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_forked_child_is_a_process_of_its_own() -> None:
+    if not hasattr(os, "fork"):
+        pytest.skip("no fork on this platform")
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the child
+        os.close(read)
+        os.write(write, process_owner().encode())
+        os._exit(0)
+    os.close(write)
+    with os.fdopen(read, "rb") as pipe:
+        child = pipe.read().decode()
+    os.waitpid(pid, 0)
+    assert child.rsplit(":", 2)[2] != process_owner().rsplit(":", 2)[2]
 
 
 # --- inventory and purge ----------------------------------------------------------------

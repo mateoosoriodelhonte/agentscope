@@ -87,7 +87,8 @@ def _thresholds(
         return load_gate_file(path)
     if not check:
         # An explicit baseline asks for a comparison with it: gate on cases that passed
-        # there and fail now, rather than loading it only to ignore it.
+        # there and fail now, rather than loading it only to ignore it. The other defaults
+        # (no unauthorized tool executions, no harness errors) apply as in every gate.
         return GateThresholds(max_new_regressions=0) if baseline is not None else None
     if source.directory is not None:
         candidate = source.directory / GATE_FILE
@@ -173,8 +174,9 @@ def eval_command(
         Path | None,
         typer.Option(
             "--baseline",
-            help="Baseline file; without --check or --thresholds, the gate is then: no case "
-            "that passed in the baseline may fail now",
+            help="Baseline file; without --check or --thresholds it gates the result: no case "
+            "that passed in the baseline may fail now (and, as in every gate, no unauthorized "
+            "tool execution)",
         ),
     ] = None,
     write_baseline: Annotated[

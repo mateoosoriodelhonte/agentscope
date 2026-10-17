@@ -28,7 +28,7 @@ from agentscope.evaluation.fingerprint import environment_fingerprint
 from agentscope.runtime.runner import AgentRunner
 from agentscope.services import Services, build_redactor, build_services, egress_destinations
 from agentscope.storage.db import upgrade
-from agentscope.storage.liveness import process_owner
+from agentscope.storage.liveness import this_host
 from agentscope.storage.models import SuiteRunRow
 from agentscope.storage.repository import SuiteHeader
 
@@ -61,7 +61,7 @@ def dead_owner() -> str:
     """The owner string of a process on this host that has exited (and been reaped)."""
     child = subprocess.Popen([sys.executable, "-c", ""])
     child.wait()
-    return f"{process_owner().rpartition(':')[0]}:{child.pid}"
+    return f"{this_host()}:{child.pid}"
 
 
 def start_suite(services: Services, owner: str | None = None) -> str:
@@ -287,9 +287,14 @@ def evaluated(client: TestClient, agent_ref: str) -> dict[str, object]:
         ("http://u:pw-0123@host:notaport/x", "http://***@host:notaport/x"),
         # Passwords containing '/', '?' or '#' used to end the authority early.
         ("http://admin:Sup3r/Secr3t@gpu-box:11434", "http://***@gpu-box:11434"),
-        ("https://bob:hunter2#x9@llm.example.com/v1", "https://***@llm.example.com/v1"),
-        ("https://bob:pa?ss@llm.example.com/v1?k=1", "https://***@llm.example.com/v1"),
         ("bob:pa/ss@llm.example.com:8080/v1", "***@llm.example.com:8080/v1"),  # no scheme
+        # An '@' after '?' or '#' ends either a password or a query value: hide both.
+        ("https://bob:hunter2#x9@llm.example.com/v1", "https://***"),
+        ("https://bob:pa?ss@llm.example.com/v1?k=1", "https://***"),
+        ("http://h:1/v1?user=a@b.example&key=k-0123", "http://***"),
+        ("http://u:pw-0123@h:1/v1?user=a@b.example&key=k-0123", "http://***"),
+        ("http://h:1/v1#a@b&token=k-0123", "http://***"),
+        ("http://u:pw-0123@h:1/v1/x@y?k=k-0123", "http://***@y"),
     ],
 )
 def test_display_url_never_shows_credentials_or_queries(raw: str, shown: str) -> None:
