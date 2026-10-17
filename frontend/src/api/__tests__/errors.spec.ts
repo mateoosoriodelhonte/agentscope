@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError, JobFailedError } from '../client'
 import { describeError } from '../errors'
-import { partialPurge } from '@/components/settings/purge'
+import { purgeConflict } from '@/components/settings/purge'
 
 describe('describeError', () => {
   it.each([
@@ -15,9 +15,10 @@ describe('describeError', () => {
   ])('%s is %s', (error, kind) => {
     expect(describeError(error).kind).toBe(kind)
   })
+
 })
 
-describe('partialPurge', () => {
+describe('purgeConflict', () => {
   const result = { deleted: { runs: 1 }, size_bytes_before: 10, size_bytes_after: 5 }
 
   it.each([
@@ -25,15 +26,19 @@ describe('partialPurge', () => {
     ['result', { detail: 'again', result }],
     ['detail', { detail: result }],
   ])('finds the partial result under %s', (_where, body) => {
-    expect(partialPurge(new ApiError(409, 'again', body))?.result).toEqual(result)
+    expect(purgeConflict(new ApiError(409, 'again', body))).toEqual({ kind: 'partial', message: 'again', result })
   })
 
   it('is null for anything but a 409', () => {
-    expect(partialPurge(new ApiError(500, 'x', { detail: { result } }))).toBeNull()
-    expect(partialPurge(new Error('x'))).toBeNull()
+    expect(purgeConflict(new ApiError(500, 'x', { detail: { result } }))).toBeNull()
+    expect(purgeConflict(new Error('x'))).toBeNull()
   })
 
-  it('keeps the message when the body has no result', () => {
-    expect(partialPurge(new ApiError(409, 'busy', { detail: 'busy' }))).toEqual({ message: 'busy', result: null })
+  it('treats a 409 without a result as a refusal: nothing was deleted', () => {
+    expect(purgeConflict(new ApiError(409, 'busy', { detail: 'busy', code: 'jobs_running' }))).toEqual({
+      kind: 'refused',
+      message: 'busy',
+    })
+    expect(purgeConflict(new ApiError(409, 'busy', null))).toEqual({ kind: 'refused', message: 'busy' })
   })
 })
