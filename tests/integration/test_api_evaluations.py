@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from apiclient import post, run_job, wait_for_job
 from fastapi.testclient import TestClient
 
@@ -107,20 +108,36 @@ def test_experiment_run_mode_and_compare_mode(client: TestClient) -> None:
     assert comparison["deterministic"] is True
     assert comparison["confounded"] is True
 
-    compared = post(
+    reversed_pair = post(
         client,
         "/api/experiments",
         {
-            "name": "again",
-            "suite_a": comparison["a"]["suite_id"],
-            "suite_b": comparison["b"]["suite_id"],
+            "name": "v2 vs v1",
+            "suite_a": comparison["b"]["suite_id"],
+            "suite_b": comparison["a"]["suite_id"],
         },
     )
-    assert compared.status_code == 201, compared.text
-    assert compared.json()["cases"] == comparison["cases"]
+    assert reversed_pair.status_code == 201, reversed_pair.text
+    assert reversed_pair.json()["a"]["agent_ref"] == "research_assistant@v2"
 
-    listed = client.get("/api/experiments").json()
-    assert [e["name"] for e in listed] == ["again", "v1 vs v2"]
+    # Comparing the same pair again (e.g. reopening /compare?a=&b=) returns the stored
+    # comparison, whatever name is asked for, instead of piling up duplicates.
+    for name in ("again", "v1 vs v2"):
+        compared = post(
+            client,
+            "/api/experiments",
+            {
+                "name": name,
+                "suite_a": comparison["a"]["suite_id"],
+                "suite_b": comparison["b"]["suite_id"],
+            },
+        )
+        assert compared.status_code == 200, compared.text
+        assert compared.json() == comparison
+
+    listed = client.get("/api/experiments")
+    assert [e["name"] for e in listed.json()] == ["v2 vs v1", "v1 vs v2"]
+    assert listed.headers["X-Total-Count"] == "2"
     assert client.get("/api/experiments/not-a-uuid").status_code == 404
 
 
@@ -213,3 +230,53 @@ def test_demo_seed_job(client: TestClient) -> None:
     suites = client.get("/api/evaluations").json()
     assert len(suites) == 5
     assert len(client.get("/api/experiments").json()) == 2
+
+
+def test_lists_page_with_a_total_count_header(client: TestClient) -> None:
+    for agent_ref in ("research_assistant@v1", "research_assistant@v2", "research_assistant@v3"):
+        evaluate(client, agent_ref)
+    page = client.get("/api/evaluations", params={"limit": 2})
+    assert page.status_code == 200
+    assert isinstance(page.json(), list)  # still a bare array
+    assert len(page.json()) == 2
+    assert page.headers["X-Total-Count"] == "3"
+    rest = client.get("/api/evaluations", params={"limit": 2, "offset": 2})
+    assert len(rest.json()) == 1
+    assert rest.headers["X-Total-Count"] == "3"
+    filtered = client.get("/api/evaluations", params={"agent_ref": "research_assistant@v1"})
+    assert filtered.headers["X-Total-Count"] == "1"
+    assert client.get("/api/experiments").headers["X-Total-Count"] == "0"
+
+
+def test_a_provider_outage_fails_the_job_but_keeps_the_evaluation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentscope.providers.base import ProviderError
+    from agentscope.providers.fake import FakeModelProvider
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise ProviderError("connection refused")
+
+    monkeypatch.setattr(FakeModelProvider, "generate", refuse)
+    accepted = post(
+        client, "/api/evaluations", {"agent_ref": "research_assistant@v2", "dataset": RESEARCH}
+    ).json()
+    job = wait_for_job(client, accepted["job_id"])
+    assert job["state"] == "failed"
+    assert "could not be judged" in job["error"]
+    suite = client.get(f"/api/evaluations/{accepted['resource_id']}").json()
+    assert suite["metrics"]["harness_errors"] == suite["metrics"]["total"] > 0
+    assert suite["metrics"]["invalid_outputs"] == 0
+    assert all(c["harness_error"].startswith("provider_error") for c in suite["cases"])
+
+    experiment = post(
+        client,
+        "/api/experiments",
+        {
+            "name": "outage",
+            "dataset": RESEARCH,
+            "a": {"agent_ref": "research_assistant@v1"},
+            "b": {"agent_ref": "research_assistant@v2"},
+        },
+    ).json()
+    assert wait_for_job(client, experiment["job_id"])["state"] == "failed"

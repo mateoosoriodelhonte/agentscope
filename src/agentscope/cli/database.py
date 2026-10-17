@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from agentscope.cli.common import Exit, console, err, fail, open_services
+from agentscope.cli.common import Exit, console, err, fail, open_services, storage_error
 from agentscope.cli.output import emit_json, safe, table
+
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
 
 db_app = typer.Typer(help="Database maintenance.")
 
@@ -22,16 +25,28 @@ class Scope(StrEnum):
     DATASETS = "datasets"
 
 
+def _engine(url: str) -> Engine:
+    from agentscope.storage.db import StorageLocationError, create_db_engine
+
+    try:
+        return create_db_engine(url)
+    except StorageLocationError as exc:  # e.g. the directory is not writable
+        raise fail(storage_error(exc), Exit.ERROR) from exc
+
+
 @db_app.command("upgrade")
 def db_upgrade() -> None:
-    """Bring the database schema to the latest revision."""
+    """Bring the database schema to the latest revision, and mark work whose process is
+    gone as interrupted (work still running in another process is left alone)."""
     from agentscope.config import get_settings
-    from agentscope.storage.db import DatabaseAheadError, create_db_engine, upgrade
+    from agentscope.storage.db import DatabaseAheadError, upgrade
+    from agentscope.storage.repository import Repository
 
     settings = get_settings()
-    engine = create_db_engine(settings.effective_database_url)
+    engine = _engine(settings.effective_database_url)
     try:
         revision = upgrade(engine)
+        interrupted = Repository(engine).mark_interrupted()
     except DatabaseAheadError as exc:
         raise fail(str(exc), Exit.ERROR) from exc
     finally:
@@ -39,17 +54,20 @@ def db_upgrade() -> None:
     console.print(
         safe(f"database at revision {revision}: {settings.database_location}"), soft_wrap=True
     )
+    if any(interrupted.values()):
+        marked = ", ".join(f"{count} {table}" for table, count in interrupted.items() if count)
+        console.print(safe(f"marked as interrupted (their process is gone): {marked}", "yellow"))
 
 
 @db_app.command("info")
 def db_info(as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Where the data lives (password masked), its schema revision, and what it holds."""
     from agentscope.config import get_settings
-    from agentscope.storage.db import create_db_engine, current_revision, head_revision
+    from agentscope.storage.db import current_revision, head_revision, known_revision
     from agentscope.storage.repository import Repository
 
     settings = get_settings()
-    engine = create_db_engine(settings.effective_database_url)
+    engine = _engine(settings.effective_database_url)
     try:
         revision, head = current_revision(engine), head_revision()
         # Only an up-to-date schema can be inventoried; info itself never migrates.
@@ -70,7 +88,12 @@ def db_info(as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
     console.print(safe(f"database: {settings.database_location}"), soft_wrap=True)
     console.print(safe(f"revision: {revision or 'none'} (latest {head})"))
     if inventory is None:
-        console.print(safe("schema is not up to date: run `agentscope db upgrade`", "yellow"))
+        if revision is not None and not known_revision(revision):
+            console.print(
+                safe("a newer AgentScope migrated this database: upgrade AgentScope", "yellow")
+            )
+        else:
+            console.print(safe("schema is not up to date: run `agentscope db upgrade`", "yellow"))
         return
     size = f"{inventory.size_bytes} bytes" if inventory.size_bytes is not None else "unknown"
     console.print(safe(f"backend: {inventory.backend} · size: {size}"))
@@ -106,7 +129,7 @@ def db_purge(
     services = open_services()
     code = Exit.OK
     try:
-        result = services.repository.purge(scope.value, moment)
+        result = services.purge(scope.value, moment)  # keeps the packaged datasets
     except PurgeIncomplete as exc:
         result, code = exc.result, Exit.ERROR
         # stderr: with --json, stdout carries exactly one JSON document.

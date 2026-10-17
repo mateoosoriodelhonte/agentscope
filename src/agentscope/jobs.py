@@ -2,7 +2,9 @@
 demo seeding.
 
 Jobs live in this process's memory only, so a restart forgets them. What a job creates is
-persisted as it goes, and suites a restart cut short are marked as errors at startup. At most
+persisted as it goes, and suites whose process died are marked as errors by the server's
+recovery (see Services.recover_interrupted). Work that finished but could not be judged
+(harness or provider errors) fails its job, while what it stored stays available. At most
 `max_running` jobs run at once and up to `max_queued` more wait their turn; beyond that,
 `submit` raises QueueFull (HTTP 429) instead of queueing without bound. Shutdown cancels and
 awaits every unfinished job.

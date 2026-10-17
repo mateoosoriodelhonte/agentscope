@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import (
     Connection,
     Engine,
@@ -58,6 +58,7 @@ from agentscope.domain.traces import (
     TraceRecord,
 )
 from agentscope.storage.db import session_factory
+from agentscope.storage.liveness import STALE_AFTER, owner_alive, process_owner
 from agentscope.storage.models import (
     Base,
     CaseResultRow,
@@ -73,6 +74,9 @@ from agentscope.tracing.redaction import Redactor
 PurgeScope = Literal["all", "runs", "evaluations", "experiments", "datasets"]
 
 INTERRUPTED = "interrupted: the process stopped before this finished"
+
+# Ends a stored string that had to be cut back to its field's limit after redaction.
+TRUNCATED = "…[truncated]"
 
 # Every table holding user data, with what it contains in plain language.
 _INVENTORY: tuple[tuple[type[Base], str], ...] = (
@@ -148,6 +152,24 @@ class EvaluatedCase:
     fault_kinds: tuple[str, ...]
 
 
+def scrubbed[M: BaseModel](model: M, redactor: Redactor) -> M:
+    """A redacted copy, validated back into the same contract: what the repository stores.
+
+    Only explicitly set fields go through the round trip, so validators that depend on
+    which fields were given (an argument matcher's single comparison) still accept it.
+    A redaction marker can be longer than the secret it replaces, pushing a string that was
+    cut to its limit past it: such strings are cut again (the secret is already gone) rather
+    than failing the save and, with it, a whole suite.
+    """
+    redacted = redactor.redact(model.model_dump(mode="json", exclude_unset=True))
+    try:
+        return type(model).model_validate(redacted)
+    except ValidationError as exc:
+        if not _cut_overlong_strings(redacted, exc):
+            raise
+        return type(model).model_validate(redacted)
+
+
 def _ns(value: datetime) -> int:
     return int(value.timestamp() * 1_000_000) * 1000
 
@@ -173,13 +195,7 @@ class Repository:
         return self._sessions()
 
     def _scrub[M: BaseModel](self, model: M) -> M:
-        """A redacted copy, validated back into the same contract.
-
-        Only explicitly set fields go through the round trip, so validators that depend on
-        which fields were given (an argument matcher's single comparison) still accept it.
-        """
-        dumped = model.model_dump(mode="json", exclude_unset=True)
-        return type(model).model_validate(self._redactor.redact(dumped))
+        return scrubbed(model, self._redactor)
 
     # --- runs -------------------------------------------------------------------------
 
@@ -238,6 +254,9 @@ class Repository:
             passed=clean_eval.passed if clean_eval else None,
             created_at=datetime.now(UTC),
         )
+        if clean.status is RunStatus.RUNNING:
+            # In flight: recovery must be able to tell whether its process still lives.
+            row.owner, row.heartbeat_at = process_owner(), row.created_at
         row.spans = [
             SpanRow(
                 trace_id=span.trace_id,
@@ -319,29 +338,47 @@ class Repository:
                 return [], 0
             query = query.where(RunRow.suite_id == suite_key)
         with self.session() as session:
-            total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
-            rows = session.scalars(
-                query.order_by(RunRow.started_at.desc(), RunRow.id).limit(limit).offset(offset)
-            ).all()
+            rows, total = _page(
+                session, query, (RunRow.started_at.desc(), RunRow.id), limit, offset
+            )
             return [_to_summary(r) for r in rows], total
 
-    def mark_interrupted(self) -> dict[str, int]:
-        """Turn runs and suites a crashed process left `running` into errors.
+    def mark_interrupted(
+        self,
+        *,
+        stale_after: timedelta = STALE_AFTER,
+        alive: Callable[[str | None], bool | None] = owner_alive,
+    ) -> dict[str, int]:
+        """Turn runs and suites whose process is gone into errors, and only those.
 
-        Call once at startup, before starting new work. Returns rows changed per table.
+        Several processes share one database (a server, CLI evaluations, another host on
+        PostgreSQL), so a `running` row is marked only when its owner is a process on this
+        host that no longer exists, or when its owner cannot be checked from here and its
+        heartbeat (its start, for rows written before owners were recorded) is older than
+        `stale_after`. A marked row gets a finish time, so a late writer is refused instead
+        of silently reviving it. Returns rows changed per table.
         """
-        running = RunStatus.RUNNING.value
-        with self.engine.begin() as connection:
-            runs = connection.execute(
-                update(RunRow)
-                .where(RunRow.status == running)
-                .values(status=RunStatus.ERROR.value, error_code="interrupted", error=INTERRUPTED)
-            ).rowcount
-            suites = connection.execute(
-                update(SuiteRunRow)
-                .where(SuiteRunRow.status == running)
-                .values(status="error", error=INTERRUPTED)
-            ).rowcount
+        now = datetime.now(UTC)
+        cutoff = now - stale_after
+        runs = _interrupt(
+            self.engine,
+            RunRow,
+            alive,
+            cutoff,
+            status=RunStatus.ERROR.value,
+            error_code="interrupted",
+            error=INTERRUPTED,
+            ended_at=now,
+        )
+        suites = _interrupt(
+            self.engine,
+            SuiteRunRow,
+            alive,
+            cutoff,
+            status="error",
+            error=INTERRUPTED,
+            finished_at=now,
+        )
         return {"runs": runs, "suite_runs": suites}
 
     # --- datasets ---------------------------------------------------------------------
@@ -446,9 +483,20 @@ class Repository:
             passed=0,
             pass_rate=0.0,
             started_at=clean.started_at,
+            owner=process_owner(),
+            heartbeat_at=datetime.now(UTC),
         )
         with self.session() as session, session.begin():
             session.add(row)
+
+    def heartbeat(self, suite_id: str) -> None:
+        """Record that this process is still working on a running suite (see liveness)."""
+        with self.session() as session, session.begin():
+            session.execute(
+                update(SuiteRunRow)
+                .where(SuiteRunRow.id == uuid.UUID(suite_id), SuiteRunRow.finished_at.is_(None))
+                .values(heartbeat_at=datetime.now(UTC))
+            )
 
     def record_case(self, suite_id: str, result: CaseResult) -> None:
         """Persist one verdict as soon as it is known, so a crash keeps finished cases.
@@ -475,11 +523,14 @@ class Repository:
             suite.total = total
             suite.passed = passed
             suite.pass_rate = passed / total
+            suite.heartbeat_at = datetime.now(UTC)
 
     def finish_suite(self, result: SuiteResult) -> None:
         """Store the final status, metrics and gate of a suite created with create_suite.
 
         Cases not recorded yet are recorded now, so the stored suite always equals `result`.
+        A suite that is already finished (e.g. marked interrupted) is refused: its stored
+        outcome is never overwritten by a late writer.
         """
         if result.status == "running":
             raise ValueError("finish_suite needs a completed or errored suite")
@@ -487,6 +538,11 @@ class Repository:
         key = uuid.UUID(clean.suite_id)
         with self.session() as session, session.begin():
             suite = _locked_suite(session, key)
+            if suite.finished_at is not None:
+                raise ValueError(
+                    f"suite {key} is already finished ({suite.status}: {suite.error or 'no error'})"
+                    "; cannot finish it again"
+                )
             recorded = set(
                 session.scalars(select(CaseResultRow.case_id).where(CaseResultRow.suite_id == key))
             )
@@ -569,13 +625,13 @@ class Repository:
         if label is not None:
             query = query.where(SuiteRunRow.label == label)
         with self.session() as session:
-            total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
-            rows = session.scalars(
-                query.options(*(defer(column) for column in _SUITE_DOCUMENTS))
-                .order_by(SuiteRunRow.started_at.desc(), SuiteRunRow.id)
-                .limit(limit)
-                .offset(offset)
-            ).all()
+            rows, total = _page(
+                session,
+                query.options(*(defer(column) for column in _SUITE_DOCUMENTS)),
+                (SuiteRunRow.started_at.desc(), SuiteRunRow.id),
+                limit,
+                offset,
+            )
             return [_suite_item(r) for r in rows], total
 
     # --- failure analysis -------------------------------------------------------------
@@ -692,6 +748,20 @@ class Repository:
             )
         return Comparison.model_validate(document) if document is not None else None
 
+    def find_experiment(self, suite_a: str, suite_b: str) -> Comparison | None:
+        """The most recent stored comparison of exactly these suites (A is the reference)."""
+        key_a, key_b = _uuid(suite_a), _uuid(suite_b)
+        if key_a is None or key_b is None:
+            return None
+        with self.session() as session:
+            document = session.scalar(
+                select(ExperimentRow.comparison)
+                .where(ExperimentRow.suite_a_id == key_a, ExperimentRow.suite_b_id == key_b)
+                .order_by(ExperimentRow.created_at.desc(), ExperimentRow.id)
+                .limit(1)
+            )
+        return Comparison.model_validate(document) if document is not None else None
+
     def list_experiments(
         self, *, name: str | None = None, limit: int = 50, offset: int = 0
     ) -> tuple[list[ExperimentListItem], int]:
@@ -699,13 +769,13 @@ class Repository:
         if name is not None:
             query = query.where(ExperimentRow.name == name)
         with self.session() as session:
-            total = session.scalar(select(func.count()).select_from(query.subquery())) or 0
-            rows = session.scalars(
-                query.options(defer(ExperimentRow.comparison))
-                .order_by(ExperimentRow.created_at.desc(), ExperimentRow.id)
-                .limit(limit)
-                .offset(offset)
-            ).all()
+            rows, total = _page(
+                session,
+                query.options(defer(ExperimentRow.comparison)),
+                (ExperimentRow.created_at.desc(), ExperimentRow.id),
+                limit,
+                offset,
+            )
             return [_experiment_item(r) for r in rows], total
 
     # --- inventory and purge ----------------------------------------------------------
@@ -733,13 +803,21 @@ class Repository:
             ],
         )
 
-    def purge(self, scope: PurgeScope = "all", before: datetime | None = None) -> PurgeResult:
+    def purge(
+        self,
+        scope: PurgeScope = "all",
+        before: datetime | None = None,
+        *,
+        keep_datasets: Collection[str] = (),
+    ) -> PurgeResult:
         """Delete stored data, then compact so the content is gone from disk, not just unlinked.
 
         `before` limits deletion to rows created (runs and suites: started) before it. A suite
         takes its case results, runs and experiments with it; purging runs keeps verdicts but
-        unlinks them. SQLite overwrites deleted cells (secure_delete), VACUUM rebuilds the
-        file and the WAL is truncated; PostgreSQL rewrites the affected tables (VACUUM FULL).
+        unlinks them. Datasets whose content hash is in `keep_datasets` (those packaged with
+        AgentScope) are never deleted. SQLite overwrites deleted cells (secure_delete), VACUUM
+        rebuilds the file and the WAL is truncated; PostgreSQL rewrites the affected tables
+        (VACUUM FULL).
 
         Raises PurgeIncomplete (carrying the result) when SQLite could not truncate the WAL
         because another connection was reading: the rows are gone, but old copies of their
@@ -759,6 +837,8 @@ class Repository:
                 statement = delete(model)
                 if before is not None:
                     statement = statement.where(moment < before)
+                if model is DatasetRow and keep_datasets:
+                    statement = statement.where(DatasetRow.content_hash.not_in(keep_datasets))
                 connection.execute(statement)
             counts_after = _row_counts(connection)
         deleted = {name: max(0, counts_before[name] - counts_after[name]) for name in counts_before}
@@ -808,6 +888,94 @@ class Repository:
                 or 0
                 for model, _ in _INVENTORY
             )
+
+
+def _page[R](
+    session: Session,
+    query: Select[R],
+    order: Sequence[Any],
+    limit: int,
+    offset: int,
+) -> tuple[list[R], int]:
+    """A page and the total number of matching rows, from one statement.
+
+    A separate COUNT and page query each see their own snapshot (pysqlite starts no
+    transaction for reads, PostgreSQL's READ COMMITTED takes one per statement), so a row
+    committed in between made a page longer than its total. A window count over the same
+    statement cannot disagree with the rows it returns.
+    """
+    rows = session.execute(
+        query.add_columns(func.count().over()).order_by(*order).limit(limit).offset(offset)
+    ).all()
+    if rows:
+        return [row[0] for row in rows], rows[0][1]
+    if offset == 0:
+        return [], 0
+    # Past the end: there is no row to carry the count, so ask for it separately.
+    return [], session.scalar(select(func.count()).select_from(query.subquery())) or 0
+
+
+def _interrupt(
+    engine: Engine,
+    model: type[RunRow] | type[SuiteRunRow],
+    alive: Callable[[str | None], bool | None],
+    cutoff: datetime,
+    **values: Any,
+) -> int:
+    """Mark the `running` rows of one table whose owner is dead, or unknown and silent."""
+    running = RunStatus.RUNNING.value
+    with engine.connect() as connection:
+        candidates = connection.execute(
+            select(model.id, model.owner).where(model.status == running)
+        ).all()
+    states = [(key, alive(owner)) for key, owner in candidates]
+    dead = [key for key, state in states if state is False]
+    unknown = [key for key, state in states if state is None]
+    changed = 0
+    with engine.begin() as connection:
+        if dead:
+            changed += connection.execute(
+                update(model).where(model.id.in_(dead), model.status == running).values(**values)
+            ).rowcount
+        if unknown:
+            last_seen = func.coalesce(model.heartbeat_at, model.started_at)
+            changed += connection.execute(
+                update(model)
+                .where(model.id.in_(unknown), model.status == running, last_seen < cutoff)
+                .values(**values)
+            ).rowcount
+    return changed
+
+
+def _cut_overlong_strings(document: Any, exc: ValidationError) -> bool:
+    """Cut every string `exc` reports as too long back to its limit, in place, ending it
+    with TRUNCATED. False when `exc` reports anything else (a real defect, not redaction)."""
+    errors = exc.errors()
+    if not errors or any(error["type"] != "string_too_long" for error in errors):
+        return False
+    for error in errors:
+        limit = int((error.get("ctx") or {})["max_length"])
+        container, key = _locate(document, error["loc"])
+        if container is None or not isinstance(container[key], str):
+            return False
+        value: str = container[key]
+        keep = limit - len(TRUNCATED)
+        container[key] = value[:keep] + TRUNCATED if keep > 0 else value[:limit]
+    return True
+
+
+def _locate(document: Any, loc: Sequence[int | str]) -> tuple[Any, Any]:
+    """The container and key a validation error location points at. Parts that name no
+    key (union members such as `str` in a JsonValue) are skipped."""
+    container: Any = None
+    key: Any = None
+    current = document
+    for part in loc:
+        in_dict = isinstance(current, dict) and part in current
+        in_list = isinstance(current, list) and isinstance(part, int) and 0 <= part < len(current)
+        if in_dict or in_list:
+            container, key, current = current, part, current[part]
+    return container, key
 
 
 def _locked_suite(session: Session, key: uuid.UUID) -> SuiteRunRow:

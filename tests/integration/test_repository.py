@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
+import sys
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from agentscope.domain.evaluation import (
     CheckStats,
     CheckStatus,
     EnvironmentFingerprint,
+    Evidence,
     GateResult,
     GateRule,
     ReasonCode,
@@ -41,8 +44,10 @@ from agentscope.domain.experiments import (
 from agentscope.domain.tools import FaultKind, FaultSpec, ModelFaultKind, ModelFaultSpec
 from agentscope.domain.traces import RunStatus, SpanKind, SpanRecord, SpanStatus, TraceRecord
 from agentscope.storage.db import create_db_engine, upgrade
+from agentscope.storage.liveness import owner_alive, process_owner, this_host
 from agentscope.storage.models import SuiteRunRow
 from agentscope.storage.repository import (
+    TRUNCATED,
     DatasetConflict,
     EvaluatedCase,
     PurgeIncomplete,
@@ -488,6 +493,32 @@ def test_list_suites_filters(repo: Repository) -> None:
     assert len(repo.list_suites(limit=1)[0]) == 1
 
 
+def test_list_pages_and_totals_come_from_one_statement(repo: Repository) -> None:
+    """A row committed between a separate count and page query made them disagree."""
+    for _ in range(3):
+        run_suite(repo)
+    statements: list[str] = []
+
+    def record(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(repo.engine, "before_cursor_execute", record)
+    try:
+        for listing in (repo.list_runs, repo.list_suites, repo.list_experiments):
+            statements.clear()
+            listing(limit=2)
+            assert len(statements) <= 1, listing
+    finally:
+        event.remove(repo.engine, "before_cursor_execute", record)
+    runs, total = repo.list_runs(limit=2)
+    assert (len(runs), total) == (2, 3)
+    assert repo.list_runs(limit=2, offset=2)[1] == 3
+    assert repo.list_runs(limit=2, offset=10) == ([], 3)
+    assert repo.list_suites(limit=1, offset=1)[1] == 3
+    assert repo.list_runs(agent="nobody") == ([], 0)
+
+
 def test_trace_case_and_verdict_are_redacted(repo: Repository) -> None:
     trace = make_trace(f"Look up {SECRET}")
     case = EvalCase(id="adhoc", task=f"Look up {SECRET}")
@@ -499,6 +530,41 @@ def test_trace_case_and_verdict_are_redacted(repo: Repository) -> None:
     assert stored_eval is not None
     for model in (stored_trace, stored_case, stored_eval):
         assert SECRET not in model.model_dump_json()
+
+
+def test_redaction_markers_never_push_a_field_past_its_limit(repo: Repository) -> None:
+    """A message cut to its limit before redaction can grow when a secret is replaced by a
+    longer marker; the stored copy is cut again instead of failing the save."""
+    key = "AKIAABCDEFGHIJKLMNOP"  # 20 characters, replaced by a 25-character marker
+    trace = make_trace()
+    case = make_case("bridge", trace, message="x" * 979 + " " + key)
+    long_detail = CheckResult(
+        name=CheckName.POLICY_COMPLIANCE,
+        status=CheckStatus.FAILED,
+        reason=ReasonCode.LEAKED_CONTENT,
+        message="leaked",
+        evidence=[Evidence(role="violation", detail="y" * 486 + " password=abcd")],
+    )
+    case = case.model_copy(update={"checks": [*case.checks, long_detail]})
+    header = make_header()
+    repo.create_suite(header)
+    repo.save_trace(trace, suite_id=header.suite_id, evaluation=case)
+    repo.record_case(header.suite_id, case)
+    repo.finish_suite(finished(header, [case]))
+
+    stored = repo.get_suite(header.suite_id)
+    assert stored is not None
+    message = stored.cases[0].checks[0].message
+    assert len(message) == 1000
+    assert key not in message
+    assert message.endswith(TRUNCATED)
+    detail = stored.cases[0].checks[2].evidence[0].detail
+    assert len(detail) == 500
+    assert "abcd" not in detail
+    found = repo.get_run(trace.run_id)
+    assert found is not None
+    assert found[2] is not None
+    assert key not in found[2].model_dump_json()
 
 
 # --- failure analysis -------------------------------------------------------------------
@@ -560,29 +626,164 @@ def test_experiment_round_trip(repo: Repository) -> None:
     assert (item.confounded, item.deterministic) == (True, True)
 
 
+def test_find_experiment_by_its_two_suites(repo: Repository) -> None:
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    assert repo.find_experiment(a.suite_id, b.suite_id) is None
+    comparison = make_comparison(a, b)
+    repo.save_experiment(comparison)
+    assert repo.find_experiment(a.suite_id, b.suite_id) == comparison
+    assert repo.find_experiment(b.suite_id, a.suite_id) is None  # A is the reference
+    assert repo.find_experiment("not-a-uuid", b.suite_id) is None
+
+
 # --- crash recovery ---------------------------------------------------------------------
 
 
-def test_mark_interrupted(repo: Repository) -> None:
-    running = make_trace(status=RunStatus.RUNNING)
-    done = make_trace()
-    repo.save_trace(running)
-    repo.save_trace(done)
-    header = make_header()
-    repo.create_suite(header)
-    run_suite(repo)
+def _set_owner(
+    repo: Repository, suite_id: str, owner: str | None, heartbeat_at: datetime | None
+) -> None:
+    """Pretend another process owns a running suite."""
+    with repo.session() as session, session.begin():
+        row = session.get(SuiteRunRow, uuid.UUID(suite_id))
+        assert row is not None
+        row.owner, row.heartbeat_at = owner, heartbeat_at
 
-    assert repo.mark_interrupted() == {"runs": 1, "suite_runs": 1}
+
+def _alive(owners: dict[str, bool | None]) -> Callable[[str | None], bool | None]:
+    return lambda owner: owners.get(owner or "")
+
+
+def test_mark_interrupted_spares_live_work(repo: Repository) -> None:
+    """A suite another process is still running is never marked: a live process on this
+    host however long its heartbeat was silent (it may be suspended), a process elsewhere
+    while its heartbeat is fresh."""
+    mine = make_header()
+    repo.create_suite(mine)  # owned by this process, which is obviously alive
+    _set_owner(repo, mine.suite_id, process_owner(), datetime.now(UTC) - timedelta(days=1))
+    remote = make_header()
+    repo.create_suite(remote)
+    _set_owner(repo, remote.suite_id, "another-host.invalid:41", datetime.now(UTC))
+
+    assert repo.mark_interrupted() == {"runs": 0, "suite_runs": 0}
+    assert {s.status for s in repo.list_suites()[0]} == {"running"}
+    trace = make_trace()
+    repo.save_trace(trace, suite_id=mine.suite_id)
+    repo.record_case(mine.suite_id, make_case("bridge", trace))  # still accepted
+
+
+def test_mark_interrupted_marks_dead_or_silent_owners(repo: Repository) -> None:
+    now = datetime.now(UTC)
+    dead = make_header()
+    repo.create_suite(dead)
+    _set_owner(repo, dead.suite_id, "this-host:43", now)
+    silent = make_header()
+    repo.create_suite(silent)
+    _set_owner(repo, silent.suite_id, "other-host:44", now - timedelta(minutes=10))
+    legacy = make_header()  # written before owners were recorded; started long ago (NOW)
+    repo.create_suite(legacy)
+    _set_owner(repo, legacy.suite_id, None, None)
+    done = run_suite(repo)
+    running = make_trace(status=RunStatus.RUNNING)
+    repo.save_trace(running)
+    with repo.session() as session, session.begin():
+        session.execute(text("UPDATE runs SET owner = 'this-host:43' WHERE status = 'running'"))
+
+    alive = _alive({"this-host:43": False, "other-host:44": None})
+    assert repo.mark_interrupted(alive=alive) == {"runs": 1, "suite_runs": 3}
+
+    for header in (dead, silent, legacy):
+        suite = repo.get_suite(header.suite_id)
+        assert suite is not None
+        assert suite.status == "error"
+        assert suite.error is not None
+        assert suite.error.startswith("interrupted")
+        # A finish time, so a late writer is refused instead of reviving the suite.
+        assert suite.finished_at is not None
+        with pytest.raises(ValueError, match="already finished"):
+            repo.record_case(header.suite_id, make_case("ferry", None))
+        with pytest.raises(ValueError, match="already finished"):
+            repo.finish_suite(finished(header, [make_case("ferry", None)]))
+        assert repo.get_suite(header.suite_id) == suite
     interrupted = repo.get_trace(running.run_id)
     assert interrupted is not None
     assert (interrupted.status, interrupted.error_code) == (RunStatus.ERROR, "interrupted")
-    finished_trace = repo.get_trace(done.run_id)
-    assert finished_trace is not None
-    assert finished_trace.status is RunStatus.COMPLETED
-    statuses = {s.suite_id: s.status for s in repo.list_suites()[0]}
-    assert statuses[header.suite_id] == "error"
-    assert sorted(statuses.values()) == ["completed", "error"]
-    assert repo.mark_interrupted() == {"runs": 0, "suite_runs": 0}
+    assert repo.get_suite(done.suite_id) == done
+    assert repo.mark_interrupted(alive=alive) == {"runs": 0, "suite_runs": 0}
+
+
+def test_running_suites_record_their_owner_and_heartbeat(repo: Repository) -> None:
+    header = make_header()
+    repo.create_suite(header)
+
+    def heartbeat() -> datetime:
+        with repo.session() as session:
+            row = session.get(SuiteRunRow, uuid.UUID(header.suite_id))
+            assert row is not None
+            assert row.owner == process_owner()
+            assert row.heartbeat_at is not None
+            return row.heartbeat_at
+
+    first = heartbeat()
+    repo.heartbeat(header.suite_id)
+    second = heartbeat()
+    repo.record_case(header.suite_id, make_case("ferry", None))
+    assert first <= second <= heartbeat()
+
+
+def test_owner_alive_probes_processes_on_this_host() -> None:
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()  # reaped: its pid names no process any more
+    host = this_host()
+    assert owner_alive(process_owner()) is True
+    assert owner_alive(f"{host}:{child.pid}") is False
+    assert owner_alive(f"{host}:{child.pid}:a1b2c3d4e5f6") is False
+    assert owner_alive(f"{host}:{os.getppid()}:a1b2c3d4e5f6") is True  # the parent lives
+    assert owner_alive(f"{host}:0") is None
+    assert owner_alive("another-host.example:1") is None
+    assert owner_alive("another-host.example:1:a1b2c3d4e5f6") is None
+    assert owner_alive(None) is None
+    assert owner_alive("garbage") is None
+
+
+def test_an_earlier_process_with_this_pid_is_gone() -> None:
+    """A server restarted in its container is pid 1 again: the suites its predecessor left
+    running carry the same host and pid, but not this process's incarnation."""
+    mine = process_owner()
+    host, pid, incarnation = mine.rsplit(":", 2)
+    assert (host, pid) == (this_host(), str(os.getpid()))
+    predecessor = f"{host}:{pid}:{'0' * len(incarnation)}"
+    assert predecessor != mine
+    assert owner_alive(predecessor) is False
+    assert owner_alive(f"{host}:{pid}") is True  # no incarnation recorded: cannot tell
+
+
+def test_recovery_marks_suites_an_earlier_process_with_this_pid_left(repo: Repository) -> None:
+    header = make_header()
+    repo.create_suite(header)
+    host, pid, _ = process_owner().rsplit(":", 2)
+    _set_owner(repo, header.suite_id, f"{host}:{pid}:000000000000", datetime.now(UTC))
+    assert repo.mark_interrupted() == {"runs": 0, "suite_runs": 1}
+    suite = repo.get_suite(header.suite_id)
+    assert suite is not None
+    assert suite.status == "error"
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_forked_child_is_a_process_of_its_own() -> None:
+    if not hasattr(os, "fork"):
+        pytest.skip("no fork on this platform")
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the child
+        os.close(read)
+        os.write(write, process_owner().encode())
+        os._exit(0)
+    os.close(write)
+    with os.fdopen(read, "rb") as pipe:
+        child = pipe.read().decode()
+    os.waitpid(pid, 0)
+    assert child.rsplit(":", 2)[2] != process_owner().rsplit(":", 2)[2]
 
 
 # --- inventory and purge ----------------------------------------------------------------
@@ -661,6 +862,16 @@ def test_purge_single_tables(repo: Repository, scope: str, table: str) -> None:
     before = counts(repo)
     result = repo.purge(scope)
     assert result.deleted == {name: before[name] if name == table else 0 for name in ALL_TABLES}
+
+
+def test_purge_keeps_the_datasets_it_is_told_to(repo: Repository) -> None:
+    packaged = repo.save_dataset(make_dataset())
+    repo.save_dataset(make_dataset("2", task="When did the bridge open?"))
+    for scope in ("datasets", "all"):
+        result = repo.purge(scope, keep_datasets={packaged.content_hash})
+        assert [(d.name, d.version) for d in repo.list_datasets()] == [("geo", "1")]
+    assert result.deleted["datasets"] == 0
+    assert repo.purge("datasets").deleted["datasets"] == 1
 
 
 def test_purge_all_and_before(repo: Repository) -> None:

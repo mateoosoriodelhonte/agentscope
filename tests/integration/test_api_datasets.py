@@ -111,3 +111,38 @@ def test_validate_reports_without_importing(client: TestClient) -> None:
     assert bad["content_hash"] is None
     assert any(issue["path"] == "/cases" for issue in bad["issues"])
     assert client.get("/api/datasets/smoke/1").status_code == 404
+
+
+def test_a_dataset_detail_can_be_posted_back(client: TestClient) -> None:
+    """Argument matchers come back with only their comparison, so the detail's dataset is
+    accepted again, e.g. to fork a built-in dataset as a new version."""
+    detail = client.get("/api/datasets/research-assistant/1").json()
+    original = detail["dataset"]
+    matchers = [
+        matcher
+        for case in original["cases"]
+        for call in case["expected_tool_calls"]
+        for matcher in call["arguments"].values()
+    ]
+    assert matchers
+    assert all(len(matcher) == 1 for matcher in matchers)
+
+    validated = post(client, "/api/datasets/validate", original).json()
+    assert validated["valid"] is True, validated["issues"]
+    assert validated["content_hash"] == detail["summary"]["content_hash"]
+    forked = post(client, "/api/datasets", {**original, "version": "2-fork"})
+    assert forked.status_code == 201, forked.text
+
+
+def test_purging_datasets_keeps_the_packaged_ones(client: TestClient) -> None:
+    assert post(client, "/api/datasets", document()).status_code == 201
+    for scope in ("datasets", "all"):
+        purged = post(client, "/api/settings/purge", {"confirm": "PURGE", "scope": scope})
+        assert purged.status_code == 200, purged.text
+        names = {(d["name"], d["version"]) for d in client.get("/api/datasets").json()}
+        assert names == {(d.name, d.version) for d in builtin_datasets()}
+    research = {"name": "research-assistant", "version": "1"}
+    accepted = post(
+        client, "/api/evaluations", {"agent_ref": "research_assistant@v2", "dataset": research}
+    )
+    assert accepted.status_code == 202, accepted.text

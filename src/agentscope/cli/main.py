@@ -9,17 +9,19 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
+from pydantic import JsonValue, ValidationError
 from rich.text import Text
 
 from agentscope import __version__
-from agentscope.cli.common import Exit, console, err, fail, open_services
+from agentscope.cli.common import SIMULATED, Exit, concise, console, err, fail, open_services
 from agentscope.cli.database import db_app
 from agentscope.cli.evaluate import compare_command, eval_command
 from agentscope.cli.library import agents_app, datasets_app, demo_app
 from agentscope.cli.output import emit_json, safe, table
+from agentscope.domain.agents import ProviderName
 from agentscope.domain.datasets import EvalCase, ExpectedAnswer, MatchMode
 from agentscope.domain.tools import FaultKind, FaultSpec
 
@@ -71,6 +73,70 @@ def version() -> None:
     typer.echo(__version__)
 
 
+def _schema_variants(node: Any, root: dict[str, Any]) -> list[dict[str, Any]]:
+    """The alternatives a JSON schema node allows ($ref and anyOf/oneOf resolved)."""
+    if not isinstance(node, dict):
+        return []
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        node = root.get("$defs", {}).get(ref.removeprefix("#/$defs/"), {})
+    options = node.get("anyOf") or node.get("oneOf")
+    if isinstance(options, list):
+        return [variant for option in options for variant in _schema_variants(option, root)]
+    return [node]
+
+
+def _field_types(schema: dict[str, Any], path: str) -> set[str] | None:
+    """JSON types an output schema allows at a dotted field path; None when it has no such
+    field (so an expectation on it could only ever fail)."""
+    nodes: list[Any] = [schema]
+    for part in path.split("."):
+        nodes = [
+            variant["properties"][part]
+            for node in nodes
+            for variant in _schema_variants(node, schema)
+            if isinstance(variant.get("properties"), dict) and part in variant["properties"]
+        ]
+        if not nodes:
+            return None
+    types: set[str] = set()
+    for node in nodes:
+        for variant in _schema_variants(node, schema):
+            declared = variant.get("type")
+            types.update(declared if isinstance(declared, list) else [declared] if declared else [])
+    return types
+
+
+def _expectation(
+    schema: dict[str, Any], agent: str, value: str, field: str | None, match: MatchMode | None
+) -> ExpectedAnswer:
+    """`--expect` as an ExpectedAnswer on a field the agent's output really has: `answer`
+    unless --expect-field names another, compared numerically when it holds a number
+    (unless --match says otherwise). Raises ValueError for anything that could never pass."""
+    field = field or "answer"
+    types = _field_types(schema, field)
+    if types is None:
+        fields = ", ".join(sorted(schema.get("properties", {}))) or "none"
+        raise ValueError(
+            f"{agent} outputs have no field {field!r}; choose one with --expect-field "
+            f"(fields: {fields})"
+        )
+    numeric = bool(types & {"number", "integer"})
+    mode = match or (MatchMode.NUMERIC if numeric else MatchMode.NORMALIZED)
+    if mode is MatchMode.ONE_OF:
+        raise ValueError("--match one_of needs a list of values; put the case in a dataset")
+    expected: JsonValue = value
+    if mode is MatchMode.NUMERIC or (mode is MatchMode.EXACT and numeric):
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError(f"--expect {value!r} is not a number") from None
+        expected = int(number) if number.is_integer() and "number" not in types else number
+    elif mode is MatchMode.EXACT and "boolean" in types and value in ("true", "false"):
+        expected = value == "true"
+    return ExpectedAnswer(field=field, match=mode, value=expected)
+
+
 @app.command()
 def run(
     task: Annotated[str, typer.Option("--task", "-t", help="Task for the agent.")],
@@ -80,34 +146,64 @@ def run(
     fault: Annotated[
         list[str] | None, typer.Option("--fault", help="tool:kind[:on_call]; repeatable")
     ] = None,
-    expect: Annotated[str | None, typer.Option(help="Expected answer (normalized match)")] = None,
+    expect: Annotated[
+        str | None, typer.Option(help="Expected value of the output field (see --expect-field)")
+    ] = None,
+    expect_field: Annotated[
+        str | None,
+        typer.Option(
+            "--expect-field",
+            help="Output field --expect is checked against, as a dotted path (default: answer; "
+            "e.g. total_hours for task_planner)",
+        ),
+    ] = None,
+    match: Annotated[
+        MatchMode | None,
+        typer.Option(
+            "--match",
+            help="How --expect is compared (default: numeric for number fields, else normalized)",
+        ),
+    ] = None,
     save: Annotated[bool, typer.Option("--save/--no-save", help="Persist the trace")] = True,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
 ) -> None:
-    """Run one agent task and print a summary of its trace."""
-    from agentscope.runtime.runner import RunRequest
+    """Run one agent task and print a summary of its trace.
 
-    services = open_services()
+    Exit codes: 0 done (and --expect matched) · 1 --expect did not match · 2 invalid input ·
+    3 the harness or the model provider failed, so the agent was never judged.
+    """
+    from agentscope.api.schemas import RunCreate
+    from agentscope.runtime.runner import RunRequest
+    from agentscope.suite_runner import HARNESS_ERROR_CODES
+
+    services = open_services(recover=True)
     try:
         faults = [_parse_fault(f) for f in fault or []]
         config = services.resolve_agent(agent_ref=agent)
+        # The bounds POST /api/runs enforces, so both accept exactly the same runs.
+        RunCreate(agent_ref=agent, task=task, faults=faults)
+        case = None
+        if expect is not None:
+            schema = services.catalog.get(config.agent).output_schema()
+            expected = _expectation(schema, config.agent, expect, expect_field, match)
+            case = EvalCase(id="adhoc", task=task, expected=expected, faults=faults)
+        elif expect_field is not None or match is not None:
+            raise ValueError("--expect-field and --match need --expect")
+    except ValidationError as exc:
+        raise fail(f"invalid input: {concise(exc)}", Exit.INVALID) from exc
     except (ValueError, LookupError) as exc:
         raise fail(str(exc), Exit.INVALID) from exc
 
-    case = (
-        EvalCase(
-            id="adhoc",
-            task=task,
-            expected=ExpectedAnswer(match=MatchMode.NORMALIZED, value=expect),
-            faults=faults,
-        )
-        if expect is not None
-        else None
-    )
     # Both come back redacted: evaluation saw the raw trace, the terminal never does.
     trace, evaluation = asyncio.run(
         services.run_case(RunRequest(config=config, task=task, faults=faults), case, save=save)
     )
+    if trace.error_code in HARNESS_ERROR_CODES:
+        code = Exit.ERROR
+    elif evaluation is not None and not evaluation.passed:
+        code = Exit.FAILED
+    else:
+        code = Exit.OK
     if as_json:
         emit_json(
             {
@@ -115,6 +211,8 @@ def run(
                 "trace_id": trace.trace_id,
                 "agent": config.ref,
                 "status": trace.status.value,
+                "error_code": trace.error_code,
+                "simulated": _simulated(trace),
                 "steps": trace.steps,
                 "final_output": trace.final_output,
                 "tool_calls": [
@@ -123,12 +221,26 @@ def run(
                 ],
                 "evaluation": evaluation.model_dump(mode="json") if evaluation else None,
                 "saved": save,
+                "exit_code": int(code),
             }
         )
     else:
         _print_trace_summary(trace, evaluation)
-    if evaluation is not None and not evaluation.passed:
-        raise typer.Exit(int(Exit.FAILED))
+    if code is Exit.ERROR:
+        err.print(
+            safe(
+                f"the run did not complete ({trace.error_code}): the harness or the model "
+                "provider failed, so the agent was not judged",
+                "red",
+            )
+        )
+    raise typer.Exit(int(code))
+
+
+def _simulated(trace: TraceRecord) -> bool:
+    """Runs of the deterministic fake model show harness mechanics, not model behaviour (the
+    same rule as a suite's `deterministic` fingerprint)."""
+    return trace.config.model.provider is ProviderName.FAKE
 
 
 def _print_trace_summary(trace: TraceRecord, evaluation: CaseResult | None) -> None:
@@ -143,6 +255,10 @@ def _print_trace_summary(trace: TraceRecord, evaluation: CaseResult | None) -> N
             f"{trace.steps} steps · {trace.duration_ms:.0f} ms"
         )
     )
+    if _simulated(trace):
+        console.print(safe(SIMULATED, "dim"))
+    if trace.error_code is not None:
+        console.print(safe(f"error: {trace.error_code}: {trace.error or 'no detail'}", "red"))
     calls = table("#", "tool", "outcome", "executed", keys=2)
     for index, inv in enumerate(trace.tool_invocations, 1):
         calls.add_row(
@@ -201,6 +317,7 @@ def traces_show(run_id: str, as_json: Annotated[bool, typer.Option("--json")] = 
             {
                 "trace": trace.model_dump(mode="json"),
                 "evaluation": evaluation.model_dump(mode="json") if evaluation else None,
+                "simulated": _simulated(trace),
             }
         )
         return

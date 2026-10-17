@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 from agentscope.agents.base import AgentCatalog
 from agentscope.domain.agents import AgentConfig
@@ -35,13 +36,48 @@ from agentscope.runtime.runner import AgentRunner, RunRequest
 OnCase = Callable[[EvalCase, TraceRecord | None, CaseResult], Awaitable[None]]
 
 # Error codes the runtime records when AgentScope itself failed during a run (it catches
-# its own exceptions and returns a trace, so they never reach the try/except below). They
-# are harness errors, not agent failures.
-HARNESS_ERROR_CODES = frozenset({"internal_error", "internal_recursion_limit"})
+# its own exceptions and returns a trace, so they never reach the try/except below), or when
+# the model provider failed (unreachable, timed out, an error response): the agent never got
+# to act, so these are harness or infrastructure errors, not agent failures. They are kept
+# out of verdicts and per-check rates, fail the gate as harness errors (exit 3), and are
+# never written into a baseline.
+INTERNAL_ERROR_CODES = frozenset({"internal_error", "internal_recursion_limit"})
+PROVIDER_ERROR_CODES = frozenset({"provider_error", "provider_timeout"})
+HARNESS_ERROR_CODES = INTERNAL_ERROR_CODES | PROVIDER_ERROR_CODES
 
 
 class IncompatibleDatasetError(ValueError):
     """The dataset (or some of its cases) targets a different agent."""
+
+
+def harness_error(case: EvalCase, trace: TraceRecord | None, description: str) -> CaseResult:
+    """A failure of AgentScope or the provider, not of the agent: never counted as a pass,
+    and not judged by any check (so per-check rates measure only the agent)."""
+    return CaseResult(
+        case_id=case.id,
+        case_hash=case.case_hash(),
+        run_id=trace.run_id if trace else None,
+        trace_id=trace.trace_id if trace else None,
+        passed=False,
+        status=trace.status if trace else None,
+        harness_error=description[:300],
+        steps=trace.steps if trace else 0,
+        duration_ms=trace.duration_ms if trace else 0,
+        tags=list(case.tags),
+    )
+
+
+def judge_case(
+    case: EvalCase,
+    trace: TraceRecord,
+    output_schema: dict[str, Any],
+    checks: Iterable[CheckName] | None = None,
+) -> CaseResult:
+    """The verdict on one finished run, or a harness error when the harness or the provider
+    broke the run (see HARNESS_ERROR_CODES)."""
+    if trace.error_code in HARNESS_ERROR_CODES:
+        return harness_error(case, trace, f"{trace.error_code}: {trace.error or 'no detail'}")
+    return evaluate_case(case, trace, output_schema, checks)
 
 
 def run_request(case: EvalCase, config: AgentConfig) -> RunRequest:
@@ -100,16 +136,11 @@ class SuiteRunner:
             trace: TraceRecord | None = None
             try:
                 trace = await self._runner.run(run_request(case, config))
-                if trace.error_code in HARNESS_ERROR_CODES:
-                    result = self._harness_error(
-                        case, trace, f"{trace.error_code}: {trace.error or 'no detail'}"
-                    )
-                else:
-                    result = evaluate_case(case, trace, output_schema, enabled)
+                result = judge_case(case, trace, output_schema, enabled)
             except Exception as exc:
                 message = self._runner.redactor.redact_text(str(exc))
                 description = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-                result = self._harness_error(case, trace, description)
+                result = harness_error(case, trace, description)
             if trace is not None:
                 usage[trace.run_id] = trace.usage
             results.append(result)
@@ -148,20 +179,3 @@ class SuiteRunner:
             raise IncompatibleDatasetError(
                 f"cannot run dataset {dataset.name!r} on {config.agent!r}: " + "; ".join(problems)
             )
-
-    @staticmethod
-    def _harness_error(case: EvalCase, trace: TraceRecord | None, description: str) -> CaseResult:
-        """A failure of AgentScope itself, not of the agent: never counted as a pass, and
-        not judged by any check (so per-check rates measure only the agent)."""
-        return CaseResult(
-            case_id=case.id,
-            case_hash=case.case_hash(),
-            run_id=trace.run_id if trace else None,
-            trace_id=trace.trace_id if trace else None,
-            passed=False,
-            status=trace.status if trace else None,
-            harness_error=description[:300],
-            steps=trace.steps if trace else 0,
-            duration_ms=trace.duration_ms if trace else 0,
-            tags=list(case.tags),
-        )

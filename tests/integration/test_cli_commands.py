@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -248,7 +249,7 @@ def test_incomplete_purge_keeps_json_output_parseable(monkeypatch: pytest.Monkey
 
     partial = PurgeResult(deleted={"runs": 2}, size_bytes_before=10, size_bytes_after=8)
 
-    def incomplete(*_args: object) -> PurgeResult:
+    def incomplete(*_args: object, **_kwargs: object) -> PurgeResult:
         raise PurgeIncomplete("a reader kept the WAL", partial)
 
     monkeypatch.setattr(Repository, "purge", incomplete)
@@ -269,3 +270,122 @@ def test_an_unparseable_database_url_is_never_echoed(monkeypatch: pytest.MonkeyP
     assert result.exit_code == 3
     assert "unparseable database URL" in result.output
     assert "secret-pw-0123" not in result.output
+
+
+def _suite_owned_by_a_dead_process() -> str:
+    """A `running` suite whose process exited without finishing it (a crash, a kill -9)."""
+    import subprocess
+    import sys
+    import uuid
+
+    from agentscope.evaluation.checks import CHECKS
+    from agentscope.evaluation.fingerprint import environment_fingerprint
+    from agentscope.services import build_services
+    from agentscope.storage.liveness import this_host
+    from agentscope.storage.models import SuiteRunRow
+    from agentscope.storage.repository import SuiteHeader
+
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    services = build_services()
+    dataset = builtin_datasets()[0]
+    config = services.catalog.resolve("research_assistant@v2")
+    suite_id = str(uuid.uuid4())
+    services.repository.create_suite(
+        SuiteHeader(
+            suite_id=suite_id,
+            dataset_name=dataset.name,
+            dataset_version=dataset.version,
+            dataset_hash=dataset.content_hash(),
+            agent_config=config,
+            config_hash=config.config_hash(),
+            effective_config_hash=services.runner.effective_config_hash(config),
+            checks_enabled=sorted(CHECKS),
+            environment=environment_fingerprint(config),
+            started_at=datetime.now(UTC),
+        )
+    )
+    with services.repository.session() as session, session.begin():
+        row = session.get(SuiteRunRow, uuid.UUID(suite_id))
+        assert row is not None
+        row.owner = f"{this_host()}:{child.pid}"
+    services.repository.engine.dispose()
+    return suite_id
+
+
+def _suite_status(suite_id: str) -> str:
+    from agentscope.services import build_services
+
+    services = build_services()
+    try:
+        suite = services.repository.get_suite(suite_id)
+        assert suite is not None
+        return suite.status
+    finally:
+        services.repository.engine.dispose()
+
+
+def test_read_only_commands_never_mark_running_work() -> None:
+    suite_id = _suite_owned_by_a_dead_process()
+    for args in (
+        ["traces", "list"],
+        ["datasets", "list"],
+        ["agents", "list"],
+        ["db", "info"],
+        ["traces", "show", "00000000-0000-0000-0000-000000000000"],
+    ):
+        invoke(*args)
+        assert _suite_status(suite_id) == "running", args
+    upgraded = invoke("db", "upgrade")  # maintenance does recover it
+    assert upgraded.exit_code == 0, upgraded.output
+    assert "marked as interrupted" in upgraded.stdout
+    assert _suite_status(suite_id) == "error"
+
+
+def test_commands_that_start_work_recover_dead_suites() -> None:
+    suite_id = _suite_owned_by_a_dead_process()
+    assert invoke("run", "--task", "Ferry time?", "--no-save").exit_code == 0
+    assert _suite_status(suite_id) == "error"
+
+
+def test_a_database_location_that_cannot_be_written_is_explained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        monkeypatch.setenv("AGENTSCOPE_DATA_DIR", str(locked / "data"))
+        get_settings.cache_clear()
+        for args in (["datasets", "list"], ["db", "upgrade"], ["db", "info"]):
+            result = invoke(*args)
+            assert result.exit_code == 3, (args, result.output)
+            assert "internal error" not in result.output
+            assert "cannot open the database" in result.output
+            assert "AGENTSCOPE_DATA_DIR" in result.output
+    finally:
+        locked.chmod(0o700)
+
+
+def test_a_database_migrated_by_a_newer_release_is_explained() -> None:
+    from sqlalchemy import text
+
+    from agentscope.storage.db import create_db_engine
+
+    assert invoke("db", "upgrade").exit_code == 0
+    engine = create_db_engine(get_settings().effective_database_url)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE alembic_version SET version_num = '9999'"))
+    engine.dispose()
+    for args in (["datasets", "list"], ["db", "upgrade"]):
+        result = invoke(*args)
+        assert result.exit_code == 3, args
+        assert "9999 is unknown to this AgentScope" in result.output
+        assert "internal error" not in result.output
+    info = invoke("db", "info")
+    assert info.exit_code == 0
+    assert "upgrade AgentScope" in info.stdout

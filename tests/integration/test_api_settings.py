@@ -83,7 +83,11 @@ def test_purge_refuses_while_jobs_run(
     assert post(client, "/api/runs", {"agent_ref": "research_assistant", "task": "x"}).is_success
     response = post(client, "/api/settings/purge", {"confirm": "PURGE"})
     assert response.status_code == 409
-    assert "running" in response.json()["detail"]
+    body = response.json()
+    # A refusal deleted nothing: no result, and a code that tells it from a partial purge.
+    assert body["code"] == "jobs_running"
+    assert "result" not in body
+    assert "running" in body["detail"]
 
 
 def test_incomplete_purge_is_a_conflict_with_its_result(
@@ -91,7 +95,7 @@ def test_incomplete_purge_is_a_conflict_with_its_result(
 ) -> None:
     partial = PurgeResult(deleted={"runs": 2}, size_bytes_before=10, size_bytes_after=8)
 
-    def incomplete(*_args: object) -> PurgeResult:
+    def incomplete(*_args: object, **_kwargs: object) -> PurgeResult:
         raise PurgeIncomplete("a reader kept the WAL", partial)
 
     monkeypatch.setattr(services.repository, "purge", incomplete)
@@ -99,6 +103,7 @@ def test_incomplete_purge_is_a_conflict_with_its_result(
     assert response.status_code == 409
     assert response.json() == {
         "detail": "a reader kept the WAL",
+        "code": "purge_incomplete",
         "result": partial.model_dump(mode="json"),
     }
 

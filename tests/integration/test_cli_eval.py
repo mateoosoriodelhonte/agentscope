@@ -378,3 +378,150 @@ def test_compare(tmp_path: Path) -> None:
 
     unknown = invoke("compare", "--dataset", "research-assistant", "--a", "x", "--b", "y")
     assert unknown.exit_code == 2
+
+
+@pytest.fixture
+def provider_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every model call fails as if the provider were unreachable (no network involved)."""
+    from agentscope.providers.base import ProviderError
+    from agentscope.providers.fake import FakeModelProvider
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise ProviderError("connection refused: http://127.0.0.1:9/v1")
+
+    monkeypatch.setattr(FakeModelProvider, "generate", refuse)
+
+
+@pytest.mark.usefixtures("provider_down")
+def test_provider_failures_are_harness_errors_not_agent_failures(tmp_path: Path) -> None:
+    """An outage says nothing about the agent: exit 3 (with or without --check), kept out of
+    verdicts and invalid outputs, and never written into a baseline."""
+    baseline = tmp_path / "outage.baseline.json"
+    for extra in ([], ["--check"]):
+        result = invoke(
+            "eval",
+            "--dataset",
+            single_case_file(tmp_path),
+            "--json",
+            "--no-save",
+            "--write-baseline",
+            baseline,
+            *extra,
+        )
+        assert result.exit_code == 3, result.output
+        suite = document(result)["suite"]
+        assert suite["cases"][0]["harness_error"].startswith("provider_error: ")
+        assert suite["cases"][0]["checks"] == []
+        assert suite["metrics"]["harness_errors"] == 1
+        assert suite["metrics"]["invalid_outputs"] == 0
+        assert not baseline.exists()
+
+
+@pytest.mark.usefixtures("provider_down")
+def test_a_provider_failure_in_an_adhoc_run_exits_3() -> None:
+    for extra in ([], ["--expect", "1987"]):
+        result = cli.invoke(
+            app, ["run", "--task", "When did the Meridian Footbridge open?", "--json", *extra]
+        )
+        assert result.exit_code == 3, result.output
+        payload = json.loads(result.stdout)
+        assert payload["error_code"] == "provider_error"
+        assert payload["exit_code"] == 3
+        if extra:
+            assert payload["evaluation"]["harness_error"].startswith("provider_error")
+
+
+def test_a_baseline_alone_gates_on_new_regressions(tmp_path: Path) -> None:
+    baseline = tmp_path / "v2.baseline.json"
+    directory = suite_dir(tmp_path)
+    written = invoke(
+        "eval",
+        "--dataset",
+        directory,
+        "-a",
+        "research_assistant@v2",
+        "--no-save",
+        "--write-baseline",
+        baseline,
+    )
+    assert written.exit_code == 0, written.output
+    result = invoke(
+        "eval",
+        "--dataset",
+        directory,
+        "-a",
+        "research_assistant@v1",
+        "--no-save",
+        "--json",
+        "--baseline",
+        baseline,
+    )
+    assert result.exit_code == 1, result.output
+    gate = document(result)["gate"]
+    assert gate["baseline_used"] is True
+    regressions = next(r for r in gate["rules"] if r["name"] == "max_new_regressions")
+    assert regressions["actual"] > 0
+    assert regressions["detail"].startswith("regressed: ")
+
+
+@pytest.mark.parametrize("option", ["--write-baseline", "--output"])
+def test_unwritable_destinations_are_refused_before_running(
+    tmp_path: Path, option: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentscope.services import Services
+
+    async def never(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the suite must not run")
+
+    monkeypatch.setattr(Services, "run_suite", never)
+    for target in (tmp_path / "nodir" / "out.json", tmp_path):
+        result = invoke("eval", "--dataset", single_case_file(tmp_path), option, target, "--json")
+        assert result.exit_code == 2, result.output
+        assert option in result.output
+        assert result.stdout == ""
+
+
+def test_a_failed_write_after_the_run_keeps_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentscope.cli import evaluate
+
+    def vanished(path: Path, _payload: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(evaluate, "write_json", vanished)
+    output = tmp_path / "out.json"
+    result = invoke("eval", "--dataset", single_case_file(tmp_path), "-o", output, "--json")
+    assert result.exit_code == 3
+    assert document(result)["suite"]["metrics"]["passed"] == 1  # printed, not lost
+    assert "could not write" in result.stderr
+
+
+def test_help_shows_how_to_pin_a_dataset_version() -> None:
+    for args in (["eval", "--help"], ["compare", "--help"], ["datasets", "export", "--help"]):
+        result = cli.invoke(app, args, terminal_width=200)
+        assert result.exit_code == 0
+        assert "NAME@VERSION" in result.output, args
+
+
+def test_a_comparison_with_one_simulated_side_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    from agentscope.cli.evaluate import _render_comparison
+    from agentscope.domain.experiments import Comparison
+
+    result = invoke(
+        "compare",
+        "--dataset",
+        "research-assistant",
+        "--a",
+        "research_assistant@v1",
+        "--b",
+        "research_assistant@v2",
+        "--json",
+    )
+    capsys.readouterr()
+    # As if B had run on a real model: the comparison is not deterministic, A still simulated.
+    comparison = Comparison.model_validate(json.loads(result.stdout)["comparison"])
+    _render_comparison(comparison.model_copy(update={"deterministic": False}), ["A"])
+    shown = capsys.readouterr().out
+    assert "A: Simulated model" in shown
+    assert "flips may be noise" in shown

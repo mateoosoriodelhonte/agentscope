@@ -97,7 +97,10 @@ def datasets_import(
 
 @datasets_app.command("export")
 def datasets_export(
-    ref: Annotated[str, typer.Argument(help="NAME[@VERSION] of a stored dataset")],
+    # No square brackets: Rich would read "[@VERSION]" as markup and drop it.
+    ref: Annotated[
+        str, typer.Argument(help="A stored dataset: NAME (latest version) or NAME@VERSION")
+    ],
     output: Annotated[
         Path,
         typer.Option("--output", "-o", help="Directory to write <name>@<version>.dataset.json"),
@@ -145,7 +148,7 @@ def demo_seed(as_json: JsonOption = False) -> None:
     """Seed the demo story (idempotent: seeding again adds nothing)."""
     from agentscope.demo import seed_demo
 
-    services = open_services()
+    services = open_services(recover=True)
     summary = asyncio.run(seed_demo(services))
     if as_json:
         emit_json(summary.model_dump(mode="json"))

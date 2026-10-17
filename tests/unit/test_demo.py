@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from sqlalchemy import delete, update
+
 from agentscope.demo import DEMO_RUNS, DEMO_STEPS, seed_demo
 from agentscope.services import Services
+from agentscope.storage.models import DatasetRow, ExperimentRow
 
 
 def counts(services: Services) -> tuple[int, int, int]:
@@ -82,3 +85,34 @@ async def test_an_errored_demo_suite_is_run_again(services: Services) -> None:
     second = await seed_demo(services)
     assert second.created["suites"] == 1
     assert second.suites["research_assistant@v2"] != errored
+
+
+async def test_seeded_suites_evaluate_stored_datasets(services: Services) -> None:
+    """Every seeded suite links to a dataset the API can show, even when the packaged
+    datasets went missing from storage (an earlier purge of every dataset)."""
+    with services.repository.session() as session, session.begin():
+        session.execute(delete(DatasetRow))
+    summary = await seed_demo(services)
+    for suite_id in summary.suites.values():
+        suite = services.repository.get_suite(suite_id)
+        assert suite is not None
+        stored = services.repository.get_dataset(suite.dataset_name, suite.dataset_version)
+        assert stored is not None
+        assert stored.summary.content_hash == suite.dataset_hash
+
+
+async def test_experiments_already_compared_under_another_name_are_reused(
+    services: Services,
+) -> None:
+    first = await seed_demo(services)
+    v1, v2 = first.suites["research_assistant@v1"], first.suites["research_assistant@v2"]
+    with services.repository.session() as session, session.begin():
+        session.execute(
+            delete(ExperimentRow).where(ExperimentRow.name != "Demo: research v1 vs v2")
+        )
+        session.execute(update(ExperimentRow).values(name="mine"))
+    second = await seed_demo(services)
+    assert second.created["experiments"] == 1  # only v2 vs v3 was missing
+    stored = services.repository.find_experiment(v1, v2)
+    assert stored is not None
+    assert second.experiments["Demo: research v1 vs v2"] == stored.experiment_id
