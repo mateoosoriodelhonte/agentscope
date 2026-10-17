@@ -366,7 +366,7 @@ to delete it: [PRIVACY.md](PRIVACY.md).
 
 ## Verification results for release 1.0.0 (2026-10-16)
 
-Run on the code of release 1.0.0 (commit `bb9f801`; this documentation changes no code) on
+Run on the code of release 1.0.0 (commit `02e5c0b`; later commits change only documentation) on
 macOS 26.6.2 (arm64), Python 3.12.3, uv 0.12.21, ruff 0.16.10, mypy 2.4.0, Node.js 26.0.0,
 npm 11.12.1 and Playwright 1.64.0. Every command that writes data used a fresh
 `AGENTSCOPE_DATA_DIR` under the OS temporary directory. Every number below is copied from the
@@ -377,7 +377,8 @@ command's output.
 | `uv run ruff check .` | All checks passed |
 | `uv run ruff format --check .` | 191 files already formatted (Python sources and, with this ruff version, Markdown files) |
 | `uv run mypy` | Success: no issues found in 108 source files |
-| `uv run pytest -q` | 1509 passed, 33 skipped (32 need `AGENTSCOPE_TEST_POSTGRES_URL`, 1 needs `AGENTSCOPE_TEST_OLLAMA_MODEL`) |
+| `uv run pytest -q` | 1510 passed, 33 skipped (32 need `AGENTSCOPE_TEST_POSTGRES_URL`, 1 needs `AGENTSCOPE_TEST_OLLAMA_MODEL`) |
+| `AGENTSCOPE_TEST_POSTGRES_URL=... uv run pytest -q` (local PostgreSQL 14) | 1542 passed, 1 skipped (the live Ollama test) |
 | `cd frontend && npm run lint` / `npm run type-check` | pass (ESLint with `--max-warnings=0`; `vue-tsc --build`) |
 | `cd frontend && npx vitest run` | 704 tests in 30 files passed |
 | `cd frontend && npx playwright install chromium && CI=1 TMPDIR=/tmp npm run test:e2e` | 35 passed (chromium) |
