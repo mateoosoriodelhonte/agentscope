@@ -339,6 +339,21 @@ async def test_run_deadline_during_a_model_call_names_the_plan_node(
     assert [i.outcome for i in trace.tool_invocations] == [ToolOutcome.OK]
 
 
+async def test_failed_spans_carry_an_exportable_error_type(registry: ToolRegistry) -> None:
+    missing = {
+        "type": "tool_call",
+        "tool": "retrieve_document",
+        "arguments": {"doc_id": "doc-acme-takeover-plan"},
+        "rationale": "",
+    }
+    trace = await run(registry, [missing, "PROVIDER_DOWN"])
+    by_kind = {s.kind.value: s for s in trace.spans if s.status.value == "error"}
+    assert by_kind["tool"].attributes[sc.ERROR_TYPE] == "error"
+    assert "doc-acme-takeover-plan" in (by_kind["tool"].status_message or "")  # local only
+    assert by_kind["llm"].attributes[sc.ERROR_TYPE] == "provider_error"
+    assert by_kind["run"].attributes[sc.ERROR_TYPE] == "provider_error"
+
+
 async def test_provider_failure(registry: ToolRegistry) -> None:
     trace = await run(registry, ["PROVIDER_DOWN"])
     assert trace.status is RunStatus.ERROR

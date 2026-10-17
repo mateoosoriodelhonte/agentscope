@@ -163,7 +163,7 @@ def build_graph(ctx: RunContext) -> Any:
                 failure = ("provider_error", f"provider error: {exc}"[:500])
             if response is None:
                 assert failure is not None
-                llm.fail(failure[1])
+                llm.fail(failure[1], error_type=failure[0])
                 ctx.usage.record(None)
                 return {
                     "step": step + 1,
@@ -395,7 +395,11 @@ def build_graph(ctx: RunContext) -> Any:
                     if result.outcome is ToolOutcome.OK:
                         tool_span.ok()
                     else:
-                        tool_span.fail(result.error or result.outcome.value)
+                        # Tool errors can echo arguments ("no project record with id ..."),
+                        # so the exportable error type is the outcome alone.
+                        tool_span.fail(
+                            result.error or result.outcome.value, error_type=result.outcome.value
+                        )
                 record(attempt, result, tool_span.span_id)
                 if result.outcome is ToolOutcome.OK or result.outcome not in retry.retry_on:
                     break

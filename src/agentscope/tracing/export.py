@@ -9,11 +9,11 @@ Nothing is exported unless AGENTSCOPE_OTLP_ENDPOINT is set and the egress policy
   `redaction.settings_secrets(settings)` so configured secrets, AGENTSCOPE_OTLP_HEADERS
   values included, are redacted wherever they appear.
 - By default `ContentFilteringExporter` also drops payload attributes (semconv.
-  PAYLOAD_ATTRIBUTES: task, prompts, tool arguments and results), so only span structure
-  and GenAI metadata are exported. AGENTSCOPE_OTLP_EXPORT_CONTENT=true opts in to payloads.
-  Span names and status descriptions are structure and are always exported: error types,
-  synthetic fault messages and short tool or provider error summaries (at most 500
-  characters, redacted).
+  PAYLOAD_ATTRIBUTES: task, prompts, tool arguments and results) and reduces each failed
+  span's status description to its `error.type` (an outcome, error code or exception type),
+  because tool and provider error messages can echo arguments taken from the task. So only
+  span structure and GenAI metadata are exported. AGENTSCOPE_OTLP_EXPORT_CONTENT=true opts
+  in to payloads and full status messages (at most 500 characters, redacted).
 - OTEL_* variables are removed before anything is built, because the exporter library
   reads them during construction and merges OTEL_EXPORTER_OTLP_HEADERS into explicitly
   passed headers. The HTTP session ignores proxy, CA-bundle and netrc settings from the
@@ -31,6 +31,7 @@ from collections.abc import Sequence
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+from opentelemetry.trace import Status, StatusCode
 from opentelemetry.util.types import Attributes, AttributeValue
 
 from agentscope import _bootstrap
@@ -49,11 +50,21 @@ def _structural(attributes: Attributes) -> dict[str, AttributeValue]:
     return {k: v for k, v in (attributes or {}).items() if k not in semconv.PAYLOAD_ATTRIBUTES}
 
 
+def _structural_status(span: ReadableSpan) -> Status:
+    """A failed span's status with its description reduced to the error type: messages can
+    echo task data (a tool error naming the id it was asked for)."""
+    if span.status.status_code is not StatusCode.ERROR:
+        return span.status
+    error_type = (span.attributes or {}).get(semconv.ERROR_TYPE)
+    return Status(StatusCode.ERROR, str(error_type) if error_type else "error")
+
+
 def without_payloads(span: ReadableSpan) -> ReadableSpan:
-    """A copy of `span` without payload attributes on the span or on its events.
+    """A copy of `span` without payload attributes on the span or on its events, and with
+    status descriptions reduced to the error type.
 
     ReadableSpan is immutable and shared by every span processor, so it is rebuilt rather
-    than edited; local persistence keeps the payloads.
+    than edited; local persistence keeps the payloads and the full status messages.
     """
     return ReadableSpan(
         name=span.name,
@@ -64,7 +75,7 @@ def without_payloads(span: ReadableSpan) -> ReadableSpan:
         events=[Event(e.name, _structural(e.attributes), e.timestamp) for e in span.events],
         links=span.links,
         kind=span.kind,
-        status=span.status,
+        status=_structural_status(span),
         start_time=span.start_time,
         end_time=span.end_time,
         instrumentation_scope=span.instrumentation_scope,

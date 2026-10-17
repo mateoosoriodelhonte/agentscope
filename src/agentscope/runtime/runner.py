@@ -255,7 +255,7 @@ class AgentRunner:
             if status is RunStatus.COMPLETED:
                 run_span.ok()
             else:
-                run_span.fail(error or status.value)
+                run_span.fail(error or status.value, error_type=error_code or status.value)
 
         spans = recorder.finish()
         ended = datetime.now(UTC)

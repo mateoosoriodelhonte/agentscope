@@ -20,6 +20,10 @@ GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
 GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
+# General OpenTelemetry convention: the class of error a failed operation ended with (an
+# outcome, error code or exception type), never a message. It stands in for the status
+# description when payloads are not exported.
+ERROR_TYPE = "error.type"
 
 # --- AgentScope ----------------------------------------------------------------------
 AS_SPAN_KIND = "agentscope.span.kind"
