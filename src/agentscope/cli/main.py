@@ -46,6 +46,8 @@ app.command("compare")(compare_command)
 
 # Remote mode refuses shorter API tokens.
 MIN_API_TOKEN_CHARS = 16
+# Container mode listens on every interface of the container's own network namespace.
+CONTAINER_BIND = "0.0.0.0"  # noqa: S104 - container mode only; the Host check stays loopback
 
 
 def _parse_fault(raw: str) -> FaultSpec:
@@ -223,6 +225,16 @@ def serve(
         list[str] | None,
         typer.Option("--allowed-host", help="Extra Host header value to accept; repeatable"),
     ] = None,
+    container: Annotated[
+        bool,
+        typer.Option(
+            "--container",
+            envvar="AGENTSCOPE_CONTAINER",
+            help="Container mode: bind 0.0.0.0 inside a container without an API token. Only "
+            "loopback Host headers are accepted, so publish the port on 127.0.0.1 only "
+            "(e.g. -p 127.0.0.1:8765:8765)",
+        ),
+    ] = False,
 ) -> None:
     """Serve the API and dashboard on localhost."""
     import uvicorn
@@ -232,10 +244,18 @@ def serve(
     from agentscope.services import egress_destinations
 
     settings = get_settings()
-    bind = host or settings.host
+    bind = host or (CONTAINER_BIND if container else settings.host)
     bind_port = port or settings.port
     remote = allow_remote or settings.allow_remote
-    if bind not in LOOPBACK_HOSTS and not remote:
+    if container and not remote and allowed_host:
+        # Without a token, the loopback Host check is what keeps a container reachable only
+        # through a port published on the host's loopback interface.
+        raise fail(
+            "container mode accepts only loopback Host headers; to accept other names, "
+            "use --allow-remote with AGENTSCOPE_API_TOKEN",
+            Exit.INVALID,
+        )
+    if bind not in LOOPBACK_HOSTS and not remote and not container:
         raise fail(
             f"refusing to bind {bind}: pass --allow-remote to expose AgentScope "
             "beyond this machine",
@@ -269,6 +289,17 @@ def serve(
     )
     for destination in destinations:
         err.print(safe(f"  {destination}", "dim"), soft_wrap=True)
+    if container and not remote:
+        err.print(
+            safe(
+                f"container mode: listening on {bind}:{bind_port} inside the container without "
+                "an API token. Publish this port on 127.0.0.1 only (e.g. -p "
+                f"127.0.0.1:{bind_port}:{bind_port}), never on 0.0.0.0 or a LAN address; only "
+                "loopback Host headers are accepted.",
+                "yellow",
+            ),
+            soft_wrap=True,
+        )
     if remote:
         err.print(safe("remote mode: every request requires the API token", "yellow"))
         if not allowed_host:
