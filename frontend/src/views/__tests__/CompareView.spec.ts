@@ -1,6 +1,6 @@
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { agentsResponse, comparison, datasetSummary, experimentItem, job, suiteItem, suiteResult } from '@/__tests__/builders'
+import { agentsResponse, comparison, datasetSummary, experimentItem, job, runSummary, suiteItem, suiteResult } from '@/__tests__/builders'
 import { loadFixture } from '@/__tests__/fixtures'
 import { calls, json, mockFetch, never, pageOf, paged, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
@@ -279,9 +279,25 @@ describe('CompareRunsView', () => {
     expect(page.findAll('.trace-diff tbody tr')).toHaveLength(4)
   })
 
+  it('suggests recent runs by their full ids', async () => {
+    const { page, fetchMock } = await open('/compare/runs', {
+      'GET /api/runs': { items: [runSummary({ run_id: '6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e' })], total: 1 },
+    })
+    expect(calls(fetchMock, 'GET', '/api/runs')[0]!.url.search).toBe('?limit=50')
+    const list = page.find('datalist')
+    expect(list.findAll('option').map((o) => o.attributes('value'))).toEqual(['6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e'])
+    for (const input of page.findAll('form.pick input')) expect(input.attributes('list')).toBe(list.attributes('id'))
+  })
+
+  it('explains that a shortened run id is not enough', async () => {
+    const { page } = await open('/compare/runs?a=6e2fdf5d&b=7f3a0e6e')
+    expect(page.find('[role="alert"]').text()).toContain('Could not load the two runs')
+    expect(page.find('.short-ids').text()).toContain('full run id')
+  })
+
   it('asks for two run ids', async () => {
     const { page, router } = await open('/compare/runs')
-    expect(page.text()).toContain('Enter two run ids')
+    expect(page.text()).toContain('Enter two full run ids')
     const inputs = page.findAll('input')
     await inputs[0]!.setValue('r1')
     await inputs[1]!.setValue('r2')
