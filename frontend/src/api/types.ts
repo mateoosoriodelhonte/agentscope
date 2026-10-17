@@ -52,7 +52,8 @@ export interface FaultSpec {
   payload: string | null
 }
 
-export type ModelFaultKind = 'invalid_json' | 'empty' | 'schema_violation' | 'unknown_tool'
+export const MODEL_FAULT_KINDS = ['invalid_json', 'empty', 'schema_violation', 'unknown_tool'] as const
+export type ModelFaultKind = (typeof MODEL_FAULT_KINDS)[number]
 
 export interface ModelFaultSpec {
   kind: ModelFaultKind
@@ -122,7 +123,8 @@ export interface AgentConfig {
 
 // --- domain/datasets.py ------------------------------------------------------------------
 
-export type MatchMode = 'exact' | 'normalized' | 'contains' | 'numeric' | 'one_of'
+export const MATCH_MODES = ['exact', 'normalized', 'contains', 'numeric', 'one_of'] as const
+export type MatchMode = (typeof MATCH_MODES)[number]
 
 export interface ExpectedAnswer {
   field: string
@@ -363,17 +365,20 @@ export interface RunSummary {
 
 // --- domain/evaluation.py ----------------------------------------------------------------
 
-export type CheckName =
-  | 'answer_correctness'
-  | 'schema_validity'
-  | 'required_tool_calls'
-  | 'forbidden_tool_calls'
-  | 'tool_order'
-  | 'tool_arguments'
-  | 'task_completion'
-  | 'timeout_behavior'
-  | 'error_recovery'
-  | 'policy_compliance'
+/** In the order of the CheckName enum. */
+export const CHECK_NAMES = [
+  'answer_correctness',
+  'schema_validity',
+  'required_tool_calls',
+  'forbidden_tool_calls',
+  'tool_order',
+  'tool_arguments',
+  'task_completion',
+  'timeout_behavior',
+  'error_recovery',
+  'policy_compliance',
+] as const
+export type CheckName = (typeof CHECK_NAMES)[number]
 
 export type CheckStatus = 'passed' | 'failed' | 'not_applicable'
 
@@ -533,6 +538,8 @@ export interface SuiteResult {
   cases: CaseResult[]
   metrics: SuiteMetrics
   gate: GateResult | null
+  // Why the suite errored (cancelled, interrupted); null otherwise.
+  error?: string | null
 }
 
 // --- domain/experiments.py ---------------------------------------------------------------
@@ -876,7 +883,8 @@ export interface SettingsView {
   privacy: string[]
 }
 
-export type PurgeScope = 'all' | 'runs' | 'evaluations' | 'experiments' | 'datasets'
+export const PURGE_SCOPES = ['all', 'runs', 'evaluations', 'experiments', 'datasets'] as const
+export type PurgeScope = (typeof PURGE_SCOPES)[number]
 
 export interface PurgeRequest {
   confirm: 'PURGE'

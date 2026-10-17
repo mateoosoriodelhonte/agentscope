@@ -11,7 +11,24 @@ const css = readFileSync(resolve(__dirname, '../tokens.css'), 'utf8')
 
 const SURFACES = ['surface-0', 'surface-1', 'surface-2', 'hover', 'selected']
 const TEXT = ['text', 'text-muted', 'text-faint', 'accent', 'ok', 'fail', 'warn', 'na', 'neutral', 'injected', 'redacted']
-const GLYPHS = ['ok', 'fail', 'warn', 'na', 'neutral', 'injected', 'kind-node', 'kind-llm', 'kind-tool', 'kind-guardrail', 'focus', 'bar']
+const GLYPHS = [
+  'ok',
+  'fail',
+  'warn',
+  'na',
+  'neutral',
+  'injected',
+  'kind-node',
+  'kind-llm',
+  'kind-tool',
+  'kind-guardrail',
+  'focus',
+  'bar',
+  'series-1',
+  'series-2',
+  'series-3',
+  'series-4',
+]
 // Badges and chips put status text on the matching soft background.
 const PAIRS: [string, string][] = [
   ...['accent', 'ok', 'fail', 'warn', 'na', 'neutral', 'injected', 'redacted'].map(
@@ -21,6 +38,8 @@ const PAIRS: [string, string][] = [
     (tone): [string, string] => ['text', `${tone}-soft`],
   ),
   ['accent-contrast', 'accent'],
+  // Destructive buttons put surface-coloured text on the failure colour.
+  ['surface-1', 'fail'],
 ]
 // Duration bars sit on their own track.
 const GLYPH_PAIRS: [string, string][] = [['bar', 'bar-track']]

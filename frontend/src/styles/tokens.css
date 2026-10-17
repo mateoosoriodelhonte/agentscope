@@ -64,6 +64,12 @@
   --bar: #76818f;
   --bar-track: #eef0f3;
 
+  /* chart series: identity only (never status), always paired with a marker shape and a legend */
+  --series-1: #2a6fd0;
+  --series-2: #c4501c;
+  --series-3: #148060;
+  --series-4: #9a4fb8;
+
   --overlay: #0d10158c;
   --shadow: #0d101540;
 
@@ -110,6 +116,11 @@
 
   --bar: #7a8594;
   --bar-track: #1f262f;
+
+  --series-1: #4a8ee6;
+  --series-2: #d8682f;
+  --series-3: #25a078;
+  --series-4: #9a7de0;
 
   --overlay: #000000a6;
   --shadow: #00000080;
