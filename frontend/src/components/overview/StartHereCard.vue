@@ -21,6 +21,10 @@ const counterpart = computed(() => {
   )
   return candidates.find((s) => s.gate_passed === true) ?? candidates[0] ?? null
 })
+const failingLabel = computed(() => {
+  const f = failing.value
+  return f ? `Open ${f.agent_ref} on ${f.dataset_name}@${f.dataset_version}` : ''
+})
 const compareLink = computed(() =>
   failing.value && counterpart.value
     ? { path: '/compare', query: { a: failing.value.suite_id, b: counterpart.value.suite_id } }
@@ -38,16 +42,13 @@ const compareLink = computed(() =>
     <ol class="steps">
       <li>
         <strong>A gate fails.</strong>
-        <RouterLink v-if="failing" :to="`/evaluations/${encodeURIComponent(failing.suite_id)}`">
-          Open {{ failing.agent_ref }} on {{ failing.dataset_name }}@{{ failing.dataset_version }}
-        </RouterLink>
+        <!-- Link text on one line: surrounding whitespace would be underlined too. -->
+        <RouterLink v-if="failing" :to="`/evaluations/${encodeURIComponent(failing.suite_id)}`">{{ failingLabel }}</RouterLink>
         <span v-else class="muted">Evaluate a dataset with gate thresholds, or load the demo.</span>
       </li>
       <li>
         <strong>Compare it with another version.</strong>
-        <RouterLink :to="compareLink">
-          {{ counterpart ? `Compare with ${counterpart.agent_ref}` : 'Open Compare' }}
-        </RouterLink>
+        <RouterLink :to="compareLink">{{ counterpart ? `Compare with ${counterpart.agent_ref}` : 'Open Compare' }}</RouterLink>
       </li>
       <li><strong>Open the regressed case.</strong> <span class="muted">The flip list puts regressions first.</span></li>
       <li>
@@ -99,6 +100,11 @@ h2 {
 .steps strong {
   font-weight: 600;
   margin-right: 4px;
+}
+/* Links inside the step sentences need more than colour to stand out (WCAG 1.4.1). */
+.steps a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .actions {
   display: flex;

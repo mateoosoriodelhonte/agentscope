@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import type { ResilienceRow } from '@/api/types'
 import { ratio } from '@/composables/format'
 
@@ -9,6 +9,7 @@ import { ratio } from '@/composables/format'
  * agent versions, and the footer sums each column.
  */
 const props = defineProps<{ rows: ResilienceRow[] }>()
+const captionId = useId()
 
 const agents = computed(() => [...new Set(props.rows.map((r) => r.agent_ref))].sort())
 const faults = computed(() => [...new Set(props.rows.map((r) => r.fault_kind))].sort())
@@ -32,9 +33,11 @@ const totals = computed(() =>
 </script>
 
 <template>
-  <div class="table-wrap panel">
+  <!-- Wider than the page with several agent versions: a focusable, named region, so the
+       horizontal scroll is reachable from the keyboard too. -->
+  <div class="table-wrap panel" role="region" tabindex="0" :aria-labelledby="captionId">
     <table class="data-table resilience">
-      <caption class="visually-hidden">Outcomes by fault kind and agent version</caption>
+      <caption :id="captionId" class="visually-hidden">Outcomes by fault kind and agent version</caption>
       <thead>
         <tr>
           <th scope="col" rowspan="2">Fault kind</th>

@@ -1,0 +1,75 @@
+# AgentScope with PostgreSQL.
+#
+#   cp .env.example .env     # then set POSTGRES_PASSWORD to a long random value, e.g.
+#                            # python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+#   docker compose up --build
+#   open http://127.0.0.1:8765
+#
+# Exposure: only the dashboard/API port is published, and only on the host's loopback
+# interface (127.0.0.1). Never change it to "8765:8765" or "0.0.0.0:8765:8765": the app runs
+# in container mode, without an API token, and relies on that (its loopback Host check stops
+# browsers, not other clients, which can send any Host header). PostgreSQL is never published;
+# it sits on an internal network that only the app can reach and that has no route out.
+#
+# Local Ollama models: add docker-compose.ollama.yml (see that file).
+
+name: agentscope
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentscope
+      POSTGRES_DB: agentscope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18/docker.
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentscope -d agentscope"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    build: .
+    image: agentscope:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AGENTSCOPE_DATABASE_URL: postgresql+psycopg://agentscope:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agentscope
+      # There is no Ollama in this file; docker-compose.ollama.yml turns it on.
+      AGENTSCOPE_ENABLE_OLLAMA: "false"
+    ports:
+      - "127.0.0.1:8765:8765"
+    networks:
+      - backend
+      - edge
+    volumes:
+      - app-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  # Database traffic only: no published ports and no route to the internet.
+  backend:
+    internal: true
+  # Carries the app's published loopback port.
+  edge: {}
+
+volumes:
+  postgres-data: {}
+  app-data: {}
