@@ -1,0 +1,43 @@
+# Override: a local Ollama server for real-model runs.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml up --build
+#
+# No model is downloaded automatically. Pulling one is a manual, explicit step (several GB,
+# from registry.ollama.ai), run once; the model stays in the ollama-models volume:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml exec ollama ollama pull <model>
+#
+# then select provider "ollama" with that model name in an agent configuration.
+#
+# Exposure: Ollama is never published to the host. The app reaches it as http://ollama:11434
+# over the internal backend network, and AgentScope's egress policy allows exactly that host
+# (AGENTSCOPE_ALLOWED_EGRESS_HOSTS). Ollama's only other network, "models", exists so that
+# `ollama pull` can reach the model registry.
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.5
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - backend
+      - models
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      AGENTSCOPE_ENABLE_OLLAMA: "true"
+      AGENTSCOPE_OLLAMA_URL: http://ollama:11434
+      AGENTSCOPE_ALLOWED_EGRESS_HOSTS: '["ollama"]'
+
+networks:
+  # Outbound only, for `ollama pull`; nothing is published.
+  models: {}
+
+volumes:
+  ollama-models: {}

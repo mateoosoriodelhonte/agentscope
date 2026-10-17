@@ -1,0 +1,54 @@
+# The build context needs only: pyproject.toml, uv.lock, README.md, LICENSE, src/ and
+# frontend/ (sources). Everything below is local state, build output or secrets.
+
+# VCS and editors
+.git
+.github
+.claude
+.idea
+.vscode
+**/.DS_Store
+
+# Local data and configuration: never bake a database or a secret into an image
+.agentscope
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+.env
+.env.*
+!.env.example
+
+# Python
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+.coverage
+coverage.xml
+htmlcov
+build
+dist
+**/*.egg-info
+src/agentscope/web/dist
+
+# Node and test output
+**/node_modules
+frontend/dist
+frontend/coverage
+frontend/test-results
+frontend/playwright-report
+frontend/blob-report
+test-results
+playwright-report
+blob-report
+
+# Not needed in the image
+tests
+docs
+Dockerfile
+docker-compose*.yml
