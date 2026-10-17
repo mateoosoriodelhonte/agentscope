@@ -1,17 +1,16 @@
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { failureAnalysis, suiteItem } from '@/__tests__/builders'
-import { calls, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
+import { calls, mockFetch, never, paged, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import FailuresView from '../FailuresView.vue'
 
 let wrapper: VueWrapper | null = null
 
-async function open(analysis: Reply, query = '') {
-  const fetchMock = mockFetch({
-    'GET /api/failures': analysis,
-    'GET /api/evaluations': [suiteItem(), suiteItem({ suite_id: 'suite-v2', agent_ref: 'research_assistant@v2' })],
-  })
+const SUITES = [suiteItem(), suiteItem({ suite_id: 'suite-v2', agent_ref: 'research_assistant@v2' })]
+
+async function open(analysis: Reply, query = '', evaluations: Reply = SUITES) {
+  const fetchMock = mockFetch({ 'GET /api/failures': analysis, 'GET /api/evaluations': evaluations })
   const mounted = await mountAt([{ path: '/failures', component: FailuresView }, elsewhere], `/failures${query}`)
   wrapper = mounted.page
   return { ...mounted, fetchMock }
@@ -27,7 +26,7 @@ describe('FailuresView', () => {
   it('tabulates recovered / degraded / failed per fault kind and agent version, with totals', async () => {
     const { page } = await open(failureAnalysis())
     const table = page.find('.resilience')
-    expect(table.findAll('thead th.agent').map((th) => th.text())).toEqual(['research_assistant@v1', 'research_assistant@v2'])
+    expect(table.findAll('thead th.agent .ref').map((th) => th.text())).toEqual(['research_assistant@v1', 'research_assistant@v2'])
     const rows = table.findAll('tbody tr')
     expect(rows.map((r) => r.find('th').text())).toEqual(['error', 'timeout'])
     expect(rows[0]!.text()).toContain('not tested')
@@ -61,10 +60,43 @@ describe('FailuresView', () => {
   it('sends the filters, filters by agent here too, and says when the server ignored them', async () => {
     const { page, fetchMock } = await open(failureAnalysis(), '?agent=research_assistant@v2&suite=suite-v2')
     expect(calls(fetchMock, 'GET', '/api/failures')[0]!.url.search).toBe('?agent_ref=research_assistant%40v2&suite_id=suite-v2')
-    expect(page.findAll('.resilience thead th.agent').map((th) => th.text())).toEqual(['research_assistant@v2'])
+    expect(page.findAll('.resilience thead th.agent .ref').map((th) => th.text())).toEqual(['research_assistant@v2'])
     expect(page.findAll('.injection .card')).toHaveLength(1)
     expect(page.text()).toContain('The server did not apply the evaluation filter')
     expect(page.text()).toContain('the failure buckets still cover every agent version')
+  })
+
+  it('labels every count that comes from the simulated model', async () => {
+    const { page } = await open(failureAnalysis())
+    // Both evaluations considered used the fake provider: the whole page says so, buckets included.
+    expect(page.find('.screen-head').text()).toContain('Simulated model: demonstrates harness mechanics, not model behaviour')
+    expect(page.findAll('.resilience thead th.agent').map((th) => th.text())).toEqual([
+      'research_assistant@v1simulated',
+      'research_assistant@v2simulated',
+    ])
+  })
+
+  it('labels only the simulated agent versions when real and simulated evaluations are mixed', async () => {
+    const mixed = [suiteItem(), suiteItem({ suite_id: 'suite-v2', agent_ref: 'research_assistant@v2', deterministic: false, provider: 'ollama' })]
+    const { page } = await open(failureAnalysis(), '', mixed)
+    expect(page.find('.screen-head').text()).not.toContain('Simulated model')
+    const heads = page.findAll('.resilience thead th.agent')
+    expect(heads[0]!.find('.simulated').exists()).toBe(true)
+    expect(heads[1]!.find('.simulated').exists()).toBe(false)
+    expect(page.find('[aria-labelledby="buckets-title"]').text()).toContain(
+      'Includes evaluations of a simulated model (research_assistant@v1)',
+    )
+  })
+
+  it('lists the evaluations to filter by from the server, for the chosen agent version', async () => {
+    const older = suiteItem({ suite_id: 'suite-old', label: 'Old v1 suite' })
+    const { page, fetchMock } = await open(failureAnalysis(), '?agent=research_assistant@v1&suite=suite-gone', (url: URL) =>
+      url.searchParams.get('agent_ref') === 'research_assistant@v1' ? paged([older], 240) : paged(SUITES),
+    )
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe('?agent_ref=research_assistant%40v1&limit=200')
+    const options = page.findAll('form.filters select')[1]!.findAll('option')
+    expect(options.map((o) => o.attributes('value'))).toEqual(['', 'suite-gone', 'suite-old'])
+    expect(page.find('form.filters').text()).toContain('Listing the newest 1 of 240 evaluations')
   })
 
   it('reloads when a filter changes', async () => {

@@ -122,6 +122,43 @@ describe('dataset documents', () => {
   })
 })
 
+describe('paged lists', () => {
+  const page = (body: unknown, total?: string) =>
+    new Response(JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...(total === undefined ? {} : { 'X-Total-Count': total }) },
+    })
+
+  it('sends evaluation filters and paging, and reads the total from X-Total-Count', async () => {
+    fetchMock.mockResolvedValueOnce(page([{ suite_id: 's51' }], '55'))
+    const result = await api.listEvaluations({
+      agent_ref: 'research_assistant@v2',
+      dataset: 'research-assistant',
+      status: 'completed',
+      limit: 50,
+      offset: 50,
+    })
+    expect(lastCall().url).toBe(
+      '/api/evaluations?agent_ref=research_assistant%40v2&dataset=research-assistant&status=completed&limit=50&offset=50',
+    )
+    expect(result).toEqual({ items: [{ suite_id: 's51' }], total: 55 })
+  })
+
+  it('pages experiments', async () => {
+    fetchMock.mockResolvedValueOnce(page([{ experiment_id: 'e1' }], '3'))
+    expect(await api.listExperiments({ limit: 20, offset: 0 })).toEqual({ items: [{ experiment_id: 'e1' }], total: 3 })
+    expect(lastCall().url).toBe('/api/experiments?limit=20&offset=0')
+  })
+
+  it('accepts an {items, total} body, and says when the total is unknown', async () => {
+    fetchMock.mockResolvedValueOnce(page({ items: [{ suite_id: 's1' }], total: 7 }))
+    expect(await api.listEvaluations()).toEqual({ items: [{ suite_id: 's1' }], total: 7 })
+    fetchMock.mockResolvedValueOnce(page([{ suite_id: 's1' }]))
+    expect(await api.listEvaluations()).toEqual({ items: [{ suite_id: 's1' }], total: null })
+    fetchMock.mockResolvedValueOnce(page([], 'many'))
+    expect(await api.listExperiments()).toEqual({ items: [], total: null })
+  })
+})
+
 describe('errors', () => {
   it('raises ApiError with the server detail', async () => {
     fetchMock.mockResolvedValueOnce(json({ detail: 'run not found' }, 404))

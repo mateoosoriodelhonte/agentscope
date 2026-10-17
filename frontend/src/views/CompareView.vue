@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue'
 import { RouterLink } from 'vue-router'
-import { api } from '@/api/client'
+import { api, MAX_PAGE } from '@/api/client'
 import { describeError } from '@/api/errors'
-import type { SuiteListItem } from '@/api/types'
+import type { Comparison, SuiteListItem, SuiteResult } from '@/api/types'
 import CheckRateBars from '@/components/compare/CheckRateBars.vue'
 import ConfigDiff from '@/components/compare/ConfigDiff.vue'
 import { CHECK_PREFIX } from '@/components/compare/deltas'
@@ -17,6 +17,7 @@ import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import ViewToggle from '@/components/ui/ViewToggle.vue'
 import { formatPercent, formatTimestamp, shortId } from '@/composables/format'
+import { pageInfo } from '@/composables/paging'
 import { jobProgress, useJob } from '@/composables/useJob'
 import { setPageDetail } from '@/composables/usePageMeta'
 import { param, useQueryState } from '@/composables/useQueryState'
@@ -24,24 +25,47 @@ import { useResource } from '@/composables/useResource'
 
 /*
  * Two evaluations side by side. `?a=&b=` names two suites; the comparison is computed by the
- * API as an experiment (a job), whose id is then kept in `?experiment=` so reloading the page
- * does not compute it again. An experiment can also run both sides now from a dataset and
- * two agent versions.
+ * API as an experiment, whose id is then kept in `?experiment=` so reloading the page does
+ * not compute it again. Opening such a link is navigation, so a comparison of exactly these
+ * two suites that is already stored is reused rather than stored again. An experiment can
+ * also run both sides now from a dataset and two agent versions.
+ *
+ * Suites and comparisons are listed by the API a page at a time: the pickers ask for the
+ * newest finished suites (narrowed by dataset on the server) and say when the list is cut.
  */
+const RECENT_PAGE = 20
+
 const { state: query, set } = useQueryState({
   a: param.string(),
   b: param.string(),
   experiment: param.string(),
   case: param.string(),
   checks: param.enum(['chart', 'table'] as const),
+  /** Narrows the suite pickers to one dataset name. */
+  dataset: param.string(),
+  /** Page of the recent comparisons. */
+  page: param.int(1, 1),
 })
 
 const comparison = useResource(
   (signal) => (query.value.experiment ? api.getExperiment(query.value.experiment, signal) : Promise.resolve(null)),
   () => query.value.experiment,
 )
-const suites = useResource((signal) => api.listEvaluations(signal))
-const experiments = useResource((signal) => api.listExperiments(signal))
+const suites = useResource((signal) =>
+  api.listEvaluations({ status: 'completed', dataset: query.value.dataset ?? undefined, limit: MAX_PAGE }, signal),
+)
+const experiments = useResource((signal) =>
+  api.listExperiments({ limit: RECENT_PAGE, offset: (query.value.page - 1) * RECENT_PAGE }, signal),
+)
+// Reload in place, keeping the current options (and the focused control) meanwhile.
+watch(
+  () => query.value.dataset,
+  () => void suites.reload(),
+)
+watch(
+  () => query.value.page,
+  () => void experiments.reload(),
+)
 const datasets = useResource((signal) => api.listDatasets(signal))
 const catalog = useResource((signal) => api.agents(signal))
 const creating = useJob()
@@ -49,23 +73,91 @@ const creating = useJob()
 const comparing = ref(false)
 const compareError = shallowRef<unknown>(null)
 
-const completed = computed(() => (suites.data.value ?? []).filter((s) => s.status === 'completed'))
-const suiteById = (id: string | null) => completed.value.find((s) => s.suite_id === id) ?? null
-const suiteLabel = (s: SuiteListItem) =>
+type SuiteOption = Pick<
+  SuiteListItem,
+  'suite_id' | 'agent_ref' | 'dataset_name' | 'dataset_version' | 'dataset_hash' | 'passed' | 'total'
+>
+/** Every finished suite seen so far, so a pick survives narrowing the list to another dataset. */
+const known = shallowRef(new Map<string, SuiteOption>())
+function remember(options: SuiteOption[]): void {
+  if (!options.length) return
+  const next = new Map(known.value)
+  for (const option of options) next.set(option.suite_id, option)
+  known.value = next
+}
+const completed = computed(() => (suites.data.value?.items ?? []).filter((s) => s.status === 'completed'))
+watch(completed, remember, { immediate: true })
+const suiteById = (id: string | null) => (id ? (known.value.get(id) ?? null) : null)
+const suiteLabel = (s: SuiteOption) =>
   `${s.agent_ref} · ${s.dataset_name}@${s.dataset_version} · ${s.passed}/${s.total} · ${shortId(s.suite_id)}`
 const agentRefs = computed(() => catalog.data.value?.agents.flatMap((a) => a.versions.map((v) => `${v.agent}@${v.version}`)) ?? [])
+/** The suite list has answered once (later reloads keep their data until they finish). */
+const suitesReady = computed(() => suites.data.value !== null || suites.error.value !== null)
+const experimentsReady = computed(() => experiments.data.value !== null || experiments.error.value !== null)
 
-// Two suites named in the URL without a stored comparison: compute it once (after the suite
-// list has loaded, so the comparison is named after the agent versions).
+function optionOf(suite: SuiteResult): SuiteOption {
+  return {
+    suite_id: suite.suite_id,
+    agent_ref: `${suite.agent_config.agent}@${suite.agent_config.version}`,
+    dataset_name: suite.dataset_name,
+    dataset_version: suite.dataset_version,
+    dataset_hash: suite.dataset_hash,
+    passed: suite.metrics.passed,
+    total: suite.metrics.total,
+  }
+}
+
+// A suite named in the URL but older than the listed ones (e.g. "Compare…" on an old
+// evaluation) is loaded on its own, so it can still be picked.
 watch(
-  () => [query.value.a, query.value.b, query.value.experiment, suites.loading.value] as const,
-  async ([a, b, experiment, loadingSuites]) => {
-    if (experiment || !a || !b || loadingSuites || creating.running.value || comparing.value) return
+  () => [query.value.a, query.value.b, suitesReady.value] as const,
+  async ([a, b, ready]) => {
+    if (!ready) return
+    for (const id of new Set([a, b])) {
+      if (!id || known.value.has(id)) continue
+      try {
+        const suite = await api.getEvaluation(id)
+        if (suite.status === 'completed') remember([optionOf(suite)])
+      } catch {
+        /* not pickable: comparing it reports the reason */
+      }
+    }
+  },
+  { immediate: true },
+)
+
+/**
+ * A stored comparison of exactly suites `a` and `b` among the recent ones. The list does not
+ * carry suite ids, so the few candidates with the same agent versions are checked by id.
+ */
+async function storedComparison(a: string, b: string): Promise<Comparison | null> {
+  const [first, second] = [suiteById(a), suiteById(b)]
+  if (!first || !second) return null
+  const candidates = (experiments.data.value?.items ?? []).filter(
+    (x) => x.a_ref === first.agent_ref && x.b_ref === second.agent_ref && x.dataset_name === first.dataset_name,
+  )
+  for (const candidate of candidates.slice(0, 3)) {
+    try {
+      const stored = await api.getExperiment(candidate.experiment_id)
+      if (stored.a.suite_id === a && stored.b.suite_id === b) return stored
+    } catch {
+      /* purged meanwhile: keep looking */
+    }
+  }
+  return null
+}
+
+// Two suites named in the URL without a stored comparison id: find or compute it once (after
+// the lists have loaded, so the comparison is named after the agent versions).
+watch(
+  () => [query.value.a, query.value.b, query.value.experiment, suitesReady.value, experimentsReady.value] as const,
+  async ([a, b, experiment, readySuites, readyExperiments]) => {
+    if (experiment || !a || !b || !readySuites || !readyExperiments || creating.running.value || comparing.value) return
     const name = `${suiteById(a)?.agent_ref ?? shortId(a)} vs ${suiteById(b)?.agent_ref ?? shortId(b)}`
     comparing.value = true
     compareError.value = null
     try {
-      const stored = await api.compareSuites({ name, suite_a: a, suite_b: b })
+      const stored = (await storedComparison(a, b)) ?? (await api.compareSuites({ name, suite_a: a, suite_b: b }))
       await set({ experiment: stored.experiment_id })
     } catch (e) {
       compareError.value = e
@@ -85,6 +177,30 @@ const mismatch = computed(() => {
 function compareSuites(): void {
   void set({ a: pickA.value, b: pickB.value, experiment: null, case: null }, { push: true })
 }
+
+/** The listed suites, plus the current picks when narrowing the list left them out. */
+const options = computed<SuiteOption[]>(() => {
+  const listed = new Set(completed.value.map((s) => s.suite_id))
+  const pinned = [...new Set([pickA.value, pickB.value])]
+    .filter((id) => id && !listed.has(id))
+    .map((id) => known.value.get(id))
+    .filter((s): s is SuiteOption => s !== undefined)
+  return [...pinned, ...completed.value]
+})
+const suitesTotal = computed(() => suites.data.value?.total ?? null)
+const datasetNames = computed(() => {
+  const names = new Set([...(datasets.data.value ?? []).map((d) => d.name), ...completed.value.map((s) => s.dataset_name)])
+  if (query.value.dataset) names.add(query.value.dataset)
+  return [...names].sort()
+})
+function onNarrow(event: Event): void {
+  void set({ dataset: (event.target as HTMLSelectElement).value || null })
+}
+
+const recent = computed(() => experiments.data.value?.items ?? [])
+const recentPaging = computed(() =>
+  pageInfo(query.value.page, RECENT_PAGE, recent.value.length, experiments.data.value?.total ?? null),
+)
 
 const runDataset = ref('')
 const runA = ref('')
@@ -161,21 +277,35 @@ watch(data, (value) => setPageDetail(value ? value.name : null), { immediate: tr
       <div class="pickers">
         <section class="picker panel" aria-labelledby="pick-suites-title">
           <h2 id="pick-suites-title" class="section-title">Compare two evaluations</h2>
-          <template v-if="completed.length >= 2">
+          <template v-if="suites.data.value && (options.length >= 2 || query.dataset)">
+            <label class="field">
+              <span>Dataset</span>
+              <select class="select mono-select" :value="query.dataset ?? ''" @change="onNarrow">
+                <option value="">All datasets</option>
+                <option v-for="name in datasetNames" :key="name" :value="name">{{ name }}</option>
+              </select>
+            </label>
             <label class="field">
               <span>A (baseline)</span>
               <select v-model="pickA" class="select mono-select">
                 <option value="" disabled>Choose an evaluation</option>
-                <option v-for="s in completed" :key="s.suite_id" :value="s.suite_id">{{ suiteLabel(s) }}</option>
+                <option v-for="s in options" :key="s.suite_id" :value="s.suite_id">{{ suiteLabel(s) }}</option>
               </select>
             </label>
             <label class="field">
               <span>B (candidate)</span>
               <select v-model="pickB" class="select mono-select">
                 <option value="" disabled>Choose an evaluation</option>
-                <option v-for="s in completed" :key="s.suite_id" :value="s.suite_id">{{ suiteLabel(s) }}</option>
+                <option v-for="s in options" :key="s.suite_id" :value="s.suite_id">{{ suiteLabel(s) }}</option>
               </select>
             </label>
+            <p v-if="suitesTotal !== null && suitesTotal > completed.length" class="faint note">
+              Listing the newest {{ completed.length }} of {{ suitesTotal }} finished evaluations. Choose a dataset to
+              narrow the list.
+            </p>
+            <p v-else-if="completed.length < 2" class="faint note">
+              Fewer than two finished evaluations of {{ query.dataset }}.
+            </p>
             <p v-if="mismatch" class="callout warn" role="note">
               These evaluations ran different dataset content: only shared, unchanged cases will be compared.
             </p>
@@ -224,7 +354,7 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
         </section>
       </div>
 
-      <section v-if="experiments.data.value?.length" class="section" aria-labelledby="recent-title">
+      <section v-if="recent.length || recentPaging.hasPrevious" class="section" aria-labelledby="recent-title">
         <h2 id="recent-title" class="section-title">Recent comparisons</h2>
         <div class="table-wrap panel">
           <table class="data-table">
@@ -240,7 +370,7 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="x in experiments.data.value" :key="x.experiment_id">
+              <tr v-for="x in recent" :key="x.experiment_id">
                 <th scope="row">
                   <RouterLink :to="{ path: '/compare', query: { experiment: x.experiment_id } }">{{ x.name }}</RouterLink>
                   <span v-if="x.confounded" class="tag">confounded</span>
@@ -255,6 +385,15 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
             </tbody>
           </table>
         </div>
+        <nav v-if="recentPaging.hasPrevious || recentPaging.hasNext" class="pager" aria-label="Pages of comparisons">
+          <span class="muted">{{ recentPaging.range }}</span>
+          <button type="button" class="btn" :disabled="!recentPaging.hasPrevious" @click="set({ page: query.page - 1 })">
+            Previous
+          </button>
+          <button type="button" class="btn" :disabled="!recentPaging.hasNext" @click="set({ page: query.page + 1 })">
+            Next
+          </button>
+        </nav>
       </section>
     </template>
 
@@ -391,5 +530,17 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
 }
 .tag {
   margin-left: 6px;
+}
+.note {
+  margin: 0;
+  font-size: 12.5px;
+}
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12.5px;
 }
 </style>

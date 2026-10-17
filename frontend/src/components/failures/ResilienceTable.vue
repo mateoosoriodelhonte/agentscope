@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue'
 import type { ResilienceRow } from '@/api/types'
+import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import { ratio } from '@/composables/format'
 
 /*
  * How each agent version handled each injected fault kind: recovered (succeeded after the
  * fault), degraded (gave up gracefully), failed. Rows are fault kinds, column groups are
- * agent versions, and the footer sums each column.
+ * agent versions, and the footer sums each column. Agent versions whose counts come from
+ * the simulated model carry its badge: scripted recoveries say nothing about a real model.
  */
-const props = defineProps<{ rows: ResilienceRow[] }>()
+const props = withDefaults(defineProps<{ rows: ResilienceRow[]; simulated?: ReadonlySet<string> }>(), {
+  simulated: () => new Set<string>(),
+})
 const captionId = useId()
 
 const agents = computed(() => [...new Set(props.rows.map((r) => r.agent_ref))].sort())
@@ -41,7 +45,10 @@ const totals = computed(() =>
       <thead>
         <tr>
           <th scope="col" rowspan="2">Fault kind</th>
-          <th v-for="agent in agents" :key="agent" scope="colgroup" colspan="4" class="agent mono">{{ agent }}</th>
+          <th v-for="agent in agents" :key="agent" scope="colgroup" colspan="4" class="agent">
+            <span class="ref mono">{{ agent }}</span>
+            <SimulatedBadge v-if="simulated.has(agent)" compact class="badge" />
+          </th>
         </tr>
         <tr>
           <template v-for="agent in agents" :key="agent">
@@ -86,6 +93,9 @@ const totals = computed(() =>
 .agent {
   text-align: center;
   border-left: 1px solid var(--border);
+}
+.badge {
+  margin-left: 6px;
 }
 .first {
   border-left: 1px solid var(--border);

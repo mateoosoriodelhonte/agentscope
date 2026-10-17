@@ -2,7 +2,7 @@ import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentsResponse, caseResult, datasetSummary, gate, job, suiteItem, suiteResult } from '@/__tests__/builders'
 import { loadFixture } from '@/__tests__/fixtures'
-import { calls, json, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
+import { calls, json, mockFetch, never, pageOf, paged, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import { pageTrail } from '@/composables/usePageMeta'
 import EvaluationCaseView from '../EvaluationCaseView.vue'
@@ -62,6 +62,50 @@ describe('EvaluationsView', () => {
     await flushPromises()
     expect(router.currentRoute.value.query).toMatchObject({ dataset: 'task-planner@1', agent: 'research_assistant@v2' })
     expect(page.text()).toContain('No evaluations match these filters')
+  })
+
+  it('pages through every evaluation, with the total from the server', async () => {
+    const all = Array.from({ length: 55 }, (_, i) => suiteItem({ suite_id: `s${i}`, label: `Suite ${i}` }))
+    const { page, router, fetchMock } = await open('/evaluations', { 'GET /api/evaluations': pageOf(all) })
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe('?limit=50&offset=0')
+    expect(page.find('.count').text()).toBe('55 evaluations')
+    expect(page.findAll('tbody tr')).toHaveLength(50)
+    expect(page.find('.pager').text()).toContain('1–50 of 55')
+    await page.findAll('.pager button').find((b) => b.text() === 'Next')!.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBe('2')
+    expect(calls(fetchMock, 'GET', '/api/evaluations').pop()!.url.search).toBe('?limit=50&offset=50')
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['Suite 50', 'Suite 51', 'Suite 52', 'Suite 53', 'Suite 54'])
+    expect(page.find('.pager').text()).toContain('51–55 of 55')
+  })
+
+  it('filters on the server, so an agent whose evaluations are all older is still found', async () => {
+    const old = suiteItem({ suite_id: 'suite-old', label: 'Old v1 run', agent_ref: 'research_assistant@v1' })
+    const { page, fetchMock } = await open('/evaluations?agent=research_assistant@v1&dataset=research-assistant@1', {
+      'GET /api/evaluations': (url: URL) =>
+        url.searchParams.get('agent_ref') === 'research_assistant@v1' && url.searchParams.get('dataset') === 'research-assistant'
+          ? paged([old], 1)
+          : paged(SUITES, 60),
+      'GET /api/datasets': [datasetSummary(), datasetSummary({ name: 'task-planner', agent: 'task_planner' })],
+      'GET /api/agents': agentsResponse(),
+    })
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe(
+      '?agent_ref=research_assistant%40v1&dataset=research-assistant&limit=50&offset=0',
+    )
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['Old v1 run'])
+    expect(page.find('.count').text()).toBe('1 evaluation')
+    // Filter choices come from every dataset and agent version, not just the rows on this page.
+    const [datasets, agents] = page.findAll('form.filters select')
+    expect(datasets!.findAll('option').map((o) => o.attributes('value'))).toEqual(['', 'research-assistant@1', 'task-planner@1'])
+    expect(agents!.findAll('option').map((o) => o.attributes('value'))).toContain('research_assistant@v2')
+  })
+
+  it('checks the dataset version here, since the server filters by dataset name', async () => {
+    const v1 = suiteItem({ suite_id: 'suite-a', label: 'On version 1' })
+    const v2 = suiteItem({ suite_id: 'suite-b', label: 'On version 2', dataset_version: '2' })
+    const { page } = await open('/evaluations?dataset=research-assistant@2', { 'GET /api/evaluations': paged([v1, v2], 2) })
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['On version 2'])
+    expect(page.text()).toContain('1 evaluation of another dataset version on this page is hidden')
   })
 
   it('has loading, first-run and error states', async () => {

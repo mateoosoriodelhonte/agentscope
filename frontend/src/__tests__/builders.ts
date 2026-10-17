@@ -10,6 +10,7 @@ import type {
   Dataset,
   DatasetSummary,
   EvalCase,
+  ExperimentListItem,
   FailureAnalysis,
   GateResult,
   JobStatus,
@@ -390,6 +391,25 @@ export function comparison(overrides: Partial<Comparison> = {}): Comparison {
       { path: 'retry.max_tool_retries', dimension: 'retry', a: 0, b: 1 },
     ],
     confounded: true,
+    ...overrides,
+  }
+}
+
+export function experimentItem(overrides: Partial<ExperimentListItem> = {}): ExperimentListItem {
+  return {
+    experiment_id: 'exp-1',
+    name: 'research_assistant@v1 vs research_assistant@v2',
+    created_at: '2026-10-16T11:00:00Z',
+    dataset_name: 'research-assistant',
+    dataset_version: '1',
+    a_ref: 'research_assistant@v1',
+    b_ref: 'research_assistant@v2',
+    a_pass_rate: 0.6,
+    b_pass_rate: 0.9,
+    regressions: 1,
+    fixes: 2,
+    confounded: true,
+    deterministic: true,
     ...overrides,
   }
 }
