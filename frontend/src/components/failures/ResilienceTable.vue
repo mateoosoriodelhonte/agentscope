@@ -32,9 +32,11 @@ const totals = computed(() =>
 </script>
 
 <template>
-  <div class="table-wrap panel">
+  <!-- Wider than the page with several agent versions: a focusable, named region, so the
+       horizontal scroll is reachable from the keyboard too. -->
+  <div class="table-wrap panel" role="region" tabindex="0" aria-labelledby="resilience-caption">
     <table class="data-table resilience">
-      <caption class="visually-hidden">Outcomes by fault kind and agent version</caption>
+      <caption id="resilience-caption" class="visually-hidden">Outcomes by fault kind and agent version</caption>
       <thead>
         <tr>
           <th scope="col" rowspan="2">Fault kind</th>

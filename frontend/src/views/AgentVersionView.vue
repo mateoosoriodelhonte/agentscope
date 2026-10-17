@@ -223,6 +223,11 @@ watch(
   font-family: var(--font-ui);
   font-size: 12px;
 }
+/* A link inside a sentence needs more than colour to stand out (WCAG 1.4.1). */
+.source a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
