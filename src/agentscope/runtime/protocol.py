@@ -28,6 +28,9 @@ _THINK_CLOSE = re.compile(r"</think>", re.IGNORECASE)
 # Characters that matter to the brace scanner outside and inside JSON strings.
 _OUTSIDE = re.compile(r'[{}\[\]"]')
 _INSIDE = re.compile(r'["\\]')
+_FENCE = "```"
+# How often the scanner may resume at a later code fence after an object that never closes.
+_MAX_FENCE_RESUMES = 4
 
 DecisionErrorKind = Literal["empty", "not_json", "not_object", "schema", "too_large"]
 
@@ -99,10 +102,12 @@ def _candidates(text: str) -> Iterator[tuple[int, int, int]]:
     """(start, end, depth) of each balanced top-level {...} in order, skipping closed
     <think>...</think> blocks between them.
 
-    Linear time: every search resumes where the previous one stopped, and once a <think>
-    has no closing tag none after it can have one either, so think skipping stops there.
+    Linear time: every search resumes where the previous one stopped (an object that never
+    closes is scanned past at most `_MAX_FENCE_RESUMES` times), and once a <think> has no
+    closing tag none after it can have one either, so think skipping stops there.
     """
     pos = 0
+    resumes = 0
     brace = text.find("{")
     think = _THINK_OPEN.search(text)
     while brace >= 0:
@@ -118,12 +123,19 @@ def _candidates(text: str) -> Iterator[tuple[int, int, int]]:
             continue
         found = _object_end(text, brace)
         if found is None:
-            # It never closes. Stop rather than rescan from every later brace, which is
-            # quadratic on `{{{{...`; such a response is not a valid decision anyway.
-            return
-        end, depth = found
-        yield brace, end, depth
-        pos = end
+            # It never closes: a stray brace in prose ("the format is {type, ...") or a
+            # truncated object. A fenced block further on may still hold the decision, so
+            # resume after the next code fence, a few times at most; rescanning from every
+            # later brace instead would be quadratic on `{{{{...`.
+            fence = text.find(_FENCE, brace + 1)
+            if fence < 0 or resumes >= _MAX_FENCE_RESUMES:
+                return
+            resumes += 1
+            pos = fence + len(_FENCE)
+        else:
+            end, depth = found
+            yield brace, end, depth
+            pos = end
         brace = text.find("{", pos)
         if think is not None and think.start() < pos:
             think = _THINK_OPEN.search(text, pos)

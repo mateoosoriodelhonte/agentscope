@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from agentscope.domain.tools import FaultKind, FaultSpec, ToolCall, ToolOutcome
@@ -158,3 +160,21 @@ async def test_a_failure_fault_is_always_delivered(registry: ToolRegistry) -> No
     assert first.undelivered is None
     second = await ex.execute(call("retrieve_document", doc_id="doc-meridian-footbridge"))
     assert (second.outcome, second.fault) == (ToolOutcome.OK, None)
+
+
+async def test_a_hook_that_edits_its_argument_in_place_is_still_recorded(
+    registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = registry.resolve("retrieve_document", 1)
+    assert tool is not None
+
+    def inject_in_place(output: dict[str, Any], payload: str) -> dict[str, Any]:
+        output["document"]["body"] += f"\n\n{payload}"
+        return output
+
+    monkeypatch.setattr(tool, "inject_instructions", inject_in_place)
+    ex = executor(registry, FaultSpec(tool="retrieve_document", kind=FaultKind.INJECTION))
+    result = await ex.run_attempt(call("retrieve_document", doc_id="doc-meridian-footbridge"))
+    # Never an injected output with no fault on record.
+    assert result.result.output["document"]["body"].endswith(DEFAULT_INJECTION)  # type: ignore[index]
+    assert (result.result.fault, result.undelivered) == (FaultKind.INJECTION, None)

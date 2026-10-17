@@ -173,6 +173,12 @@ def test_a_renamed_key_never_overwrites_an_existing_one() -> None:
         "Proxy-Authorization",
         "aws.credentials",
         "user passphrase",
+        # Run together, as the earlier key pattern also caught them.
+        "accesstoken",
+        "X_AUTHTOKEN",
+        "refreshtoken",
+        "idtoken",
+        "CLIENTSECRET",
     ],
 )
 def test_secret_like_key_names_are_redacted_wherever_the_term_appears(key: str) -> None:

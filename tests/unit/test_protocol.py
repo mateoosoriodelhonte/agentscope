@@ -113,6 +113,13 @@ def test_prose_braces_before_a_fenced_decision_are_skipped() -> None:
     assert decision.output == {"answer": "ok"}
 
 
+def test_an_unclosed_prose_brace_before_a_fenced_decision_is_skipped() -> None:
+    raw = "The format is {type, output, ...\n```json\n" + _final({"answer": "ok"}) + "\n```"
+    decision = parse_decision(raw)
+    assert isinstance(decision, FinalDecision)
+    assert decision.output == {"answer": "ok"}
+
+
 def test_think_blocks_before_the_decision_are_skipped_even_with_json_inside() -> None:
     raw = '<think>maybe {"type": "tool_call", "tool": "x"}?</think>\n' + _final({"answer": "ok"})
     decision = parse_decision(raw)
@@ -127,8 +134,9 @@ def test_think_blocks_before_the_decision_are_skipped_even_with_json_inside() ->
         "<think>" + "{" * 90_000,
         "{}" * 45_000 + "<think>",
         "<think></think>" * 6_000 + "x" * 9_000 + "{",
+        "{```" * 24_000,  # every fence could restart the scan of an unclosed object
     ],
-    ids=["unclosed-think", "think-then-braces", "empty-objects", "closed-thinks"],
+    ids=["unclosed-think", "think-then-braces", "empty-objects", "closed-thinks", "fences"],
 )
 def test_adversarial_responses_are_rejected_in_linear_time(raw: str) -> None:
     started = time.perf_counter()

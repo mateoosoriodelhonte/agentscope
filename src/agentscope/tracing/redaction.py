@@ -150,6 +150,7 @@ _SECRET_WORDS = frozenset(
 _SECRET_COMPOUNDS = frozenset(
     {
         "apikey",
+        "clientsecret",
         "privatekey",
         "secretkey",
         "accesskey",
@@ -186,7 +187,8 @@ def is_secret_name(name: str) -> bool:
     words = [w.lower() for w in _NAME_WORD.findall(_MARKER.sub(" ", name))]
     if not words:
         return False
-    if words[-1] == "token":  # singular: `githubToken` is one, `max_tokens` counts them
+    # Singular: `githubToken` and `accesstoken` hold one, `max_tokens` counts them.
+    if words[-1].endswith("token"):
         return True
     joined = {a + b for a, b in pairwise(words)}
     return any(w in _SECRET_WORDS or w in _SECRET_COMPOUNDS for w in words) or bool(

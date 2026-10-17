@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from dataclasses import dataclass
@@ -152,7 +153,9 @@ class ToolExecutor:
         payload: Any = output.model_dump(mode="json")
         applied: FaultSpec | None = None
         if owed is not None:
-            faulted = self._apply_output_fault(tool, payload, owed)
+            # The hooks get a copy (as Tool documents), so a hook that edits its argument in
+            # place cannot change the output while the comparison below sees no change.
+            faulted = self._apply_output_fault(tool, copy.deepcopy(payload), owed)
             if faulted != payload:  # a fault that changes nothing was not delivered
                 self._faults.delivered(owed)
                 payload, applied = faulted, owed
