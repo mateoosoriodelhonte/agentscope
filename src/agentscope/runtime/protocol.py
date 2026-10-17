@@ -12,14 +12,22 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from agentscope.tracing.redaction import sanitize_text
+
 MAX_DECISION_CHARS = 100_000
-_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+# Deeper than any agent output schema; past it, redaction truncates what is stored anyway.
+MAX_DECISION_DEPTH = 32
+_THINK_OPEN = re.compile(r"<think>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think>", re.IGNORECASE)
+# Characters that matter to the brace scanner outside and inside JSON strings.
+_OUTSIDE = re.compile(r'[{}\[\]"]')
+_INSIDE = re.compile(r'["\\]')
 
 DecisionErrorKind = Literal["empty", "not_json", "not_object", "schema", "too_large"]
 
@@ -56,33 +64,129 @@ class DecisionError(ValueError):
         self.kind = kind
 
 
-def _first_object(text: str) -> str | None:
-    """Return the first balanced top-level {...} span, respecting JSON strings."""
-    start = text.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
+def _object_end(text: str, start: int) -> tuple[int, int] | None:
+    """End (exclusive) and nesting depth of the balanced {...} opening at `start`, or None
+    when it never closes. Respects JSON strings, so braces, fences and think tags inside
+    string values are content, not structure."""
+    braces = nesting = deepest = 0
+    pos = start
+    while (match := _OUTSIDE.search(text, pos)) is not None:
+        char, pos = match.group(), match.end()
         if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
+            while True:
+                inner = _INSIDE.search(text, pos)
+                if inner is None:
+                    return None
+                pos = inner.end()
+                if inner.group() == '"':
+                    break
+                pos += 1  # a backslash escapes the next character
+        elif char in "{[":
+            nesting += 1
+            deepest = max(deepest, nesting)
+            if char == "{":
+                braces += 1
+        else:
+            nesting -= 1
+            if char == "}":
+                braces -= 1
+                if braces == 0:
+                    return pos, deepest
     return None
+
+
+def _candidates(text: str) -> Iterator[tuple[int, int, int]]:
+    """(start, end, depth) of each balanced top-level {...} in order, skipping closed
+    <think>...</think> blocks between them.
+
+    Linear time: every search resumes where the previous one stopped, and once a <think>
+    has no closing tag none after it can have one either, so think skipping stops there.
+    """
+    pos = 0
+    brace = text.find("{")
+    think = _THINK_OPEN.search(text)
+    while brace >= 0:
+        if think is not None and think.start() < brace:
+            close = _THINK_CLOSE.search(text, think.end())
+            if close is None:
+                think = None
+                continue
+            pos = close.end()
+            think = _THINK_OPEN.search(text, pos)
+            if brace < pos:
+                brace = text.find("{", pos)
+            continue
+        found = _object_end(text, brace)
+        if found is None:
+            return  # never closes, and neither can any object opened after it
+        end, depth = found
+        yield brace, end, depth
+        pos = end
+        brace = text.find("{", pos)
+        if think is not None and think.start() < pos:
+            think = _THINK_OPEN.search(text, pos)
+
+
+def _without_think(text: str) -> str:
+    """`text` without closed <think>...</think> blocks (linear, like `_candidates`)."""
+    parts = []
+    pos = 0
+    while (opening := _THINK_OPEN.search(text, pos)) is not None:
+        close = _THINK_CLOSE.search(text, opening.end())
+        if close is None:
+            break
+        parts.append(text[pos : opening.start()])
+        pos = close.end()
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def _decision_object(content: str) -> dict[str, Any]:
+    """The first top-level JSON object in a response that parses.
+
+    The response is read as written: a decision that opens the response wins outright, and
+    code fences or think tags matter only around objects, never inside their strings (a
+    final answer may well contain a fenced shell command). Preambles such as a think block,
+    prose or a ```json fence are skipped because only top-level objects are candidates.
+    """
+    first_error: DecisionError | None = None
+    for start, end, depth in _candidates(content):
+        error: DecisionError
+        if depth > MAX_DECISION_DEPTH:
+            error = DecisionError(
+                "too_large", f"response nests deeper than {MAX_DECISION_DEPTH} levels"
+            )
+        else:
+            try:
+                data = json.loads(content[start:end])
+            except RecursionError:  # backstop; the depth check above should prevent it
+                error = DecisionError("too_large", "response nests too deeply")
+            except json.JSONDecodeError as exc:
+                error = DecisionError("not_json", f"response is not valid JSON ({exc.msg})")
+            except ValueError:  # e.g. an integer longer than Python converts
+                error = DecisionError("not_json", "response is not valid JSON (bad number)")
+            else:
+                if isinstance(data, dict):
+                    return data
+                error = DecisionError("not_object", "response JSON is not an object")
+        first_error = first_error or error
+    if first_error is not None:
+        raise first_error
+    if not _without_think(content).strip():
+        raise DecisionError("empty", "response was empty")
+    raise DecisionError("not_json", "response contains no JSON object")
+
+
+def _sanitized(value: Any) -> Any:
+    """NUL and unpaired surrogates replaced in every string and key: they cannot be stored
+    (PostgreSQL rejects NUL, strict UTF-8 rejects lone surrogates) or serialized back."""
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, dict):
+        return {sanitize_text(k): _sanitized(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitized(item) for item in value]
+    return value
 
 
 def _describe(error: ValidationError) -> str:
@@ -97,21 +201,9 @@ def _describe(error: ValidationError) -> str:
 def parse_decision(content: str) -> ToolCallDecision | FinalDecision:
     if len(content) > MAX_DECISION_CHARS:
         raise DecisionError("too_large", f"response exceeds {MAX_DECISION_CHARS} characters")
-    text = _THINK.sub("", content).strip()
-    if not text:
+    if not content.strip():
         raise DecisionError("empty", "response was empty")
-    fenced = _FENCE.search(text)
-    if fenced:
-        text = fenced.group(1).strip()
-    candidate = _first_object(text)
-    if candidate is None:
-        raise DecisionError("not_json", "response contains no JSON object")
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise DecisionError("not_json", f"response is not valid JSON ({exc.msg})") from exc
-    if not isinstance(data, dict):
-        raise DecisionError("not_object", "response JSON is not an object")
+    data = _sanitized(_decision_object(content))
     try:
         wire = _WireDecision.model_validate(data, strict=True)
     except ValidationError as exc:
