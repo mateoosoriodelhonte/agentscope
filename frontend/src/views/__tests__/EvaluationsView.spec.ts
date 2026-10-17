@@ -125,6 +125,7 @@ describe('EvaluationsView', () => {
       'GET /api/datasets': [datasetSummary({ name: 'other', version: '2', agent: null }), datasetSummary()],
       'GET /api/agents': agentsResponse(),
       'POST /api/evaluations': () => json({ job_id: 'job-e', kind: 'evaluation', resource_id: 'suite-new' }, 202),
+      'GET /api/jobs/job-e': () => never(),
     })
     const dialog = page.find('[role="dialog"]')
     const selects = dialog.findAll('select')
@@ -236,6 +237,62 @@ describe('EvaluationView', () => {
     await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined(), { timeout: 2000 })
     await flushPromises()
     expect(page.find('h1').text()).toBe('Nightly v1')
+    expect(page.findAll('.matrix tbody tr')).toHaveLength(3)
+  })
+
+  it('reloads the suite as the job reports progress, so the matrix agrees with the banner', async () => {
+    let polls = 0
+    const cases = suiteResult().cases
+    const { page, router } = await open('/evaluations/suite-new?job=job-e', {
+      'GET /api/evaluations/suite-new': () => {
+        const done = Math.min(polls, 3)
+        return done === 0
+          ? json({ detail: 'evaluation not found' }, 404)
+          : suiteResult({ suite_id: 'suite-new', status: done < 3 ? 'running' : 'completed', cases: cases.slice(0, done) })
+      },
+      'GET /api/jobs/job-e': () => {
+        polls += 1
+        return job({ job_id: 'job-e', kind: 'evaluation', state: polls < 3 ? 'running' : 'succeeded', progress: Math.min(polls, 3), total: 3 })
+      },
+    })
+    expect(page.find('[role="status"]').text()).toContain('Running: 1/3 cases evaluated')
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(1))
+    expect(page.text()).not.toContain('No case has finished yet')
+    await vi.waitFor(() => expect(page.find('[role="status"]').text()).toContain('Running: 2/3 cases evaluated'), { timeout: 2000 })
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(2))
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined(), { timeout: 3000 })
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(3))
+  })
+
+  it('shows what was stored when the job fails, instead of a stale "not found"', async () => {
+    let failed = false
+    const { page, router } = await open('/evaluations/suite-new?job=job-e', {
+      'GET /api/evaluations/suite-new': () =>
+        failed
+          ? suiteResult({ suite_id: 'suite-new', status: 'error', error: 'provider unreachable', cases: suiteResult().cases.slice(0, 1) })
+          : json({ detail: 'evaluation not found' }, 404),
+      'GET /api/jobs/job-e': () => {
+        failed = true
+        return job({ job_id: 'job-e', kind: 'evaluation', state: 'failed', progress: 1, total: 3, error: 'provider unreachable' })
+      },
+    })
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined())
+    await flushPromises()
+    expect(page.find('[role="alert"]').text()).toContain('The evaluation job failed: provider unreachable')
+    expect(page.text()).not.toContain('Could not load this evaluation')
+    expect(page.find('.title-row').text()).toContain('error')
+    expect(page.findAll('.matrix tbody tr')).toHaveLength(1)
+  })
+
+  it('falls back to the stored suite when the server no longer knows the job', async () => {
+    const { page, router } = await open('/evaluations/suite-v1?job=job-gone', {
+      'GET /api/evaluations/suite-v1': () => suiteResult({ status: 'error', error: 'interrupted' }),
+      'GET /api/jobs/job-gone': () => json({ detail: 'job not found' }, 404),
+    })
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined())
+    await flushPromises()
+    expect(page.find('[role="note"]').text()).toContain('no longer tracks the job')
+    expect(page.find('[role="alert"]').text()).toContain('This evaluation did not finish: interrupted')
     expect(page.findAll('.matrix tbody tr')).toHaveLength(3)
   })
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, watch } from 'vue'
 import { RouterLink } from 'vue-router'
-import { api } from '@/api/client'
+import { api, ApiError } from '@/api/client'
 import { describeError } from '@/api/errors'
 import CaseCheckMatrix from '@/components/evaluation/CaseCheckMatrix.vue'
 import GateChecklist from '@/components/evaluation/GateChecklist.vue'
@@ -26,18 +26,28 @@ const { state: query, set } = useQueryState({
 })
 const progress = useJob()
 
-// Follow the job that is filling this suite, then show the finished result.
+// Follow the job that is filling this suite. When it ends, however it ends (succeeded,
+// failed, or unknown to a restarted server), the stored suite is what is left to show: reload
+// it and stop following, so a stale "not found" or "running" never sits next to the outcome.
 watch(
   () => query.value.job,
   async (jobId) => {
     if (!jobId) return
     const done = await progress.follow(jobId)
-    if (done) {
-      await set({ job: null })
-      await suite.reload()
-    }
+    // Neither a result nor an error: polling was stopped (page left, or another job followed).
+    if (!done && !progress.error.value) return
+    await set({ job: null })
+    await suite.reload()
   },
   { immediate: true },
+)
+
+// Each case the job reports is already stored: reload, so the matrix fills in with the banner.
+watch(
+  () => progress.job.value?.progress ?? 0,
+  (count, previous) => {
+    if (progress.running.value && count > previous) void suite.reload()
+  },
 )
 
 // A suite still running without a job to follow (opened from the list) refreshes itself:
@@ -76,7 +86,11 @@ const usage = computed(() => {
   const partial = u.reporting_runs < u.total_runs ? ` (reported for ${ratio(u.reporting_runs, u.total_runs)} runs)` : ''
   return `${u.input_tokens.toLocaleString()} in · ${u.output_tokens.toLocaleString()} out${partial}`
 })
-const jobError = computed(() => (progress.error.value ? describeError(progress.error.value).message : null))
+/** The server does not know the job (it restarted, say): not a failure of the evaluation. */
+const jobLost = computed(() => progress.error.value instanceof ApiError && progress.error.value.status === 404)
+const jobError = computed(() =>
+  progress.error.value && !jobLost.value ? describeError(progress.error.value).message : null,
+)
 /** While the job is still creating the suite, a 404 means "not yet", not "missing". */
 const waiting = computed(() => !data.value && progress.running.value)
 
@@ -120,6 +134,10 @@ watch(data, (value) => setPageDetail(value ? title.value : null), { immediate: t
     <p v-else-if="data?.status === 'error'" class="callout fail" role="alert">
       This evaluation did not finish{{ data.error ? `: ${data.error}` : '' }}. Metrics cover only the
       {{ plural(data.cases.length, 'case') }} recorded before it stopped.
+    </p>
+    <p v-if="jobLost" class="callout warn" role="note">
+      The server no longer tracks the job that was filling this evaluation (it may have restarted). This is what
+      was stored.
     </p>
 
     <Skeleton v-if="waiting" :rows="6" />
