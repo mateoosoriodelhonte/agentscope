@@ -14,22 +14,37 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Engine, func, inspect, select, text
+from sqlalchemy import (
+    Column,
+    Engine,
+    MetaData,
+    Table,
+    bindparam,
+    func,
+    insert,
+    inspect,
+    select,
+    text,
+)
 
 from agentscope.domain.agents import AgentConfig, Limits
 from agentscope.domain.traces import RunStatus, SpanKind, SpanRecord, TraceRecord
 from agentscope.storage.db import (
+    DatabaseAheadError,
     alembic_config,
     create_db_engine,
     current_revision,
     head_revision,
+    known_revision,
     migration_connection,
     upgrade,
 )
 from agentscope.storage.models import Base, RunRow, SpanRow
 from agentscope.storage.repository import Repository
+from agentscope.storage.types import UTCDateTime
 
 TABLES_0002 = {"datasets", "suite_runs", "case_results", "check_results", "experiments"}
+LIVENESS_0003 = {"owner", "heartbeat_at"}
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
@@ -99,6 +114,26 @@ def _trace() -> TraceRecord:
     )
 
 
+def _save_with_old_schema(engine: Engine, trace: TraceRecord, suite_id: uuid.UUID) -> None:
+    """Store `trace` in a database at an older revision than the ORM models: it is written at
+    head into a scratch database, then copied with only the columns the old tables have."""
+    scratch = create_db_engine("sqlite://")
+    upgrade(scratch)
+    Repository(scratch).save_trace(trace)
+    with scratch.connect() as source, engine.begin() as target:
+        for model in (RunRow, SpanRow):
+            present = {c["name"] for c in inspect(target).get_columns(model.__tablename__)}
+            columns = [c for c in model.__table__.columns if c.name in present]
+            table = Table(
+                model.__tablename__, MetaData(), *(Column(c.name, c.type) for c in columns)
+            )
+            rows = [dict(row._mapping) for row in source.execute(select(*columns))]
+            if model is RunRow:
+                rows = [{**row, "suite_id": suite_id} for row in rows]
+            target.execute(insert(table), rows)
+    scratch.dispose()
+
+
 def test_upgrade_and_drift(engine: Engine) -> None:
     assert current_revision(engine) is None
     assert upgrade(engine) == head_revision()
@@ -124,7 +159,7 @@ def test_upgrade_keeps_runs_and_spans(engine: Engine) -> None:
     repository = Repository(engine)
     trace = _trace()
     # 0001 has no suite_runs table, so a stored suite_id can only be dangling.
-    repository.save_trace(trace, suite_id=str(uuid.uuid4()))
+    _save_with_old_schema(engine, trace, suite_id=uuid.uuid4())
 
     upgrade(engine)
 
@@ -170,3 +205,78 @@ def test_sqlite_connection_settings_survive_migrations(tmp_path: Path) -> None:
     mode = (tmp_path / "m.db").stat().st_mode & 0o777
     assert mode == 0o600
     engine.dispose()
+
+
+def _columns(engine: Engine, table: str) -> set[str]:
+    return {column["name"] for column in inspect(engine).get_columns(table)}
+
+
+def test_0003_adds_owner_and_heartbeat_and_keeps_data(engine: Engine) -> None:
+    _migrate(engine, command.upgrade, "0002")
+    # The ORM models already have the new columns, so the old schema is written with SQL.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO suite_runs (id, label, status, dataset_name, dataset_version, "
+                "dataset_hash, agent_ref, config_hash, effective_config_hash, provider, model, "
+                "deterministic, agent_config, checks_enabled, environment, total, passed, "
+                "pass_rate, started_at) VALUES (:id, '', 'running', 'geo', '1', 'h', 'a@v1', "
+                "'c', 'e', 'fake', 'm', :true, '{}', '[]', '{}', 0, 0, 0, :now)"
+            ).bindparams(bindparam("now", type_=UTCDateTime())),
+            {"id": uuid.uuid4().hex, "true": True, "now": datetime.now(UTC)},
+        )
+    for table in ("suite_runs", "runs"):
+        assert not _columns(engine, table) & LIVENESS_0003
+
+    upgrade(engine)
+    for table in ("suite_runs", "runs"):
+        assert _columns(engine, table) >= LIVENESS_0003
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*), max(owner) FROM suite_runs")).one() == (
+            1,
+            None,
+        )
+    _assert_no_drift(engine)
+
+    _migrate(engine, command.downgrade, "0002")
+    for table in ("suite_runs", "runs"):
+        assert not _columns(engine, table) & LIVENESS_0003
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM suite_runs")).scalar() == 1
+
+
+def test_a_database_from_a_newer_release_is_refused(engine: Engine) -> None:
+    """Alembic raises for an unknown revision instead of returning None."""
+    upgrade(engine)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE alembic_version SET version_num = '9999'"))
+    assert not known_revision("9999")
+    assert known_revision(head_revision())
+    with pytest.raises(DatabaseAheadError, match="9999 is unknown"):
+        upgrade(engine)
+
+
+def test_an_existing_directory_is_left_as_it_is(tmp_path: Path) -> None:
+    """A database pointed into a project directory must not chmod it or make git ignore it."""
+    project = tmp_path / "project"
+    project.mkdir(mode=0o755)
+    project.chmod(0o755)
+    engine = create_db_engine(f"sqlite:///{project / 'agentscope.db'}")
+    upgrade(engine)
+    engine.dispose()
+    assert project.stat().st_mode & 0o777 == 0o755
+    assert not (project / ".gitignore").exists()
+    assert (project / "agentscope.db").stat().st_mode & 0o777 == 0o600
+
+
+def test_a_directory_agentscope_creates_is_private(tmp_path: Path) -> None:
+    data = tmp_path / "fresh" / "data"
+    engine = create_db_engine(f"sqlite:///{data / 'agentscope.db'}")
+    upgrade(engine)
+    engine.dispose()
+    assert data.stat().st_mode & 0o777 == 0o700
+    assert (data / ".gitignore").read_text(encoding="utf-8") == "*\n"
+    for suffix in ("", "-wal", "-shm"):
+        path = data / f"agentscope.db{suffix}"
+        if path.exists():
+            assert path.stat().st_mode & 0o777 == 0o600, path

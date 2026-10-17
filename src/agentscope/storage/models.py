@@ -81,6 +81,10 @@ class RunRow(Base):
     evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     passed: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    # Liveness of a row stored `running` (see storage/liveness.py): the "host:pid" writing it
+    # and when it last reported. NULL for finished runs.
+    owner: Mapped[str | None] = mapped_column(String(300))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     spans: Mapped[list[SpanRow]] = relationship(
         back_populates="run",
@@ -160,6 +164,10 @@ class SuiteRunRow(Base):
     started_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     error: Mapped[str | None] = mapped_column(Text)
+    # The "host:pid" running the suite and its last heartbeat, so only suites whose process
+    # is gone or silent are marked interrupted (see storage/liveness.py).
+    owner: Mapped[str | None] = mapped_column(String(300))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     cases: Mapped[list[CaseResultRow]] = relationship(
         back_populates="suite",

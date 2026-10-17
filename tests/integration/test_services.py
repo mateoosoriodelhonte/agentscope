@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
+import sys
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from apiclient import BASE_URL, post
+from apiclient import BASE_URL, post, wait_for_job
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from agentscope import services as services_module
 from agentscope.api.app import create_app
 from agentscope.config import Settings
 from agentscope.datasets.issues import DatasetError
@@ -24,6 +28,7 @@ from agentscope.evaluation.fingerprint import environment_fingerprint
 from agentscope.runtime.runner import AgentRunner
 from agentscope.services import Services, build_redactor, build_services, egress_destinations
 from agentscope.storage.db import upgrade
+from agentscope.storage.liveness import process_owner
 from agentscope.storage.models import SuiteRunRow
 from agentscope.storage.repository import SuiteHeader
 
@@ -52,15 +57,18 @@ def test_egress_lists_targets_and_refusals(tmp_path: Path) -> None:
     assert destinations[1].startswith("otlp: refused (")
 
 
-def test_startup_marks_interrupted_work_and_registers_builtins(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path, enable_ollama=False)
-    first = build_services(settings)
-    names = {(d.name, d.version) for d in first.repository.list_datasets()}
-    assert {(d.name, d.version) for d in builtin_datasets()} <= names
-    # A crashed process left this suite `running`.
-    config = first.catalog.resolve("research_assistant@v2")
+def dead_owner() -> str:
+    """The owner string of a process on this host that has exited (and been reaped)."""
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    return f"{process_owner().rpartition(':')[0]}:{child.pid}"
+
+
+def start_suite(services: Services, owner: str | None = None) -> str:
+    """A `running` suite, owned by this process or by `owner`."""
+    config = services.catalog.resolve("research_assistant@v2")
     suite_id = str(uuid.uuid4())
-    first.repository.create_suite(
+    services.repository.create_suite(
         SuiteHeader(
             suite_id=suite_id,
             dataset_name=RESEARCH.name,
@@ -68,22 +76,80 @@ def test_startup_marks_interrupted_work_and_registers_builtins(tmp_path: Path) -
             dataset_hash=RESEARCH.content_hash(),
             agent_config=config,
             config_hash=config.config_hash(),
-            effective_config_hash=first.runner.effective_config_hash(config),
+            effective_config_hash=services.runner.effective_config_hash(config),
             checks_enabled=sorted(CHECKS),
             environment=environment_fingerprint(config),
             started_at=utcnow(),
         )
     )
+    if owner is not None:
+        with services.repository.session() as session, session.begin():
+            row = session.get(SuiteRunRow, uuid.UUID(suite_id))
+            assert row is not None
+            row.owner = owner
+    return suite_id
+
+
+def status(services: Services, suite_id: str) -> str:
+    suite = services.repository.get_suite(suite_id)
+    assert suite is not None
+    return suite.status
+
+
+def test_startup_registers_builtins_and_never_touches_running_work(tmp_path: Path) -> None:
+    """Every command builds services, read-only ones included: building them must not mark
+    another process's live suite as interrupted."""
+    settings = Settings(data_dir=tmp_path, enable_ollama=False)
+    first = build_services(settings)
+    names = {(d.name, d.version) for d in first.repository.list_datasets()}
+    assert {(d.name, d.version) for d in builtin_datasets()} <= names
+    live = start_suite(first)  # this process is running it
+    dead = start_suite(first, owner=dead_owner())
     first.repository.engine.dispose()
 
-    second = build_services(settings)  # the restart
-    suite = second.repository.get_suite(suite_id)
+    second = build_services(settings)  # another command starting while the suite runs
+    assert (status(second, live), status(second, dead)) == ("running", "running")
+    assert len(second.repository.list_datasets()) == len(names)  # registration is idempotent
+
+    # Recovery (the server, commands that start work) marks only the suite whose process died.
+    assert second.recover_interrupted() == {"runs": 0, "suite_runs": 1}
+    assert (status(second, live), status(second, dead)) == ("running", "error")
+    suite = second.repository.get_suite(dead)
     assert suite is not None
-    assert suite.status == "error"
     assert suite.error is not None
     assert suite.error.startswith("interrupted")
-    assert len(second.repository.list_datasets()) == len(names)  # registration is idempotent
     second.repository.engine.dispose()
+
+
+def test_the_server_marks_work_whose_process_died(services: Services, tmp_path: Path) -> None:
+    live = start_suite(services)
+    dead = start_suite(services, owner=dead_owner())
+    with TestClient(create_app(services, web_dist=tmp_path / "none"), base_url=BASE_URL) as c:
+        assert c.get(f"/api/evaluations/{dead}").json()["status"] == "error"
+        assert c.get(f"/api/evaluations/{live}").json()["status"] == "running"
+
+
+async def test_a_running_suite_sends_heartbeats(
+    services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """However long a case takes, the suite's owner keeps telling other processes it lives."""
+    monkeypatch.setattr(services_module, "HEARTBEAT_INTERVAL", timedelta(milliseconds=5))
+    beats: list[str] = []
+    monkeypatch.setattr(services.repository, "heartbeat", beats.append)
+    original = AgentRunner.run
+
+    async def slow(self: AgentRunner, request: object) -> object:
+        await asyncio.sleep(0.05)
+        return await original(self, request)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(AgentRunner, "run", slow)
+    one_case = RESEARCH.model_copy(update={"cases": RESEARCH.cases[:1]})
+    result = await services.run_suite(one_case, services.catalog.resolve("research_assistant@v2"))
+    assert len(beats) >= 2
+    assert set(beats) == {result.suite_id}
+    count = len(beats)
+    await asyncio.sleep(0.05)
+    assert len(beats) == count  # stopped with the suite
 
 
 def test_a_conflicting_builtin_is_kept_with_a_warning(
@@ -190,6 +256,26 @@ def test_agents_endpoint(client: TestClient) -> None:
     assert research["output_schema"]["type"] == "object"
     assert {tool["name"] for tool in body["tools"]} >= {"search_documents", "lookup_record"}
 
+    # The fingerprints a suite of each built-in version records, so the dashboard can find
+    # that version's suites without guessing.
+    assert set(research["version_hashes"]) == {"v1", "v2", "v3"}
+    suite = evaluated(client, "research_assistant@v2")
+    assert research["version_hashes"]["v2"] == {
+        "config_hash": suite["config_hash"],
+        "effective_config_hash": suite["effective_config_hash"],
+    }
+
+
+def evaluated(client: TestClient, agent_ref: str) -> dict[str, object]:
+    accepted = post(
+        client,
+        "/api/evaluations",
+        {"agent_ref": agent_ref, "dataset": {"name": RESEARCH.name, "version": RESEARCH.version}},
+    ).json()
+    assert wait_for_job(client, accepted["job_id"])["state"] == "succeeded"
+    suite: dict[str, object] = client.get(f"/api/evaluations/{accepted['resource_id']}").json()
+    return suite
+
 
 @pytest.mark.parametrize(
     ("raw", "shown"),
@@ -199,6 +285,11 @@ def test_agents_endpoint(client: TestClient) -> None:
         ("https://host.example/v1?api_key=k-0123#frag", "https://host.example/v1"),
         ("admin:pw-0123@host.example:8080", "***@host.example:8080"),  # no scheme
         ("http://u:pw-0123@host:notaport/x", "http://***@host:notaport/x"),
+        # Passwords containing '/', '?' or '#' used to end the authority early.
+        ("http://admin:Sup3r/Secr3t@gpu-box:11434", "http://***@gpu-box:11434"),
+        ("https://bob:hunter2#x9@llm.example.com/v1", "https://***@llm.example.com/v1"),
+        ("https://bob:pa?ss@llm.example.com/v1?k=1", "https://***@llm.example.com/v1"),
+        ("bob:pa/ss@llm.example.com:8080/v1", "***@llm.example.com:8080/v1"),  # no scheme
     ],
 )
 def test_display_url_never_shows_credentials_or_queries(raw: str, shown: str) -> None:
@@ -230,3 +321,36 @@ def test_otlp_header_values_are_redacted(tmp_path: Path) -> None:
     assert "collector-secret-123" not in build_redactor(settings).redact_text(
         "sent collector-secret-123"
     )
+
+
+def test_display_copies_survive_markers_longer_than_the_secret(services: Services) -> None:
+    """What the CLI prints and the API returns goes through the same redaction as storage,
+    so a check message cut to its limit before redaction must not crash it either."""
+    from agentscope.domain.evaluation import (
+        CaseResult,
+        CheckName,
+        CheckResult,
+        CheckStatus,
+        ReasonCode,
+    )
+
+    key = "AKIAABCDEFGHIJKLMNOP"
+    case = CaseResult(
+        case_id="c",
+        case_hash="sha256:" + "c" * 64,
+        run_id=None,
+        trace_id=None,
+        status=None,
+        passed=False,
+        checks=[
+            CheckResult(
+                name=CheckName.ANSWER_CORRECTNESS,
+                status=CheckStatus.FAILED,
+                reason=ReasonCode.MISMATCH,
+                message="x" * 979 + " " + key,
+            )
+        ],
+    )
+    shown = services.redacted(case)
+    assert len(shown.checks[0].message) == 1000
+    assert key not in shown.model_dump_json()

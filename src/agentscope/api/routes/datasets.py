@@ -3,9 +3,11 @@ it with the same hardened loader as the CLI, so identical strictness rules apply
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from agentscope.api.deps import InvalidInput, ServicesDep, download
 from agentscope.api.schemas import DatasetDetail, DatasetSummary, DatasetValidation
@@ -66,9 +68,19 @@ def _detail(services: ServicesDep, name: str, version: str) -> DatasetDetail:
     return detail
 
 
-@router.get("/{name}/{version}")
-def get_dataset(name: str, version: str, services: ServicesDep) -> DatasetDetail:
-    return _detail(services, name, version)
+@router.get("/{name}/{version}", response_model=DatasetDetail)
+def get_dataset(name: str, version: str, services: ServicesDep) -> JSONResponse:
+    """`dataset` is the export document, so it can be posted back to POST /api/datasets or
+    /validate unchanged (e.g. to fork it as a new version). A plain dump would add
+    `"equals": null` next to each argument matcher's comparison, which counts as a second
+    one and makes the document invalid."""
+    detail = _detail(services, name, version)
+    return JSONResponse(
+        {
+            "summary": detail.summary.model_dump(mode="json"),
+            "dataset": json.loads(export_dataset(detail.dataset)),
+        }
+    )
 
 
 @router.get("/{name}/{version}/export", response_class=Response)

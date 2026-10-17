@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from importlib import resources
 from pathlib import Path
 
@@ -33,6 +35,9 @@ from agentscope.services import Services, build_services
 
 _log = logging.getLogger(__name__)
 
+# How often a running server looks for work whose process died (see Services.recover_interrupted).
+SWEEP_INTERVAL = timedelta(minutes=1)
+
 
 def find_web_dist() -> Path | None:
     """The built dashboard: packaged with the wheel, or frontend/dist in a checkout."""
@@ -43,6 +48,19 @@ def find_web_dist() -> Path | None:
     if (checkout / "index.html").exists():
         return checkout
     return None
+
+
+def _recover(services: Services) -> None:
+    try:
+        services.recover_interrupted()
+    except Exception:  # never keep the server from starting or serving over housekeeping
+        _log.warning("could not check for interrupted work", exc_info=True)
+
+
+async def _sweep_interrupted(services: Services) -> None:
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL.total_seconds())
+        await asyncio.to_thread(_recover, services)
 
 
 def _request_issues(exc: RequestValidationError) -> InvalidInput:
@@ -68,8 +86,15 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
-        await job_manager.shutdown()
+        # Work whose process died (before this start, or while this server runs, e.g. a
+        # killed CLI evaluation) is marked interrupted; live work in any process is not.
+        await asyncio.to_thread(_recover, services)
+        sweeper = asyncio.create_task(_sweep_interrupted(services))
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            await job_manager.shutdown()
 
     app = FastAPI(
         title="AgentScope",

@@ -14,6 +14,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.script.revision import ResolutionError
+from alembic.util.exc import CommandError
 from sqlalchemy import Connection, Engine, create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,6 +30,10 @@ class MigrationIntegrityError(RuntimeError):
     """A migration left rows that violate a foreign key; it was rolled back."""
 
 
+class StorageLocationError(RuntimeError):
+    """The SQLite database file or its directory cannot be created (e.g. not writable)."""
+
+
 def normalize_url(url: str) -> str:
     """Use the psycopg 3 driver for plain postgresql:// URLs."""
     if url.startswith("postgresql://"):
@@ -38,16 +44,24 @@ def normalize_url(url: str) -> str:
 
 
 def _prepare_sqlite_file(url: str) -> None:
+    """Local traces can contain task text and tool payloads: owner-only permissions.
+
+    The database file is created 0600, and SQLite gives its -wal and -shm files the same
+    mode. Only a directory AgentScope creates itself is made private and ignored by git: an
+    existing one (a project root, the home directory, /tmp) belongs to the user, and a chmod
+    or a `.gitignore` containing `*` there would break it.
+    """
     database = make_url(url).database
     if not database or database == ":memory:":
         return
     path = Path(database)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Local traces can contain task text and tool payloads: owner-only permissions.
-    os.chmod(path.parent, stat.S_IRWXU)
-    ignore = path.parent / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("*\n", encoding="utf-8")
+    directory = path.parent
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True, mode=stat.S_IRWXU)
+        os.chmod(directory, stat.S_IRWXU)  # mkdir's mode is filtered by the umask
+        ignore = directory / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text("*\n", encoding="utf-8")
     if not path.exists():
         path.touch(mode=0o600)
 
@@ -64,7 +78,11 @@ def _sqlite_pragmas(dbapi_connection: Any, _record: ConnectionPoolEntry) -> None
 def create_db_engine(url: str) -> Engine:
     url = normalize_url(url)
     if url.startswith("sqlite"):
-        _prepare_sqlite_file(url)
+        try:
+            _prepare_sqlite_file(url)
+        except OSError as exc:
+            where = f" ({exc.filename})" if exc.filename else ""
+            raise StorageLocationError(f"{exc.strerror or type(exc).__name__}{where}") from exc
         engine = create_engine(url, connect_args={"check_same_thread": False})
         event.listen(engine, "connect", _sqlite_pragmas)
         return engine
@@ -94,14 +112,25 @@ def current_revision(engine: Engine) -> str | None:
         return MigrationContext.configure(connection).get_current_revision()
 
 
+def known_revision(revision: str) -> bool:
+    """Whether this release ships `revision`. A database migrated by a newer release names
+    one it does not, and Alembic raises for it rather than returning None."""
+    try:
+        return ScriptDirectory.from_config(alembic_config()).get_revision(revision) is not None
+    except (CommandError, ResolutionError):
+        return False
+
+
 def upgrade(engine: Engine) -> str:
-    """Bring the schema to head. Returns the resulting revision."""
-    script = ScriptDirectory.from_config(alembic_config())
+    """Bring the schema to head. Returns the resulting revision.
+
+    Raises DatabaseAheadError when a newer AgentScope already migrated the database.
+    """
     current = current_revision(engine)
     head = head_revision()
     if current == head:
         return head
-    if current is not None and script.get_revision(current) is None:
+    if current is not None and not known_revision(current):
         raise DatabaseAheadError(
             f"database revision {current} is unknown to this AgentScope version; upgrade AgentScope"
         )

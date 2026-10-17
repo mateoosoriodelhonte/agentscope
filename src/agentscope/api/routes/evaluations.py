@@ -23,7 +23,10 @@ from agentscope.domain.agents import AgentConfig
 from agentscope.domain.datasets import Dataset
 from agentscope.domain.evaluation import SuiteResult
 from agentscope.jobs import Job
-from agentscope.services import Services
+from agentscope.services import Services, ensure_suite_judged
+
+# Lists stay bare JSON arrays; the number of matching items (beyond this page) is a header.
+TOTAL_COUNT = "X-Total-Count"
 
 router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
 
@@ -52,15 +55,18 @@ def suite_inputs(
 @router.get("")
 def list_evaluations(
     services: ServicesDep,
+    response: Response,
     agent_ref: str | None = None,
     dataset: str | None = None,
     status: Literal["running", "completed", "error"] | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[SuiteListItem]:
-    items, _ = services.repository.list_suites(
+    """Newest first, one page at a time: X-Total-Count says how many match in all."""
+    items, total = services.repository.list_suites(
         agent_ref=agent_ref, dataset_name=dataset, status=status, limit=limit, offset=offset
     )
+    response.headers[TOTAL_COUNT] = str(total)
     return items
 
 
@@ -76,7 +82,7 @@ async def create_evaluation(
     suite_id = str(uuid.uuid4())
 
     async def work(job: Job) -> None:
-        await services.run_suite(
+        result = await services.run_suite(
             dataset,
             config,
             label=body.label,
@@ -84,6 +90,8 @@ async def create_evaluation(
             suite_id=suite_id,
             progress=job.report,
         )
+        # Cases the harness or the provider broke make the job fail; the suite stays stored.
+        ensure_suite_judged(result)
 
     return accepted(submit(jobs, "evaluation", suite_id, work, total=len(dataset.cases)))
 

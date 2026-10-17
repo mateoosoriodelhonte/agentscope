@@ -22,6 +22,14 @@ from agentscope.domain.traces import RunSummary, TraceRecord
 # --- agents, tools, providers --------------------------------------------------------
 
 
+class ConfigHashes(StrictModel):
+    """The fingerprints a suite of this version records, so clients match suites to built-in
+    versions exactly instead of guessing from labels."""
+
+    config_hash: str
+    effective_config_hash: str
+
+
 class AgentInfo(StrictModel):
     name: str
     title: str
@@ -30,6 +38,8 @@ class AgentInfo(StrictModel):
     output_schema: dict[str, Any]
     prompts: dict[str, str]
     versions: list[AgentConfig]
+    # Keyed by AgentConfig.version.
+    version_hashes: dict[str, ConfigHashes] = Field(default_factory=dict)
 
 
 class AgentsResponse(StrictModel):
@@ -118,6 +128,7 @@ class DatasetSummary(StrictModel):
 
 class DatasetDetail(StrictModel):
     summary: DatasetSummary
+    # In GET /api/datasets/{name}/{version}, the export document (see routes/datasets.py).
     dataset: Dataset
 
 
@@ -299,3 +310,16 @@ class PurgeResult(StrictModel):
     deleted: dict[str, int]
     size_bytes_before: int | None
     size_bytes_after: int | None
+
+
+PurgeConflictCode = Literal["jobs_running", "purge_incomplete"]
+
+
+class PurgeConflict(StrictModel):
+    """409 from POST /api/settings/purge. `jobs_running`: refused, nothing was deleted (no
+    result). `purge_incomplete`: rows were deleted (see result) but their old contents are
+    still on disk until a later purge succeeds."""
+
+    detail: str
+    code: PurgeConflictCode
+    result: PurgeResult | None = None

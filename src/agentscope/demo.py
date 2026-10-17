@@ -11,8 +11,9 @@
    planner run recovering from a transient tool timeout.
 
 Seeding is idempotent: a completed demo suite (matched by its label), an experiment
-(matched by name) or an ad-hoc run (matched by its demo case id) that already exists is
-reused, so seeding twice adds nothing.
+(matched by name, or by its two suites) or an ad-hoc run (matched by its demo case id) that
+already exists is reused, so seeding twice adds nothing. Suites evaluate the stored copy of
+each packaged dataset, so every seeded suite links to a dataset the API can show.
 """
 
 from __future__ import annotations
@@ -160,6 +161,8 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         if progress is not None:
             progress(step, DEMO_STEPS)
 
+    # Registration is idempotent; it restores the packaged datasets should they be missing.
+    await asyncio.to_thread(services.register_builtin_datasets)
     suites: dict[str, str] = {}
     for dataset_name, agent_ref in DEMO_SUITES:
         label = suite_label(agent_ref)
@@ -169,11 +172,12 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         if existing:
             suites[agent_ref] = existing[0].suite_id
         else:
+            packaged = load_builtin_dataset(dataset_name)
+            dataset = await asyncio.to_thread(
+                services.stored_dataset, packaged.name, packaged.version
+            )
             result = await services.run_suite(
-                load_builtin_dataset(dataset_name),
-                services.catalog.resolve(agent_ref),
-                label=label,
-                thresholds=DEMO_GATE,
+                dataset, services.catalog.resolve(agent_ref), label=label, thresholds=DEMO_GATE
             )
             suites[agent_ref] = result.suite_id
         advance("suites", not existing)
@@ -183,12 +187,13 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         known, _ = repository.list_experiments(name=name, limit=1)
         if known:
             experiments[name] = known[0].experiment_id
-        else:
-            comparison = await asyncio.to_thread(
-                services.compare_suites, name, suites[a_ref], suites[b_ref]
-            )
-            experiments[name] = comparison.experiment_id
-        advance("experiments", not known)
+            advance("experiments", False)
+            continue
+        comparison, was_created = await asyncio.to_thread(
+            services.compare_suites, name, suites[a_ref], suites[b_ref]
+        )
+        experiments[name] = comparison.experiment_id
+        advance("experiments", was_created)
 
     runs: dict[str, str] = {}
     for run in DEMO_RUNS:
