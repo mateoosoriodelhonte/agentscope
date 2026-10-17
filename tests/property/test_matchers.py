@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from agentscope.domain.datasets import ArgMatcher
 from agentscope.evaluation.matchers import argument_matches, value_matches
-from agentscope.evaluation.normalize import fold, normalize
+from agentscope.evaluation.normalize import (
+    contains_normalized,
+    equal_normalized,
+    fold,
+    normalize,
+)
 
 scalars = (
     st.none()
@@ -158,3 +165,43 @@ def test_integers_beyond_the_float_range_do_not_crash() -> None:
     assert not value_matches(ArgMatcher(equals=huge), 1e308)
     assert value_matches(ArgMatcher(equals=huge), huge)
     assert value_matches(ArgMatcher(equals=3), 3.0)  # one JSON number type
+
+
+@given(st.text(alphabet="-+#%$°*~/_&@", min_size=1, max_size=5), st.text(max_size=20))
+def test_signs_and_symbols_are_significant(symbols: str, text: str) -> None:
+    """Only sentence punctuation, quotes and brackets are trimmed: "-3" is not "3"."""
+    assume(normalize(text) and text.strip() == text)
+    assert not equal_normalized(f"{symbols}{text}", text)
+    assert not equal_normalized(f"{text}{symbols}", text)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("1987.", "1987"),
+        ('"Halden & Roe"', "Halden & Roe"),
+        ("(1987)", "1987"),
+        ("¿Sí?", "sí"),
+        ("«Amara Quill»", "amara quill"),
+        ("  ...September!  ", "september"),
+        ("\u2018Sept\u2019", "sept"),
+        ("...1987", "1987"),
+        ("\u2026 1987", "1987"),
+        (". 1987", "1987"),
+        ("(.5)", ".5"),
+    ],
+)
+def test_sentence_punctuation_quotes_and_brackets_are_trimmed(a: str, b: str) -> None:
+    assert equal_normalized(a, b)
+
+
+@pytest.mark.parametrize("run", ["!", ".", "-", " ", "!?.,;: "])
+def test_normalization_is_linear_in_the_length_of_a_punctuation_run(run: str) -> None:
+    """A word, a long punctuation run, a word: a backtracking edge regex rescans the run from
+    every position (quadratic), which froze the API on a hostile expected value."""
+    text = "a" + run * (100_000 // len(run)) + "a"
+    started = time.perf_counter()
+    normalize(text)
+    equal_normalized(text, text)
+    contains_normalized(text, text)
+    assert time.perf_counter() - started < 1.0

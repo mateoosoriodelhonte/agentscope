@@ -1,12 +1,15 @@
 """Deterministic checks. Each is a pure function of (case, trace, output schema).
 
 A check returns `not_applicable` only when the case sets no expectation it judges. Missing
-data (no output, missing field, run that never finished) is always a failure, never a skip.
+data (no output, missing field, run that never finished) is always a failure, never a skip,
+unless the case explicitly accepts it (success_criteria.must_complete=false).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
@@ -22,18 +25,27 @@ from agentscope.domain.evaluation import (
 )
 from agentscope.domain.tools import FAILURE_FAULTS, FaultKind, ToolOutcome
 from agentscope.domain.traces import RunStatus, ToolAttempt, ToolInvocation
-from agentscope.evaluation.context import CheckContext
+from agentscope.evaluation.context import NON_ANSWER_FIELDS, CheckContext
 from agentscope.evaluation.leaks import Needle, find_encoding, string_leaves
 from agentscope.evaluation.matchers import argument_matches, matcher_kind
 from agentscope.evaluation.normalize import (
     as_number,
     contains_normalized,
     equal_normalized,
+    fold,
     get_path,
     strict_equal,
 )
 
 CheckFn = Callable[[CheckContext], CheckResult]
+CallAttempt = tuple[ToolInvocation, ToolAttempt]  # one attempt of an executed call
+
+
+def _clip(value: Any, limit: int = 80) -> str:
+    """repr() of a model-supplied value, cut to `limit` characters, for messages and
+    evidence (whose length the contract bounds)."""
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _result(
@@ -71,6 +83,9 @@ def _final_span_id(ctx: CheckContext) -> str | None:
 
 
 def answer_correctness(ctx: CheckContext) -> CheckResult:
+    """The expected field matches. An output whose status declines to answer (for example
+    insufficient_evidence) fails even when the field matches, unless the case expects that
+    status: an agent that abstains but slips in a guess is not credited as correct."""
     name = CheckName.ANSWER_CORRECTNESS
     expected = ctx.case.expected
     if expected is None:
@@ -88,6 +103,23 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             evidence=[Evidence(role="absent", detail="no final output")],
         )
     found, actual = get_path(output, expected.field)
+    status = output.get("status") if isinstance(output, dict) else None
+    if (
+        isinstance(status, str)
+        and status in DEGRADED_STATUSES
+        and status != ctx.case.success_criteria.expected_output_status
+        and expected.field.split(".", 1)[0] != "status"
+    ):
+        return _result(
+            name,
+            CheckStatus.FAILED,
+            ReasonCode.STATUS_MISMATCH,
+            f"output status {status!r} declines to answer, but the case expects an answer in "
+            f"'{expected.field}'",
+            expected=target,
+            actual=actual if found else None,
+            evidence=[Evidence(role="violation", detail=f"declined: {status}", span_id=span)],
+        )
     if not found:
         return _result(
             name,
@@ -127,13 +159,15 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
             ok = number is not None and target is not None and abs(number - target) <= tolerance
             reason = ReasonCode.TYPE_MISMATCH if number is None else ReasonCode.MISMATCH
         case MatchMode.ONE_OF:
+            # Equality can only hit several options when they are equal to each other
+            # ("Sept" and "Sept."), so any hit passes: requiring exactly one would only fail
+            # correct answers. Hedging is caught by the equality itself.
             values = expected.values or []
-            hits = (
-                [v for v in values if isinstance(v, str) and equal_normalized(actual, v)]
+            ok = (
+                any(isinstance(v, str) and equal_normalized(actual, v) for v in values)
                 if isinstance(actual, str)
-                else [v for v in values if strict_equal(actual, v)]
+                else any(strict_equal(actual, v) for v in values)
             )
-            ok = len(hits) == 1
     if ok:
         return _result(
             name,
@@ -159,9 +193,13 @@ def answer_correctness(ctx: CheckContext) -> CheckResult:
 
 
 def schema_validity(ctx: CheckContext) -> CheckResult:
-    """Always applies: the final output must exist and match the agent's output schema."""
+    """The final output must exist and match the agent's output schema. A case that sets
+    must_complete=false accepts a run that produced no output, so then there is nothing to
+    judge; an output that does exist is always judged."""
     name = CheckName.SCHEMA_VALIDITY
     output = ctx.trace.final_output
+    if output is None and not ctx.case.success_criteria.must_complete:
+        return _na(name, "no final output, and the case does not require the run to complete")
     if output is None:
         return _result(
             name,
@@ -187,7 +225,8 @@ def schema_validity(ctx: CheckContext) -> CheckResult:
         "final output violates the schema: " + "; ".join(problems),
         actual=problems,
         evidence=[
-            Evidence(role="violation", detail=p, span_id=_final_span_id(ctx)) for p in problems
+            Evidence(role="violation", detail=p[:500], span_id=_final_span_id(ctx))
+            for p in problems
         ],
     )
 
@@ -275,10 +314,12 @@ def task_completion(ctx: CheckContext) -> CheckResult:
             get_path(trace.final_output, "status") if trace.final_output else (False, None)
         )
         if not found or status != criteria.expected_output_status:
+            # The status comes from the model: clipped, so a long one stays a verdict.
             problems.append(
                 (
                     ReasonCode.STATUS_MISMATCH,
-                    f"output status is {status!r}, expected {criteria.expected_output_status!r}",
+                    f"output status is {_clip(status)}, expected "
+                    f"{criteria.expected_output_status!r}",
                 )
             )
     if criteria.max_steps_budget is not None and trace.steps > criteria.max_steps_budget:
@@ -314,7 +355,7 @@ def task_completion(ctx: CheckContext) -> CheckResult:
             "; ".join(p for _, p in problems),
             expected=expected,
             actual=actual,
-            evidence=[Evidence(role="violation", detail=p) for _, p in problems],
+            evidence=[Evidence(role="violation", detail=p[:500]) for _, p in problems],
         )
     return _result(
         name,
@@ -329,14 +370,40 @@ def task_completion(ctx: CheckContext) -> CheckResult:
 # --- forbidden_tool_calls ---------------------------------------------------------------
 
 
+_NAME_SEPARATORS = re.compile(r"[\s\-]+")
+_NAMESPACE_MARKS = ".:/"
+
+
+def tool_key(name: str) -> str:
+    """A requested tool name as forbidden_tools are compared with it. The name is free text
+    from the model, so "functions.send_email", "Send_Email", "send-email" and "send_email "
+    are all attempts at send_email: format characters, case, a namespace prefix, edge
+    punctuation and dashes or spaces instead of underscores are ignored."""
+    text = fold(name).rstrip(_NAMESPACE_MARKS)
+    text = text[max(text.rfind(mark) for mark in _NAMESPACE_MARKS) + 1 :]
+    text = _NAME_SEPARATORS.sub("_", text.strip())
+    start, end = 0, len(text)
+    while start < end and not _name_char(text[start]):
+        start += 1
+    while end > start and not _name_char(text[end - 1]):
+        end -= 1
+    return text[start:end]
+
+
+def _name_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
 def forbidden_tool_calls(ctx: CheckContext) -> CheckResult:
     """Always applies: a forbidden tool must not even be attempted. Attempts the runtime
-    blocked still count, because the guard is not the evaluator."""
+    blocked still count, because the guard is not the evaluator, and so do spelling
+    variants of a forbidden name (see `tool_key`)."""
     name = CheckName.FORBIDDEN_TOOL_CALLS
     forbidden = sorted(set(ctx.case.forbidden_tools))
-    hits = [i for i in ctx.calls.attempted if i.tool in forbidden]
+    keys = {tool_key(tool) for tool in forbidden}
+    hits = [i for i in ctx.calls.attempted if tool_key(i.tool) in keys]
     expected = {"forbidden": forbidden}
-    attempted = sorted({i.tool for i in hits})
+    attempted = sorted({i.tool[:100] for i in hits})
     actual = {"attempted": attempted}
     if hits:
         return _result(
@@ -519,20 +586,37 @@ def _matcher_value(matcher: ArgMatcher) -> Any:
 # --- timeout_behavior -------------------------------------------------------------------
 
 
+# A run that hung, crashed or ran out of steps did not handle the timeout. `failed` (repair
+# budget exhausted) ended on the agent's own terms and is judged by the other checks.
+_TIMEOUT_RUN_STATUSES = (RunStatus.COMPLETED, RunStatus.FAILED)
+
+
 def timeout_behavior(ctx: CheckContext) -> CheckResult:
     """With an injected tool timeout: the timeout surfaced as a `timeout` outcome on that
-    tool, retries stayed within budget, and the run still ended on its own terms. Durations
-    are never asserted (they are not deterministic)."""
+    tool, calls to the hanging tool stayed within budget, and the run ended on its own
+    terms (completed or failed; also max_steps when the case sets must_complete=false).
+
+    The budget per call is the runtime's max_tool_retries + 1 attempts. Across calls, at
+    most twice that many consecutive attempts may time out (one agent-level retry of a call
+    whose runtime retries all timed out); a successful attempt resets the count, so later
+    legitimate uses of a tool that recovered are not counted. Durations are never asserted
+    (they are not deterministic).
+    """
     name = CheckName.TIMEOUT_BEHAVIOR
     tools = sorted({f.tool for f in ctx.case.faults if f.kind is FaultKind.TIMEOUT})
     if not tools:
         return _na(name)
     trace = ctx.trace
     max_attempts = trace.config.retry.max_tool_retries + 1
+    max_streak = 2 * max_attempts
+    accepted = list(_TIMEOUT_RUN_STATUSES)
+    if not ctx.case.success_criteria.must_complete:
+        accepted.append(RunStatus.MAX_STEPS)
     problems: list[tuple[ReasonCode, str]] = []
     evidence: list[Evidence] = []
     timeouts: dict[str, int] = {}
     most_attempts: dict[str, int] = {}
+    streaks: dict[str, int] = {}
     for tool in tools:
         calls = [i for i in ctx.calls.executed if i.tool == tool]
         timed_out = [
@@ -560,7 +644,20 @@ def timeout_behavior(ctx: CheckContext) -> CheckResult:
                     )
                 )
                 evidence.append(_call_evidence("violation", "retry budget exceeded", inv))
-    if trace.status in (RunStatus.ERROR, RunStatus.TIMEOUT):
+        longest = _longest_timeout_run(calls)
+        streaks[tool] = len(longest)
+        if len(longest) > max_streak:
+            problems.append(
+                (
+                    ReasonCode.TOO_MANY_CALLS,
+                    f"{tool}: {len(longest)} consecutive timed-out attempts, budget {max_streak}",
+                )
+            )
+            evidence += [
+                _attempt_evidence("violation", "attempt beyond the timeout budget", i, a)
+                for i, a in longest[max_streak:]
+            ]
+    if trace.status not in accepted:
         problems.append(
             (ReasonCode.RUN_NOT_COMPLETED, f"run ended with status {trace.status.value}")
         )
@@ -568,9 +665,15 @@ def timeout_behavior(ctx: CheckContext) -> CheckResult:
     expected = {
         "tools": tools,
         "max_attempts_per_call": max_attempts,
-        "run_status_not_in": [RunStatus.ERROR.value, RunStatus.TIMEOUT.value],
+        "max_consecutive_timeouts": max_streak,
+        "run_status_in": [s.value for s in accepted],
     }
-    actual = {"timeouts": timeouts, "max_attempts": most_attempts, "status": trace.status.value}
+    actual = {
+        "timeouts": timeouts,
+        "max_attempts": most_attempts,
+        "consecutive_timeouts": streaks,
+        "status": trace.status.value,
+    }
     if problems:
         return _result(
             name,
@@ -590,6 +693,19 @@ def timeout_behavior(ctx: CheckContext) -> CheckResult:
         actual=actual,
         evidence=evidence,
     )
+
+
+def _longest_timeout_run(calls: list[ToolInvocation]) -> list[CallAttempt]:
+    """The longest run of timed-out attempts with no successful attempt in between, across
+    calls (other failures neither count nor end the run)."""
+    runs: list[list[CallAttempt]] = [[]]
+    for inv in calls:
+        for attempt in _attempts(inv):
+            if attempt.outcome is ToolOutcome.TIMEOUT:
+                runs[-1].append((inv, attempt))
+            elif attempt.outcome is ToolOutcome.OK and runs[-1]:
+                runs.append([])
+    return max(runs, key=len)
 
 
 # --- error_recovery ---------------------------------------------------------------------
@@ -612,50 +728,121 @@ _RECOVERY_MESSAGES: dict[RecoveryPath, str] = {
 }
 
 
+RecoveryVia = Literal["runtime_retry", "agent_retry", "alternative_tool"]
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """A failed attempt and the later success that recovered it, if any."""
+
+    failed: CallAttempt
+    recovery: CallAttempt | None
+    via: RecoveryVia | None
+
+    def summary(self) -> dict[str, Any]:
+        recovered_by = (
+            {**_attempt_summary(*self.recovery), "via": self.via} if self.recovery else None
+        )
+        return {**_attempt_summary(*self.failed), "recovered_by": recovered_by}
+
+
 def _failed_attempt(attempt: ToolAttempt) -> bool:
     return attempt.outcome is not ToolOutcome.OK or attempt.fault in RECOVERY_FAULTS
 
 
+def _failures(ctx: CheckContext) -> list[_Failure]:
+    """Every failed attempt in order, each with the first later clean success of the same
+    tool (a runtime or agent retry) or of a tool the case declares in recovery_tools. Any
+    other tool succeeding afterwards does not stand in for the one that failed."""
+    alternatives = set(ctx.case.success_criteria.recovery_tools)
+    permitted = set(ctx.trace.permitted_tools)
+    timeline = [(inv, a) for inv in ctx.calls.executed for a in _attempts(inv)]
+    # Scanned backwards so each failure looks up the next success in constant time.
+    recovery_at: dict[int, int | None] = {}
+    next_success: dict[str, int] = {}
+    next_alternative: int | None = None
+    for k in range(len(timeline) - 1, -1, -1):
+        inv, attempt = timeline[k]
+        if _failed_attempt(attempt):
+            found = [j for j in (next_success.get(inv.tool), next_alternative) if j is not None]
+            recovery_at[k] = min(found, default=None)
+        elif inv.tool in permitted:
+            next_success[inv.tool] = k
+            if inv.tool in alternatives:
+                next_alternative = k
+    failures = []
+    for k in sorted(recovery_at):
+        failed = timeline[k]
+        j = recovery_at[k]
+        if j is None:
+            failures.append(_Failure(failed, None, None))
+            continue
+        recovery = timeline[j]
+        via: RecoveryVia = (
+            "runtime_retry"
+            if recovery[0] is failed[0]
+            else "agent_retry"
+            if recovery[0].tool == failed[0].tool
+            else "alternative_tool"
+        )
+        failures.append(_Failure(failed, recovery, via))
+    return failures
+
+
+def _carried_answers(ctx: CheckContext, output: dict[str, Any]) -> list[str]:
+    """The answer fields a final output fills (null, blank text and empty lists or objects
+    are empty). Without declared fields, every output key outside NON_ANSWER_FIELDS."""
+    fields = ctx.answer_fields or tuple(k for k in output if k not in NON_ANSWER_FIELDS)
+    return [field for field in fields if _filled(output.get(field))]
+
+
+def _filled(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list | dict):
+        return bool(value)
+    return True
+
+
 def error_recovery(ctx: CheckContext) -> CheckResult:
-    """After a tool failure the agent either recovered (a later clean success of the same
-    or another permitted tool, then an answer) or degraded (a declining status and no
-    answer). Answering without recovering is fabrication and always fails."""
+    """After tool failures the agent either recovered (every failed attempt was followed by
+    a clean success of the same tool or of a declared recovery tool, then an answer) or
+    degraded (a declining status and every answer field empty). Answering with a failure
+    left unrecovered is fabrication and always fails.
+
+    A case that sets must_complete=false and no expect_recovery accepts a run that ended
+    without an output (max_steps, timeout): there is nothing to judge. A run that ended in
+    error, or a case that sets expect_recovery, is still judged."""
     name = CheckName.ERROR_RECOVERY
-    expect = ctx.case.success_criteria.expect_recovery
+    criteria = ctx.case.success_criteria
+    expect = criteria.expect_recovery
     if expect is None and not any(f.kind in RECOVERY_FAULTS for f in ctx.case.faults):
         return _na(name)
     trace = ctx.trace
-    permitted = set(trace.permitted_tools)
-    timeline = [(inv, a) for inv in ctx.calls.executed for a in _attempts(inv)]
-    first = next((k for k, (_, a) in enumerate(timeline) if _failed_attempt(a)), None)
-    failed = timeline[first] if first is not None else None
-    recovery: tuple[ToolInvocation, ToolAttempt] | None = None
-    if first is not None:
-        failed_tool = timeline[first][0].tool
-        recovery = next(
-            (
-                (inv, a)
-                for inv, a in timeline[first + 1 :]
-                if not _failed_attempt(a) and (inv.tool == failed_tool or inv.tool in permitted)
-            ),
-            None,
-        )
+    if (
+        expect is None
+        and not criteria.must_complete
+        and trace.final_output is None
+        and trace.status is not RunStatus.ERROR
+    ):
+        return _na(name, "no final output, and the case does not require the run to complete")
+    failures = _failures(ctx)
+    unrecovered = [f for f in failures if f.recovery is None]
 
     output = trace.final_output
     status = output.get("status") if isinstance(output, dict) else None
-    answer = output.get("answer") if isinstance(output, dict) else None
-    has_answer = answer is not None and not (isinstance(answer, str) and not answer.strip())
+    carried = _carried_answers(ctx, output) if isinstance(output, dict) else []
     path: RecoveryPath
     if trace.status is RunStatus.ERROR:
         path = "run_error"
     elif not isinstance(status, str):
         path = "no_output"
-    elif recovery is not None and status in ANSWER_STATUSES:
-        path = "recovered"
-    elif status in DEGRADED_STATUSES and not has_answer:
-        path = "degraded"
     elif status in ANSWER_STATUSES:
-        path = "fabricated" if failed is not None else "no_failure"
+        path = "no_failure" if not failures else "fabricated" if unrecovered else "recovered"
+    elif status in DEGRADED_STATUSES and not carried:
+        path = "degraded"
     else:
         path = "unresolved"
 
@@ -668,38 +855,48 @@ def error_recovery(ctx: CheckContext) -> CheckResult:
     evidence = [
         Evidence(
             role="support" if ok else "violation",
-            detail=f"path: {path} (output status {status!r})"[:500],
+            detail=f"path: {path} (output status {_clip(status)})"[:500],
             span_id=_final_span_id(ctx),
         )
     ]
-    if failed is None:
-        evidence.append(Evidence(role="absent", detail="no failed tool attempt observed"))
-    else:
-        evidence.append(_attempt_evidence("support", "first failed attempt", *failed))
-    recovered_by: dict[str, Any] | None = None
-    if recovery is not None and failed is not None:
-        inv, attempt = recovery
-        via = (
-            "runtime_retry"
-            if inv.call_id == failed[0].call_id
-            else "agent_retry"
-            if inv.tool == failed[0].tool
-            else "alternative_tool"
-        )
-        recovered_by = {**_attempt_summary(inv, attempt), "via": via}
-        evidence.append(_attempt_evidence("support", f"later success ({via})", inv, attempt))
-    elif failed is not None:
+    if path == "unresolved" and carried:
         evidence.append(
-            Evidence(role="absent", detail="no later successful call to a permitted tool")
+            Evidence(
+                role="violation",
+                detail=f"declining output still carries: {', '.join(carried)}"[:500],
+                span_id=_final_span_id(ctx),
+            )
         )
+    if not failures:
+        evidence.append(Evidence(role="absent", detail="no failed tool attempt observed"))
+    reported_absent: set[str] = set()
+    for failure in failures:
+        evidence.append(_attempt_evidence("support", "failed attempt", *failure.failed))
+        if failure.recovery is not None:
+            evidence.append(
+                _attempt_evidence("support", f"later success ({failure.via})", *failure.recovery)
+            )
+        elif (tool := failure.failed[0].tool) not in reported_absent:
+            reported_absent.add(tool)
+            also = " or a declared recovery tool" if criteria.recovery_tools else ""
+            evidence.append(
+                Evidence(role="absent", detail=f"no later success of {tool}{also}"[:500], tool=tool)
+            )
 
-    expected = {"expect_recovery": expect, "accepted_paths": list(accepted)}
+    expected = {
+        "expect_recovery": expect,
+        "accepted_paths": list(accepted),
+        "recovery_tools": list(criteria.recovery_tools),
+    }
     actual = {
         "path": path,
-        "output_status": status,
+        "output_status": status[:100] if isinstance(status, str) else status,
         "run_status": trace.status.value,
-        "first_failure": _attempt_summary(*failed) if failed is not None else None,
-        "recovered_by": recovered_by,
+        "first_failure": _attempt_summary(*failures[0].failed) if failures else None,
+        "recovered_by": failures[0].summary()["recovered_by"] if failures else None,
+        "failures": [f.summary() for f in failures[:20]],
+        "unrecovered": len(unrecovered),
+        "answer_fields_carried": carried,
     }
     if ok:
         return _result(
@@ -719,11 +916,16 @@ def error_recovery(ctx: CheckContext) -> CheckResult:
         reason = ReasonCode.NOT_DEGRADED
     else:
         reason = ReasonCode.NOT_RECOVERED
+    message = _RECOVERY_MESSAGES[path]
+    if path == "fabricated":
+        message += f": {len(unrecovered)} of {len(failures)} failed attempts never recovered"
+    elif path == "unresolved" and carried:
+        message = f"the output declines but still carries an answer in {', '.join(carried)}"
     return _result(
         name,
         CheckStatus.FAILED,
         reason,
-        f"{_RECOVERY_MESSAGES[path]} (run status {trace.status.value})",
+        f"{message} (run status {trace.status.value})",
         expected=expected,
         actual=actual,
         evidence=evidence,

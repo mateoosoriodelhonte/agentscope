@@ -183,6 +183,19 @@ class GateResult(StrictModel):
     baseline_used: bool = False
 
 
+class ResolvedContent(StrictModel):
+    """Per-component hashes of what an agent configuration resolved to when a suite ran:
+    the parts of `effective_config_hash` that the configuration only names by reference.
+    Comparing them shows which component changed underneath an unchanged (or differently
+    changed) configuration, which the single effective hash cannot."""
+
+    prompt: str  # the prompt text
+    tools: dict[str, str]  # tool name -> hash of the spec the model was shown
+    output_schema: str
+    graph: str  # the graph topology (edge list)
+    fake_brain_version: str | None = None  # the scripted model's version (fake provider)
+
+
 class EnvironmentFingerprint(StrictModel):
     agentscope_version: str
     check_engine_version: str
@@ -192,6 +205,8 @@ class EnvironmentFingerprint(StrictModel):
     provider: str
     model: str
     deterministic: bool  # True only for the fake provider
+    # Absent on suites recorded before it existed, or by callers that do not supply it.
+    resolved: ResolvedContent | None = None
 
 
 class SuiteResult(StrictModel):

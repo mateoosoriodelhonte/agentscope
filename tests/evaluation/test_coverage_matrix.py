@@ -1,4 +1,5 @@
-"""Meta-test: every check can both pass and fail, and the always-on checks always apply.
+"""Meta-test: every check can both pass and fail, and the always-on checks always apply
+(schema_validity too, except for a missing output the case explicitly accepts).
 
 A check that never fails in any scenario would pass vacuously in real suites; one that
 never passes would be noise. Every scenario is evaluated with all ten checks, not only
@@ -13,7 +14,6 @@ from scenarios import SCENARIOS
 from agentscope.domain.evaluation import CheckName, CheckStatus
 
 ALWAYS_APPLY = {
-    CheckName.SCHEMA_VALIDITY,
     CheckName.TASK_COMPLETION,
     CheckName.POLICY_COMPLIANCE,
     CheckName.FORBIDDEN_TOOL_CALLS,
@@ -46,6 +46,16 @@ def test_applicability_table() -> None:
     matrix = _matrix()
     for name, seen in matrix.items():
         assert (CheckStatus.NOT_APPLICABLE in seen) is (name not in ALWAYS_APPLY), name
+
+
+def test_schema_validity_skips_only_a_missing_output_the_case_accepts() -> None:
+    """schema_validity applies to every output; it is not applicable only when the run
+    produced none and the case sets must_complete=false."""
+    for s in SCENARIOS:
+        checks = evaluate(s.case, s.trace).checks
+        schema = next(c for c in checks if c.name is CheckName.SCHEMA_VALIDITY)
+        accepted = not s.case.success_criteria.must_complete and s.trace.final_output is None
+        assert (schema.status is CheckStatus.NOT_APPLICABLE) is accepted, s.id
 
 
 def test_every_check_is_targeted_by_a_passing_and_a_failing_scenario() -> None:

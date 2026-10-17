@@ -14,18 +14,25 @@ configuration, as before an evaluation, it stays an error.
 from __future__ import annotations
 
 import json
-import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from functools import lru_cache
 from importlib import resources
 from typing import Any
 
+from pydantic import JsonValue
+
 from agentscope.agents.base import AgentCatalog
 from agentscope.datasets.issues import Issue
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.datasets import DEGRADED_STATUSES, Dataset, EvalCase, MatchMode
-from agentscope.evaluation.normalize import normalize
+from agentscope.evaluation.checks import RECOVERY_FAULTS
+from agentscope.evaluation.normalize import (
+    equal_normalized,
+    fold_unspaced,
+    normalize,
+    strict_equal,
+)
 from agentscope.runtime.runner import effective_limits, effective_tools
 from agentscope.tools.registry import ToolRegistry
 
@@ -174,6 +181,23 @@ def _case_rules(case: EvalCase, base: str) -> list[Issue]:
                 "warning",
             )
         )
+    if expected is not None and expected.values is not None:
+        issues += _duplicate_options(expected.values, f"{base}/expected/values")
+    if criteria.recovery_tools and (
+        criteria.expect_recovery is False
+        or (
+            criteria.expect_recovery is None
+            and not any(f.kind in RECOVERY_FAULTS for f in case.faults)
+        )
+    ):
+        issues.append(
+            Issue(
+                f"{base}/success_criteria/recovery_tools",
+                "has no effect: recovery is only judged when the case expects it, or injects "
+                "a fault that makes a tool call fail",
+                "warning",
+            )
+        )
     expected_tools = {call.tool for call in case.expected_tool_calls}
     for j, tool in enumerate(case.tool_order):
         if tool not in expected_tools:
@@ -216,6 +240,32 @@ def _case_rules(case: EvalCase, base: str) -> list[Issue]:
                     Issue(path, "canary occurs in the packaged tool data, so it proves no leak")
                 )
     return issues
+
+
+def _duplicate_options(values: Sequence[JsonValue], path: str) -> list[Issue]:
+    """one_of options that answer_correctness cannot tell apart (strings equal once
+    normalized, numbers equal in value): harmless, but usually a typo or a misunderstanding
+    of the normalization ("Sept" and "Sept." are the same option)."""
+    issues = []
+    for j, option in enumerate(values):
+        same = next((i for i in range(j) if _same_option(values[i], option)), None)
+        if same is not None:
+            issues.append(
+                Issue(
+                    f"{path}/{j}",
+                    f"same as values/{same} after normalization, so it adds nothing",
+                    "warning",
+                )
+            )
+    return issues
+
+
+def _same_option(a: JsonValue, b: JsonValue) -> bool:
+    if isinstance(a, str) and isinstance(b, str):
+        return equal_normalized(a, b)
+    if isinstance(a, str) or isinstance(b, str):
+        return False
+    return strict_equal(a, b)
 
 
 def _answer_texts(case: EvalCase) -> list[str]:
@@ -313,6 +363,12 @@ def _agent_rules(
                 )
     for j, name in enumerate(case.tool_order):
         check(f"{base}/tool_order/{j}", name, "the order can never be observed")
+    for j, name in enumerate(case.success_criteria.recovery_tools):
+        check(
+            f"{base}/success_criteria/recovery_tools/{j}",
+            name,
+            "a call to it can never recover from a failure",
+        )
 
     limits = effective_limits(config.limits, case.limits)
     # One tool call per step; the fault plan counts runtime retries as calls too.
@@ -354,10 +410,9 @@ def _agent_rules(
 
 
 def _fold(text: str) -> str:
-    """NFKC, case-folded, without whitespace or format (Cf) characters: the same folding
+    """NFKC, case-folded, without whitespace or format (Cf) characters: the folding
     policy_compliance applies before looking for canaries and forbidden substrings."""
-    text = unicodedata.normalize("NFKC", text).casefold()
-    return "".join(ch for ch in text if not ch.isspace() and unicodedata.category(ch) != "Cf")
+    return fold_unspaced(text)
 
 
 def _strings(value: Any) -> Iterator[str]:

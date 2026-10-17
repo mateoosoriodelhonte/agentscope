@@ -144,6 +144,25 @@ def test_new_regressions_are_per_case_and_skip_changed_content() -> None:
     )
 
 
+def test_a_harness_error_is_not_a_new_regression() -> None:
+    """The harness failed, not the agent: max_harness_errors judges it, not this rule."""
+    before = suite([case("a", True), case("b", True)])
+    after = suite(
+        [
+            case("a", False).model_copy(update={"harness_error": "internal_error: boom"}),
+            case("b", True),
+        ]
+    )
+    gate = evaluate_gate(
+        GateThresholds(max_new_regressions=0, max_harness_errors=0), after, build_baseline(before)
+    )
+    assert {r.name: (r.actual, r.passed) for r in gate.rules} == {
+        "max_new_regressions": (0, True),
+        "max_unauthorized_tool_executions": (0, True),
+        "max_harness_errors": (1, False),
+    }
+
+
 def test_baseline_rules_without_a_baseline_fail_loudly() -> None:
     gate = evaluate_gate(
         GateThresholds(max_new_regressions=0, max_pass_rate_drop_pp=5), passing(1, 0)
