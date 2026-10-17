@@ -21,7 +21,8 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace import Status, StatusCode
 
 from agentscope import __version__
@@ -143,24 +144,43 @@ class RunCollector(SpanProcessor):
 
 
 class TracingPipeline:
-    """Process-wide tracer provider plus the run collector. Never registered globally."""
+    """Process-wide tracer provider plus the run collector. Never registered globally.
+
+    Every SDK option is passed explicitly, because the SDK falls back to OTEL_* environment
+    variables for anything left unset: a sampler could drop every span, a length limit could
+    cut payload JSON mid-string, and resource detectors could attach process details.
+    """
 
     def __init__(self, exporter: SpanExporter | None = None) -> None:
         self.collector = RunCollector()
+        self.exporter = exporter
         self.provider = TracerProvider(
-            resource=Resource.create(
-                {"service.name": "agentscope", "service.version": __version__}
-            ),
+            sampler=ALWAYS_ON,
+            resource=Resource({"service.name": "agentscope", "service.version": __version__}),
             span_limits=SpanLimits(
+                max_attributes=256,
                 max_span_attributes=256,
                 max_events=256,
                 max_event_attributes=64,
-                max_attribute_length=None,
+                max_links=128,
+                max_link_attributes=64,
+                max_attribute_length=SpanLimits.UNSET,
+                max_span_attribute_length=SpanLimits.UNSET,
             ),
         )
         self.provider.add_span_processor(self.collector)
         if exporter is not None:
-            self.provider.add_span_processor(SimpleSpanProcessor(exporter))
+            # Export happens on the processor's worker thread, so a slow or unreachable
+            # collector never blocks the event loop that runs agents.
+            self.provider.add_span_processor(
+                BatchSpanProcessor(
+                    exporter,
+                    max_queue_size=2048,
+                    schedule_delay_millis=5000,
+                    max_export_batch_size=512,
+                    export_timeout_millis=30000,
+                )
+            )
         self.tracer = self.provider.get_tracer("agentscope", __version__)
 
     def shutdown(self) -> None:

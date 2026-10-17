@@ -55,8 +55,14 @@ class Settings(BaseSettings):
     openai_compatible_url: str | None = None  # base URL, e.g. http://127.0.0.1:8080/v1
     openai_compatible_api_key: SecretStr | None = Field(default=None, repr=False)
 
-    # Optional OpenTelemetry export (OTLP/HTTP). Off unless explicitly configured.
+    # Optional OpenTelemetry export (OTLP/HTTP). Off unless explicitly configured. OTEL_*
+    # variables are ignored: export is configured only here (see tracing/export.py).
     otlp_endpoint: str | None = None
+    # Headers for the collector (e.g. an API key); sent to non-loopback hosts only over https.
+    otlp_headers: dict[str, SecretStr] = Field(default_factory=dict, repr=False)
+    # Also export span payloads (task, prompts, tool arguments and outputs); off by default,
+    # so only span structure and GenAI metadata leave the process.
+    otlp_export_content: bool = False
 
     # Explicit model pricing, e.g. AGENTSCOPE_MODEL_RATES='{"llama3.2": {...}}'.
     model_rates: dict[str, ModelRate] = Field(default_factory=dict)

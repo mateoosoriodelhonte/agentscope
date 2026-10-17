@@ -49,3 +49,30 @@ AS_OUTPUT_VALID = "agentscope.output.valid"
 AS_RUN_STATUS = "agentscope.run.status"
 AS_RUN_STEPS = "agentscope.run.steps"
 AS_FAULTS = "agentscope.faults"
+
+# --- Payload-bearing attributes ------------------------------------------------------
+# Content rather than structure: prompts, tool arguments and results, model output and
+# exception text. AgentScope writes payloads only to agentscope.input/output; the GenAI
+# content attributes (opt-in in the conventions) and the exception text attributes are
+# listed too, so the OTLP export filter (tracing/export.py) also drops them if they appear.
+GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
+GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
+GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
+GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
+GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
+EXCEPTION_MESSAGE = "exception.message"
+EXCEPTION_STACKTRACE = "exception.stacktrace"
+
+PAYLOAD_ATTRIBUTES = frozenset(
+    {
+        AS_INPUT,
+        AS_OUTPUT,
+        GEN_AI_SYSTEM_INSTRUCTIONS,
+        GEN_AI_INPUT_MESSAGES,
+        GEN_AI_OUTPUT_MESSAGES,
+        GEN_AI_TOOL_CALL_ARGUMENTS,
+        GEN_AI_TOOL_CALL_RESULT,
+        EXCEPTION_MESSAGE,
+        EXCEPTION_STACKTRACE,
+    }
+)
