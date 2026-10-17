@@ -8,6 +8,22 @@ export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
+/** One page of a list endpoint, with the total in X-Total-Count as the API sends it. */
+export function paged(items: unknown[], total: number = items.length): Response {
+  return new Response(JSON.stringify(items), {
+    headers: { 'Content-Type': 'application/json', 'X-Total-Count': String(total) },
+  })
+}
+
+/** Replies with the slice of `all` that a request's limit and offset ask for. */
+export function pageOf(all: unknown[]): (url: URL) => Response {
+  return (url) => {
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    return paged(all.slice(offset, offset + limit), all.length)
+  }
+}
+
 /**
  * Stubs global fetch with a route table keyed by "METHOD /path" (or "METHOD /path?query" for
  * an exact query). A reply is a JSON body, a Response, an Error to throw (a TypeError is what

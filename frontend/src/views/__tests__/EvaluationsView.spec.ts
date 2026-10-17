@@ -2,7 +2,7 @@ import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { agentsResponse, caseResult, datasetSummary, gate, job, suiteItem, suiteResult } from '@/__tests__/builders'
 import { loadFixture } from '@/__tests__/fixtures'
-import { calls, json, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
+import { calls, json, mockFetch, never, pageOf, paged, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import { pageTrail } from '@/composables/usePageMeta'
 import EvaluationCaseView from '../EvaluationCaseView.vue'
@@ -64,6 +64,50 @@ describe('EvaluationsView', () => {
     expect(page.text()).toContain('No evaluations match these filters')
   })
 
+  it('pages through every evaluation, with the total from the server', async () => {
+    const all = Array.from({ length: 55 }, (_, i) => suiteItem({ suite_id: `s${i}`, label: `Suite ${i}` }))
+    const { page, router, fetchMock } = await open('/evaluations', { 'GET /api/evaluations': pageOf(all) })
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe('?limit=50&offset=0')
+    expect(page.find('.count').text()).toBe('55 evaluations')
+    expect(page.findAll('tbody tr')).toHaveLength(50)
+    expect(page.find('.pager').text()).toContain('1–50 of 55')
+    await page.findAll('.pager button').find((b) => b.text() === 'Next')!.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBe('2')
+    expect(calls(fetchMock, 'GET', '/api/evaluations').pop()!.url.search).toBe('?limit=50&offset=50')
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['Suite 50', 'Suite 51', 'Suite 52', 'Suite 53', 'Suite 54'])
+    expect(page.find('.pager').text()).toContain('51–55 of 55')
+  })
+
+  it('filters on the server, so an agent whose evaluations are all older is still found', async () => {
+    const old = suiteItem({ suite_id: 'suite-old', label: 'Old v1 run', agent_ref: 'research_assistant@v1' })
+    const { page, fetchMock } = await open('/evaluations?agent=research_assistant@v1&dataset=research-assistant@1', {
+      'GET /api/evaluations': (url: URL) =>
+        url.searchParams.get('agent_ref') === 'research_assistant@v1' && url.searchParams.get('dataset') === 'research-assistant'
+          ? paged([old], 1)
+          : paged(SUITES, 60),
+      'GET /api/datasets': [datasetSummary(), datasetSummary({ name: 'task-planner', agent: 'task_planner' })],
+      'GET /api/agents': agentsResponse(),
+    })
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe(
+      '?agent_ref=research_assistant%40v1&dataset=research-assistant&limit=50&offset=0',
+    )
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['Old v1 run'])
+    expect(page.find('.count').text()).toBe('1 evaluation')
+    // Filter choices come from every dataset and agent version, not just the rows on this page.
+    const [datasets, agents] = page.findAll('form.filters select')
+    expect(datasets!.findAll('option').map((o) => o.attributes('value'))).toEqual(['', 'research-assistant@1', 'task-planner@1'])
+    expect(agents!.findAll('option').map((o) => o.attributes('value'))).toContain('research_assistant@v2')
+  })
+
+  it('checks the dataset version here, since the server filters by dataset name', async () => {
+    const v1 = suiteItem({ suite_id: 'suite-a', label: 'On version 1' })
+    const v2 = suiteItem({ suite_id: 'suite-b', label: 'On version 2', dataset_version: '2' })
+    const { page } = await open('/evaluations?dataset=research-assistant@2', { 'GET /api/evaluations': paged([v1, v2], 2) })
+    expect(page.findAll('tbody tr').map((r) => r.find('a').text())).toEqual(['On version 2'])
+    expect(page.text()).toContain('1 evaluation of another dataset version on this page is hidden')
+  })
+
   it('has loading, first-run and error states', async () => {
     let { page } = await open('/evaluations', { 'GET /api/evaluations': () => never() })
     expect(page.find('.skeleton').exists()).toBe(true)
@@ -81,6 +125,7 @@ describe('EvaluationsView', () => {
       'GET /api/datasets': [datasetSummary({ name: 'other', version: '2', agent: null }), datasetSummary()],
       'GET /api/agents': agentsResponse(),
       'POST /api/evaluations': () => json({ job_id: 'job-e', kind: 'evaluation', resource_id: 'suite-new' }, 202),
+      'GET /api/jobs/job-e': () => never(),
     })
     const dialog = page.find('[role="dialog"]')
     const selects = dialog.findAll('select')
@@ -106,6 +151,33 @@ describe('EvaluationsView', () => {
       },
     })
     expect(router.currentRoute.value.fullPath).toBe('/evaluations/suite-new?job=job-e')
+  })
+
+  it('says why the server refused to start the evaluation, issue by issue', async () => {
+    const { page } = await open('/evaluations?start=true', {
+      'GET /api/evaluations': SUITES,
+      'GET /api/datasets': [datasetSummary()],
+      'GET /api/agents': agentsResponse(),
+      'POST /api/evaluations': () =>
+        json(
+          {
+            detail: 'dataset research-assistant@1 cannot be evaluated with this agent',
+            issues: [
+              { path: '/cases/0/agent', message: "case agent 'research_assistant' does not match task_planner", severity: 'error' },
+              { path: '/cases/3/expected_tool_calls/0/tool', message: 'unknown tool search_documents', severity: 'error' },
+            ],
+          },
+          422,
+        ),
+    })
+    await page.find('[role="dialog"] form').trigger('submit')
+    await flushPromises()
+    const alert = page.find('[role="dialog"] [role="alert"]')
+    expect(alert.text()).toContain('Could not start the evaluation: dataset research-assistant@1 cannot be evaluated with this agent')
+    expect(alert.findAll('li').map((li) => li.text())).toEqual([
+      "/cases/0/agent case agent 'research_assistant' does not match task_planner",
+      '/cases/3/expected_tool_calls/0/tool unknown tool search_documents',
+    ])
   })
 
   it('sends the minimum pass rate as the decimal that was typed', async () => {
@@ -165,6 +237,62 @@ describe('EvaluationView', () => {
     await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined(), { timeout: 2000 })
     await flushPromises()
     expect(page.find('h1').text()).toBe('Nightly v1')
+    expect(page.findAll('.matrix tbody tr')).toHaveLength(3)
+  })
+
+  it('reloads the suite as the job reports progress, so the matrix agrees with the banner', async () => {
+    let polls = 0
+    const cases = suiteResult().cases
+    const { page, router } = await open('/evaluations/suite-new?job=job-e', {
+      'GET /api/evaluations/suite-new': () => {
+        const done = Math.min(polls, 3)
+        return done === 0
+          ? json({ detail: 'evaluation not found' }, 404)
+          : suiteResult({ suite_id: 'suite-new', status: done < 3 ? 'running' : 'completed', cases: cases.slice(0, done) })
+      },
+      'GET /api/jobs/job-e': () => {
+        polls += 1
+        return job({ job_id: 'job-e', kind: 'evaluation', state: polls < 3 ? 'running' : 'succeeded', progress: Math.min(polls, 3), total: 3 })
+      },
+    })
+    expect(page.find('[role="status"]').text()).toContain('Running: 1/3 cases evaluated')
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(1))
+    expect(page.text()).not.toContain('No case has finished yet')
+    await vi.waitFor(() => expect(page.find('[role="status"]').text()).toContain('Running: 2/3 cases evaluated'), { timeout: 2000 })
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(2))
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined(), { timeout: 3000 })
+    await vi.waitFor(() => expect(page.findAll('.matrix tbody tr')).toHaveLength(3))
+  })
+
+  it('shows what was stored when the job fails, instead of a stale "not found"', async () => {
+    let failed = false
+    const { page, router } = await open('/evaluations/suite-new?job=job-e', {
+      'GET /api/evaluations/suite-new': () =>
+        failed
+          ? suiteResult({ suite_id: 'suite-new', status: 'error', error: 'provider unreachable', cases: suiteResult().cases.slice(0, 1) })
+          : json({ detail: 'evaluation not found' }, 404),
+      'GET /api/jobs/job-e': () => {
+        failed = true
+        return job({ job_id: 'job-e', kind: 'evaluation', state: 'failed', progress: 1, total: 3, error: 'provider unreachable' })
+      },
+    })
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined())
+    await flushPromises()
+    expect(page.find('[role="alert"]').text()).toContain('The evaluation job failed: provider unreachable')
+    expect(page.text()).not.toContain('Could not load this evaluation')
+    expect(page.find('.title-row').text()).toContain('error')
+    expect(page.findAll('.matrix tbody tr')).toHaveLength(1)
+  })
+
+  it('falls back to the stored suite when the server no longer knows the job', async () => {
+    const { page, router } = await open('/evaluations/suite-v1?job=job-gone', {
+      'GET /api/evaluations/suite-v1': () => suiteResult({ status: 'error', error: 'interrupted' }),
+      'GET /api/jobs/job-gone': () => json({ detail: 'job not found' }, 404),
+    })
+    await vi.waitFor(() => expect(router.currentRoute.value.query.job).toBeUndefined())
+    await flushPromises()
+    expect(page.find('[role="note"]').text()).toContain('no longer tracks the job')
+    expect(page.find('[role="alert"]').text()).toContain('This evaluation did not finish: interrupted')
     expect(page.findAll('.matrix tbody tr')).toHaveLength(3)
   })
 

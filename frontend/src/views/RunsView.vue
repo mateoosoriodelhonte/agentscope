@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import { RouterLink } from 'vue-router'
 import { api, pollJob, type RunListQuery, type Verdict } from '@/api/client'
 import { RUN_STATUSES, type RunSummary } from '@/api/types'
+import CopyButton from '@/components/ui/CopyButton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SimulatedBadge from '@/components/ui/SimulatedBadge.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
@@ -274,7 +275,11 @@ const triState = (value: boolean | null) => (value === null ? '' : value ? 'yes'
               <td><StatusBadge :status="run.status" /></td>
               <td class="task">
                 <RouterLink :to="`/runs/${encodeURIComponent(run.run_id)}`" class="task-link">{{ run.task }}</RouterLink>
-                <span class="run-id mono">{{ shortId(run.run_id) }}</span>
+                <!-- The full id is what Compare runs and the API take: shown on hover, copied here. -->
+                <span class="run-id mono" :title="run.run_id">
+                  {{ shortId(run.run_id) }}
+                  <CopyButton :value="run.run_id" :label="`Copy run id ${shortId(run.run_id)}`" />
+                </span>
               </td>
               <td>
                 <span class="mono agent">{{ run.agent }}@{{ run.agent_version }}</span>
@@ -400,6 +405,9 @@ tbody tr:last-child td {
   color: var(--accent);
 }
 .run-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-size: 11px;
   color: var(--text-faint);
 }

@@ -38,9 +38,12 @@ onBeforeUnmount(() => clearTimeout(timer))
 .copy {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  height: 20px;
-  padding: 0 3px;
+  /* WCAG 2.2 target size: at least 24 x 24 CSS px, even in dense tables. */
+  min-width: 24px;
+  height: 24px;
+  padding: 0 5px;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;

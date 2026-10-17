@@ -41,7 +41,8 @@ describe('TraceView', () => {
     expect(header.text()).toContain('research_assistant@v1')
     expect(header.text()).toContain('Simulated model: demonstrates harness mechanics, not model behaviour')
     expect(header.text()).toMatch(/Tokens\s*not reported/)
-    expect(header.text()).toMatch(/Cost\s*not configured/)
+    // No tokens were reported, so no cost could be computed whatever the rates.
+    expect(header.text()).toMatch(/Cost\s*not reported/)
     expect(header.text()).not.toContain('$0')
   })
 
@@ -171,6 +172,38 @@ describe('TraceView', () => {
       'retrieve_document: malformed on every call',
       'retrieve_document: error on calls 2–4',
     ])
+  })
+
+  it('says the cost is not reported when the provider reported no tokens, even with rates configured', async () => {
+    const detail = structuredClone(strict)
+    detail.trace.usage = { input_tokens: null, output_tokens: null, reported_calls: 0, total_calls: 3, source: 'provider_reported' }
+    const { page } = await open(detail)
+    expect(page.find('.run-header').text()).toMatch(/Cost\s*not reported/)
+    expect(page.find('.run-header').text()).not.toContain('not configured')
+  })
+
+  it('says the cost is not configured only when tokens were reported but no rate exists', async () => {
+    const detail = structuredClone(strict)
+    detail.trace.usage = { input_tokens: 120, output_tokens: 30, reported_calls: 3, total_calls: 3, source: 'provider_reported' }
+    const { page } = await open(detail)
+    expect(page.find('.run-header').text()).toMatch(/Tokens\s*120 in · 30 out/)
+    expect(page.find('.run-header').text()).toMatch(/Cost\s*not configured/)
+  })
+
+  it('keeps keyboard focus in the tree when collapsing all from a nested row', async () => {
+    const { page } = await open(strict, '?check=answer_correctness')
+    await flushPromises()
+    const row = page.find(`#trace-row-${answerSpan}`)
+    expect(row.attributes('aria-level')).toBe('3')
+    ;(row.element as HTMLElement).focus()
+    await row.trigger('keydown', { key: '[' })
+    await flushPromises()
+    expect(page.find(`#trace-row-${answerSpan}`).exists()).toBe(false)
+    // Focus moves to the nearest visible ancestor, so the trace shortcuts keep working.
+    expect(document.activeElement?.id).toBe('trace-row-step-4')
+    await page.find('#trace-row-step-4').trigger('keydown', { key: ']' })
+    await flushPromises()
+    expect(page.find('#trace-row-step-4').attributes('aria-expanded')).toBe('true')
   })
 
   it('labels a configured cost as an estimate', async () => {

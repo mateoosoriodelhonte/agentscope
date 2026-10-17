@@ -66,6 +66,78 @@ describe('NewRunDrawer', () => {
     expect(drawer.find('[role="dialog"]').exists()).toBe(false)
   })
 
+  it('can be closed while the run executes, and links to the run when it finishes', async () => {
+    let state: 'running' | 'succeeded' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, finished_at: null }),
+    })
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' })
+    await submit(drawer)
+    expect(drawer.find('[role="dialog"] .progress').text()).toContain('Running the agent')
+    const close = drawer.find('[role="dialog"] .modal-head .close')
+    expect(close.attributes('disabled')).toBeUndefined()
+    await close.trigger('click')
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+    expect(drawer.find('.run-notice').text()).toContain('Run in progress')
+
+    // Shown again, it is the same form, and a second run cannot be started meanwhile.
+    await drawer.findAll('.run-notice button').find((b) => b.text() === 'Show')!.trigger('click')
+    await flushPromises()
+    expect((drawer.find('textarea.task').element as HTMLTextAreaElement).value).toBe('Who founded the library?')
+    expect(drawer.find('[role="dialog"] .modal-foot .btn.primary').attributes('disabled')).toBeDefined()
+    await submit(drawer)
+    expect(calls(fetchMock, 'POST', '/api/runs')).toHaveLength(1)
+    await drawer.find('[role="dialog"]').trigger('keydown', { key: 'Escape' })
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+
+    state = 'succeeded'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run finished'), { timeout: 3000 })
+    // Closed, the drawer does not navigate away from what the user is looking at.
+    expect(router.currentRoute.value.path).toBe('/runs')
+    expect(drawer.find('.run-notice a').attributes('href')).toBe('/runs/run-9')
+    await drawer.findAll('.run-notice button').find((b) => b.text() === 'Dismiss')!.trigger('click')
+    expect(drawer.find('.run-notice').exists()).toBe(false)
+  })
+
+  it('reports a run that failed after its drawer was closed', async () => {
+    let state: 'running' | 'failed' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, error: state === 'failed' ? 'provider unreachable' : null }),
+    })
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' })
+    await submit(drawer)
+    await drawer.find('[role="dialog"] .modal-foot .btn').trigger('click')
+    expect(drawer.find('[role="dialog"]').exists()).toBe(false)
+    state = 'failed'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run failed: provider unreachable'), {
+      timeout: 3000,
+    })
+  })
+
+  it('does not show a run that failed in the background as the failure of a newer form', async () => {
+    let state: 'running' | 'failed' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, error: state === 'failed' ? 'provider unreachable' : null }),
+    })
+    await submit(await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' }))
+    closeNewRun()
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v2', task: 'Another question' })
+    expect(drawer.find('[role="dialog"] .progress').text()).toContain('Another run is still in progress')
+    state = 'failed'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run failed: provider unreachable'), {
+      timeout: 3000,
+    })
+    // The newer form started nothing: it neither claims the failure nor stays blocked.
+    expect(drawer.find('[role="dialog"]').text()).not.toContain('Could not start the run')
+    expect(drawer.find('[role="dialog"] .modal-foot .btn.primary').attributes('disabled')).toBeUndefined()
+  })
+
   it('lists what to fix instead of sending an invalid form', async () => {
     const drawer = await openDrawer()
     await drawer.findAll('button').find((b) => b.text() === 'Add tool fault')!.trigger('click')
@@ -118,6 +190,32 @@ describe('NewRunDrawer', () => {
       faults: c.faults,
       expected: { field: 'answer', match: 'one_of', values: ['September', 'Sept'] },
     })
+  })
+
+  it('lists the located reasons the server gave for refusing the run', async () => {
+    fetchMock.mockImplementation(async (input: string) =>
+      input === '/api/agents'
+        ? json(agentsResponse())
+        : json(
+            {
+              detail: 'the request is invalid',
+              issues: [{ path: '/body/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' }],
+            },
+            422,
+          ),
+    )
+    const values = Array.from({ length: 33 }, (_, i) => `v${i}`)
+    const drawer = await openDrawer({
+      agentRef: 'research_assistant@v1',
+      task: 'Which value?',
+      expected: { field: 'answer', match: 'one_of', value: null, values, tolerance: null, max_chars: null },
+    })
+    await submit(drawer)
+    const alerts = drawer.findAll('[role="alert"]').map((a) => a.text())
+    expect(alerts.some((text) => text.includes('/expected/values List should have at most 32 items after validation, not 33'))).toBe(true)
+    expect(alerts.some((text) => text.includes('Could not start the run: the request is invalid'))).toBe(true)
+    // The refused field is marked, as it would be for a problem found before sending.
+    expect(drawer.find('textarea[aria-invalid="true"]').exists()).toBe(true)
   })
 
   it('shows why the server refused the run', async () => {

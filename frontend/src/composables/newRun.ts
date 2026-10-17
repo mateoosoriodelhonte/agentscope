@@ -34,3 +34,8 @@ export function openNewRun(prefill: NewRunPrefill = {}): void {
 export function closeNewRun(): void {
   newRun.open = false
 }
+
+/** Shows the drawer again as it was left, e.g. to watch a run it started that is still going. */
+export function reopenNewRun(): void {
+  newRun.open = true
+}

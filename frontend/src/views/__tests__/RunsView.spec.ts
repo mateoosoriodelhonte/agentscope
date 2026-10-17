@@ -70,6 +70,19 @@ describe('RunsView', () => {
     expect(page.find('.pager').text()).toContain('1–1 of 1')
   })
 
+  it('offers the full run id to copy next to the short one', async () => {
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    const { page } = await open({ items: [summary()], total: 1 })
+    const row = page.find('tbody tr')
+    expect(row.find('.run-id').text()).toContain('6e2fdf5d')
+    expect(row.find('.run-id').attributes('title')).toBe('6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e')
+    await row.find('button[aria-label="Copy run id 6e2fdf5d"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e')
+    vi.unstubAllGlobals()
+  })
+
   it('holds filters in the URL and sends them to the API', async () => {
     const { page, router } = await open({ items: [summary()], total: 1 })
     const selects = page.findAll('select')

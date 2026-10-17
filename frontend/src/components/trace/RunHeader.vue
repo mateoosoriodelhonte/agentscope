@@ -20,6 +20,17 @@ const tokens = computed(() => {
   return `${usage.input_tokens.toLocaleString()} in · ${usage.output_tokens.toLocaleString()} out${coverage}`
 })
 
+/**
+ * Why there is no cost. The API computes it only from provider-reported tokens and a rate
+ * configured for the model, so missing tokens mean "not reported" (whatever the rates);
+ * tokens without a cost can only mean no rate was configured.
+ */
+const costMissing = computed(() => {
+  const usage = props.trace.usage
+  const reported = usage !== null && usage.input_tokens !== null && usage.output_tokens !== null
+  return reported ? 'not configured' : 'not reported'
+})
+
 /** Only ever an estimate from configured per-model rates; labelled as one. */
 const cost = computed(() => {
   const estimate = props.trace.cost
@@ -83,8 +94,8 @@ const faults = computed(() => [
       <Metric
         label="Cost"
         :value="cost"
-        missing="not configured"
-        hint="Estimate from configured per-model rates; shown only when rates are configured and the provider reports tokens."
+        :missing="costMissing"
+        hint="Estimate from configured per-model rates; shown only when a rate is configured for this model and the provider reports tokens."
       />
       <div v-if="faults.length" class="faults">
         <dt>Injected faults</dt>

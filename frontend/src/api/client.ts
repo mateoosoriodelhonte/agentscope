@@ -1,7 +1,6 @@
 import type {
   AgentsResponse,
   Comparison,
-  Dataset,
   DatasetDetail,
   DatasetSummary,
   DatasetValidation,
@@ -23,9 +22,17 @@ import type {
   SettingsView,
   SuiteListItem,
   SuiteResult,
+  SuiteStatus,
+  ValidationIssue,
 } from './types'
 
 export class ApiError extends Error {
+  /**
+   * Why the server refused the request, located by path: the `issues` of a 422 body. The
+   * `detail` (the message) only says that the request is invalid, never why.
+   */
+  readonly issues: ValidationIssue[]
+
   constructor(
     readonly status: number,
     message: string,
@@ -34,7 +41,33 @@ export class ApiError extends Error {
   ) {
     super(message)
     this.name = 'ApiError'
+    this.issues = errorIssues(body)
   }
+}
+
+/** Request validation locates fields under /body; forms name them from the body's root. */
+function bodyPath(path: string): string {
+  if (path === '/body') return '/'
+  return path.startsWith('/body/') ? path.slice('/body'.length) : path
+}
+
+/** The `issues` list of an error body (ValidationIssue), skipping anything malformed. */
+function errorIssues(body: unknown): ValidationIssue[] {
+  if (body === null || typeof body !== 'object') return []
+  const raw = (body as { issues?: unknown }).issues
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item: unknown): ValidationIssue[] => {
+    if (item === null || typeof item !== 'object') return []
+    const { path, message, severity } = item as { path?: unknown; message?: unknown; severity?: unknown }
+    if (typeof message !== 'string') return []
+    return [
+      {
+        path: bodyPath(typeof path === 'string' ? path : ''),
+        message,
+        severity: severity === 'warning' ? 'warning' : 'error',
+      },
+    ]
+  })
 }
 
 /**
@@ -69,7 +102,8 @@ export class JobFailedError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Sends one request; an error status rejects with ApiError. */
+async function send(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
   if (init.method && init.method !== 'GET') {
@@ -88,11 +122,51 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const message = errorDetail(body) ?? (response.statusText || `HTTP ${response.status}`)
     throw new ApiError(response.status, message, body)
   }
-  return (await response.json()) as T
+  return response
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await (await send(path, init)).json()) as T
+}
+
+/** One page of a list endpoint. `total` is null when the server did not say how many exist. */
+export interface Page<T> {
+  items: T[]
+  total: number | null
+}
+
+/**
+ * A list endpoint that pages: the body is the page (a bare list, or `{items, total}`) and the
+ * total comes from `X-Total-Count` when the body does not carry it.
+ */
+async function requestPage<T>(path: string, signal?: AbortSignal): Promise<Page<T>> {
+  const response = await send(path, { signal })
+  const body = (await response.json()) as unknown
+  const header = response.headers.get('X-Total-Count')
+  const counted = header === null || header.trim() === '' ? NaN : Number(header)
+  let items: T[] = []
+  let total: number | null = Number.isInteger(counted) && counted >= 0 ? counted : null
+  if (Array.isArray(body)) {
+    items = body as T[]
+  } else if (body !== null && typeof body === 'object' && Array.isArray((body as { items?: unknown }).items)) {
+    const page = body as { items: T[]; total?: unknown }
+    items = page.items
+    if (typeof page.total === 'number' && Number.isInteger(page.total) && page.total >= 0) total = page.total
+  }
+  return { items, total }
 }
 
 function post<T>(path: string, body: unknown = {}, signal?: AbortSignal): Promise<T> {
   return request<T>(path, { method: 'POST', body: JSON.stringify(body), signal })
+}
+
+/**
+ * Posts a document exactly as the user wrote it. Parsing and re-serialising it in the browser
+ * would hide what the server's strict loader rejects (duplicate keys, non-finite numbers) and
+ * store different content than the file.
+ */
+function postText<T>(path: string, text: string): Promise<T> {
+  return request<T>(path, { method: 'POST', body: text })
 }
 
 /**
@@ -121,6 +195,24 @@ export interface RunListQuery {
   limit?: number
   offset?: number
 }
+
+/** Filters for GET /api/evaluations. `dataset` is a dataset name (every version). */
+export interface SuiteListQuery {
+  agent_ref?: string
+  dataset?: string
+  status?: SuiteStatus
+  limit?: number
+  offset?: number
+}
+
+/** Paging for GET /api/experiments. */
+export interface ExperimentListQuery {
+  limit?: number
+  offset?: number
+}
+
+/** The most rows one list request may ask for (the API's own cap). */
+export const MAX_PAGE = 200
 
 /**
  * Filters for GET /api/failures. Undefined fields are not sent; a server that does not
@@ -158,24 +250,24 @@ export const api = {
   runExportUrl: (runId: string) => `/api/runs/${seg(runId)}/export`,
 
   listDatasets: (signal?: AbortSignal) => request<DatasetSummary[]>('/api/datasets', { signal }),
-  importDataset: (dataset: Dataset) => post<DatasetSummary>('/api/datasets', dataset),
-  /** Lints an untrusted document without importing it. */
-  validateDataset: (document: unknown) =>
-    post<DatasetValidation>('/api/datasets/validate', document),
+  /** Imports the dataset document `source` (JSON text), sent byte for byte. */
+  importDataset: (source: string) => postText<DatasetSummary>('/api/datasets', source),
+  /** Lints an untrusted document (JSON text, sent byte for byte) without importing it. */
+  validateDataset: (source: string) => postText<DatasetValidation>('/api/datasets/validate', source),
   getDataset: async (name: string, version: string, signal?: AbortSignal) =>
     request<DatasetDetail>(`/api/datasets/${seg(name)}/${seg(version)}`, { signal }),
   datasetExportUrl: (name: string, version: string) =>
     `/api/datasets/${seg(name)}/${seg(version)}/export`,
 
-  listEvaluations: (signal?: AbortSignal) =>
-    request<SuiteListItem[]>('/api/evaluations', { signal }),
+  listEvaluations: (query: SuiteListQuery = {}, signal?: AbortSignal) =>
+    requestPage<SuiteListItem>(`/api/evaluations${queryString(query)}`, signal),
   createEvaluation: (body: EvaluationCreate) => post<JobAccepted>('/api/evaluations', body),
   getEvaluation: async (suiteId: string, signal?: AbortSignal) =>
     request<SuiteResult>(`/api/evaluations/${seg(suiteId)}`, { signal }),
   evaluationExportUrl: (suiteId: string) => `/api/evaluations/${seg(suiteId)}/export`,
 
-  listExperiments: (signal?: AbortSignal) =>
-    request<ExperimentListItem[]>('/api/experiments', { signal }),
+  listExperiments: (query: ExperimentListQuery = {}, signal?: AbortSignal) =>
+    requestPage<ExperimentListItem>(`/api/experiments${queryString(query)}`, signal),
   // Run mode (dataset + a + b): starts a job. Compare mode (suite_a + suite_b): returns the
   // stored Comparison directly (201), because both suites are already finished.
   createExperiment: (body: ExperimentCreate) => post<JobAccepted>('/api/experiments', body),

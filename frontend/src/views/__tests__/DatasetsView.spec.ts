@@ -107,6 +107,48 @@ describe('dataset import', () => {
     expect(router.currentRoute.value.path).toBe('/datasets/research-assistant/1')
   })
 
+  it('validates and imports the exact text, so the server rejects what JSON.parse would hide', async () => {
+    // A duplicate key (the last one would win) and a number JSON.parse turns into Infinity.
+    const text =
+      '{"schema_version": 1, "name": "qa", "cases": [{"id": "c1", "task": "t",\n' +
+      '  "forbidden_tools": ["write_note"], "forbidden_tools": [],\n' +
+      '  "expected": {"field": "answer", "match": "numeric", "value": 1, "tolerance": 1e400}}]}\n'
+    const { page, fetchMock } = await open('/datasets', {
+      'GET /api/datasets': [],
+      'POST /api/datasets/validate': valid,
+      'POST /api/datasets': () => json(datasetSummary(), 201),
+    })
+    await button(page, 'Import dataset').trigger('click')
+    await page.find('[role="dialog"] textarea').setValue(text)
+    await button(page, 'Validate').trigger('click')
+    await flushPromises()
+    await button(page, 'Import').trigger('click')
+    await flushPromises()
+    const sent = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url, init]) => [url, init!.body])
+    expect(sent).toEqual([
+      ['/api/datasets/validate', text],
+      ['/api/datasets', text],
+    ])
+  })
+
+  it('refuses a document over the server limit (5 MiB) before sending it', async () => {
+    const { page, fetchMock } = await open('/datasets', { 'GET /api/datasets': [], 'POST /api/datasets/validate': valid })
+    await button(page, 'Import dataset').trigger('click')
+    // Multi-byte characters: the limit is on the UTF-8 bytes sent, not on characters.
+    const text = `{"description": "${'é'.repeat(2.5 * 1024 * 1024)}"}`
+    await page.find('[role="dialog"] textarea').setValue(text)
+    await button(page, 'Validate').trigger('click')
+    await flushPromises()
+    expect(page.find('[role="dialog"] [role="alert"]').text()).toContain('the limit is 5.0 MiB')
+    expect(calls(fetchMock, 'POST', '/api/datasets/validate')).toHaveLength(0)
+
+    const input = page.find('input[type="file"]')
+    const file = new File(['x'.repeat(5 * 1024 * 1024 + 1)], 'big.json', { type: 'application/json' })
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    expect(page.find('[role="dialog"] [role="alert"]').text()).toContain('big.json is 5.0 MiB; the limit is 5.0 MiB')
+  })
+
   it('reads a picked file in the browser', async () => {
     const { page } = await open('/datasets', { 'GET /api/datasets': [] })
     await button(page, 'Import dataset').trigger('click')
@@ -116,6 +158,22 @@ describe('dataset import', () => {
     await input.trigger('change')
     await vi.waitFor(() => expect((page.find('[role="dialog"] textarea').element as HTMLTextAreaElement).value).toBe(document))
     expect(page.find('[role="dialog"]').text()).toContain('from qa.json')
+  })
+
+  it('refuses a picked file that is not valid UTF-8 instead of sending replaced characters', async () => {
+    const { page, fetchMock } = await open('/datasets', { 'GET /api/datasets': [], 'POST /api/datasets/validate': valid })
+    await button(page, 'Import dataset').trigger('click')
+    const input = page.find('input[type="file"]')
+    // "Café" in Latin-1: byte 0xE9 is not UTF-8. Decoded leniently it would become "Caf�".
+    const bytes = new Uint8Array([...new TextEncoder().encode('{"name": "Caf'), 0xe9, ...new TextEncoder().encode('"}')])
+    const file = new File([bytes], 'latin1.json', { type: 'application/json' })
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    await vi.waitFor(() =>
+      expect(page.find('[role="dialog"] [role="alert"]').text()).toContain('latin1.json is not valid UTF-8 text'),
+    )
+    expect((page.find('[role="dialog"] textarea').element as HTMLTextAreaElement).value).toBe('')
+    expect(calls(fetchMock, 'POST', '/api/datasets/validate')).toHaveLength(0)
   })
 
   it('explains a version conflict', async () => {

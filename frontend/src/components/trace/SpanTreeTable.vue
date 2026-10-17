@@ -104,14 +104,19 @@ function onKeydown(event: KeyboardEvent): void {
   event.stopPropagation()
 }
 
-// Keep the selection in view, and move focus with it while the tree has focus.
-watch(selected, async () => {
+// Keep the focus row in view, and move focus with it while the tree has focus. The focus row
+// changes with the selection and also when collapsing hides the focused row (e.g. "[" on a
+// span inside a step): the row is removed with focus in it, so whether the tree had focus is
+// read before the DOM update (a pre-flush watcher), and focus then lands on the ancestor
+// instead of falling to <body>, where no trace shortcut works.
+watch([selected, focusId], async () => {
+  const hadFocus = table.value?.contains(document.activeElement) ?? false
   await nextTick()
   const id = focusId.value
   const el = id ? document.getElementById(domId(id)) : null
   if (!el) return
   el.scrollIntoView?.({ block: 'nearest' })
-  if (table.value?.contains(document.activeElement)) el.focus({ preventScroll: true })
+  if (hadFocus || table.value?.contains(document.activeElement)) el.focus({ preventScroll: true })
 })
 
 defineExpose({ move })

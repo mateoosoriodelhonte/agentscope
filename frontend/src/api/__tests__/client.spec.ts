@@ -94,8 +94,8 @@ describe('api reads', () => {
 describe('api mutations', () => {
   it.each([
     ['createRun', () => api.createRun({ agent_ref: 'research_assistant@v2', task: 'q' }), '/api/runs', { agent_ref: 'research_assistant@v2', task: 'q' }],
-    ['importDataset', () => api.importDataset({ schema_version: 1, name: 'qa', version: '1', description: '', agent: null, cases: [] }), '/api/datasets', { schema_version: 1, name: 'qa', version: '1', description: '', agent: null, cases: [] }],
-    ['validateDataset', () => api.validateDataset({ name: 'qa' }), '/api/datasets/validate', { name: 'qa' }],
+    ['importDataset', () => api.importDataset('{"schema_version": 1, "name": "qa"}'), '/api/datasets', { schema_version: 1, name: 'qa' }],
+    ['validateDataset', () => api.validateDataset('{"name": "qa"}'), '/api/datasets/validate', { name: 'qa' }],
     ['createEvaluation', () => api.createEvaluation({ agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }), '/api/evaluations', { agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }],
     ['createExperiment', () => api.createExperiment({ name: 'x', suite_a: 's1', suite_b: 's2' }), '/api/experiments', { name: 'x', suite_a: 's1', suite_b: 's2' }],
     ['purge', () => api.purge({ confirm: 'PURGE', scope: 'runs' }), '/api/settings/purge', { confirm: 'PURGE', scope: 'runs' }],
@@ -108,6 +108,54 @@ describe('api mutations', () => {
     expect(headers.get('Content-Type')).toBe('application/json')
     expect(headers.get('X-AgentScope-Client')).toBe('1')
     expect(JSON.parse(String(init.body))).toEqual(body)
+  })
+})
+
+describe('dataset documents', () => {
+  it('sends the text exactly as written, so the server applies its strict JSON rules', async () => {
+    // JSON.parse would keep the last duplicate key and turn 1e400 into Infinity (then null).
+    const text = '{"name": "qa", "cases": [{"forbidden_tools": ["write_note"], "forbidden_tools": [], "tolerance": 1e400}]}\n'
+    await api.validateDataset(text)
+    expect(lastCall().init.body).toBe(text)
+    await api.importDataset(text)
+    expect(lastCall().init.body).toBe(text)
+  })
+})
+
+describe('paged lists', () => {
+  const page = (body: unknown, total?: string) =>
+    new Response(JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json', ...(total === undefined ? {} : { 'X-Total-Count': total }) },
+    })
+
+  it('sends evaluation filters and paging, and reads the total from X-Total-Count', async () => {
+    fetchMock.mockResolvedValueOnce(page([{ suite_id: 's51' }], '55'))
+    const result = await api.listEvaluations({
+      agent_ref: 'research_assistant@v2',
+      dataset: 'research-assistant',
+      status: 'completed',
+      limit: 50,
+      offset: 50,
+    })
+    expect(lastCall().url).toBe(
+      '/api/evaluations?agent_ref=research_assistant%40v2&dataset=research-assistant&status=completed&limit=50&offset=50',
+    )
+    expect(result).toEqual({ items: [{ suite_id: 's51' }], total: 55 })
+  })
+
+  it('pages experiments', async () => {
+    fetchMock.mockResolvedValueOnce(page([{ experiment_id: 'e1' }], '3'))
+    expect(await api.listExperiments({ limit: 20, offset: 0 })).toEqual({ items: [{ experiment_id: 'e1' }], total: 3 })
+    expect(lastCall().url).toBe('/api/experiments?limit=20&offset=0')
+  })
+
+  it('accepts an {items, total} body, and says when the total is unknown', async () => {
+    fetchMock.mockResolvedValueOnce(page({ items: [{ suite_id: 's1' }], total: 7 }))
+    expect(await api.listEvaluations()).toEqual({ items: [{ suite_id: 's1' }], total: 7 })
+    fetchMock.mockResolvedValueOnce(page([{ suite_id: 's1' }]))
+    expect(await api.listEvaluations()).toEqual({ items: [{ suite_id: 's1' }], total: null })
+    fetchMock.mockResolvedValueOnce(page([], 'many'))
+    expect(await api.listExperiments()).toEqual({ items: [], total: null })
   })
 })
 
@@ -134,6 +182,29 @@ describe('errors', () => {
       status: 422,
       message: 'task: String should have at least 1 character; faults.0.kind: Input should be a fault kind',
     })
+  })
+
+  it('keeps the located issues of a 422, named from the request body', async () => {
+    const issues = [
+      { path: '/body/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' },
+      { path: '/cases/0/agent', message: 'agent research_assistant does not match', severity: 'warning' },
+      { path: '/body', message: 'Field required' },
+      { message: 42 },
+    ]
+    fetchMock.mockResolvedValueOnce(json({ detail: 'the request is invalid', issues }, 422))
+    const error = await api.createRun({ agent_ref: 'a@v1', task: 'q' }).catch((e: unknown) => e)
+    expect(error).toMatchObject({ status: 422, message: 'the request is invalid' })
+    expect((error as ApiError).issues).toEqual([
+      { path: '/expected/values', message: 'List should have at most 32 items after validation, not 33', severity: 'error' },
+      { path: '/cases/0/agent', message: 'agent research_assistant does not match', severity: 'warning' },
+      { path: '/', message: 'Field required', severity: 'error' },
+    ])
+  })
+
+  it('has no issues when the body carries none', async () => {
+    fetchMock.mockResolvedValueOnce(json({ detail: 'run not found' }, 404))
+    const error = await api.getRun('missing').catch((e: unknown) => e)
+    expect((error as ApiError).issues).toEqual([])
   })
 
   it('keeps a structured error body for the caller', async () => {

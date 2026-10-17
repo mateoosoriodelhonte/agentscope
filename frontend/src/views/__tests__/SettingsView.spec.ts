@@ -125,6 +125,27 @@ describe('purge confirmation', () => {
     expect(page.find('[role="dialog"] .modal-foot .btn.danger').text()).toBe('Purge again')
   })
 
+  it('reports a purge refused while jobs run as a refusal, not as a partial purge', async () => {
+    const { page, fetchMock } = await open({
+      'GET /api/settings': settingsView(),
+      'POST /api/settings/purge': () =>
+        json({ detail: 'jobs are still running; purge once they have finished', code: 'jobs_running' }, 409),
+    })
+    await button(page, 'Purge data…').trigger('click')
+    await page.find('[role="dialog"] input.confirm').setValue('PURGE')
+    await page.find('[role="dialog"] form').trigger('submit')
+    await flushPromises()
+    const dialog = page.find('[role="dialog"]')
+    expect(dialog.find('[role="alert"]').text()).toBe(
+      'Purge refused: jobs are still running; purge once they have finished. Nothing was deleted.',
+    )
+    expect(dialog.text()).not.toContain('Partially purged')
+    expect(dialog.find('[aria-label="Purge result"]').exists()).toBe(false)
+    expect(dialog.find('.modal-foot .btn.danger').text()).toBe('Purge')
+    // Nothing was deleted: the inventory is not reloaded as if it had been.
+    expect(calls(fetchMock, 'GET', '/api/settings')).toHaveLength(1)
+  })
+
   it('shows a refused purge as an error', async () => {
     const { page } = await open({
       'GET /api/settings': settingsView(),

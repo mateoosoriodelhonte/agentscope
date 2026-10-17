@@ -5,12 +5,13 @@ import { describeError } from '@/api/errors'
 import { PURGE_SCOPES, type PurgeRequest, type PurgeResult, type PurgeScope } from '@/api/types'
 import Modal from '@/components/ui/Modal.vue'
 import { formatBytes } from '@/composables/format'
-import { partialPurge, SCOPE_TEXT } from './purge'
+import { purgeConflict, SCOPE_TEXT } from './purge'
 
 /*
  * Deletes stored data. Nothing is sent until "PURGE" is typed exactly. The result shows what
  * was deleted and the storage size before and after; a partial purge (rows deleted, old
- * copies still on disk) says so and offers to purge again.
+ * copies still on disk) says so and offers to purge again. A refused purge (e.g. jobs still
+ * running) deleted nothing, so it is an error, not a result.
  */
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: []; purged: [] }>()
@@ -21,6 +22,7 @@ const confirmation = ref('')
 const busy = ref(false)
 const result = shallowRef<PurgeResult | null>(null)
 const partial = ref<string | null>(null)
+const refused = ref<string | null>(null)
 const error = ref<string | null>(null)
 
 watch(
@@ -32,6 +34,7 @@ watch(
     confirmation.value = ''
     result.value = null
     partial.value = null
+    refused.value = null
     error.value = null
   },
 )
@@ -50,18 +53,23 @@ async function purge(): Promise<void> {
   busy.value = true
   error.value = null
   partial.value = null
+  refused.value = null
   try {
     result.value = await api.purge(body)
     // Another purge needs a fresh confirmation.
     confirmation.value = ''
     emit('purged')
   } catch (e) {
-    const incomplete = partialPurge(e)
-    if (incomplete) {
-      partial.value = incomplete.message
-      result.value = incomplete.result
+    const conflict = purgeConflict(e)
+    if (conflict?.kind === 'partial') {
+      partial.value = conflict.message
+      result.value = conflict.result
       confirmation.value = ''
       emit('purged')
+    } else if (conflict?.kind === 'refused') {
+      // Nothing was deleted: keep the confirmation so the same purge can be sent again.
+      result.value = null
+      refused.value = conflict.message.replace(/\.+$/, '')
     } else {
       error.value = describeError(e).message
     }
@@ -121,9 +129,7 @@ async function purge(): Promise<void> {
           </tbody>
         </table>
       </section>
-      <p v-else-if="partial" class="callout warn" role="alert">
-        <span><strong>Partially purged.</strong> {{ partial }}</span>
-      </p>
+      <p v-if="refused" class="callout fail" role="alert">Purge refused: {{ refused }}. Nothing was deleted.</p>
       <p v-if="error" class="callout fail" role="alert">Purge failed: {{ error }}</p>
     </form>
     <template #footer>

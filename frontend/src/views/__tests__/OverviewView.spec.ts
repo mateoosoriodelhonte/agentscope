@@ -1,6 +1,6 @@
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { job, overview } from '@/__tests__/builders'
+import { job, overview, suiteItem } from '@/__tests__/builders'
 import { calls, json, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import { newRun } from '@/composables/newRun'
@@ -79,7 +79,8 @@ describe('OverviewView', () => {
     expect(svg.findAll('polyline')).toHaveLength(1) // v2 has a single point
     expect(svg.findAll('.marker')).toHaveLength(3)
     expect(svg.find('line.threshold').exists()).toBe(true)
-    expect(page.find('.legend .rule').text()).toBe('gate minimum 80%')
+    // The gate belongs to the newest gated suite (suite-v1): its rule is drawn for that line only.
+    expect(page.find('.legend .rule').text()).toBe('gate minimum 80% · research_assistant@v1')
     expect(page.find('.legend').text()).toContain('research_assistant@v2')
 
     await page.findAll('[aria-label="Show the pass rate as"] button')[1]!.trigger('click')
@@ -89,6 +90,87 @@ describe('OverviewView', () => {
     expect(rows).toHaveLength(3)
     expect(rows[2]!.text()).toContain('90%')
     expect(rows[2]!.find('a').attributes('href')).toBe('/evaluations/suite-v2')
+  })
+
+  it('draws one line per agent version and dataset, so another dataset never reads as a regression', async () => {
+    const data = overview({
+      pass_rate_series: [
+        {
+          agent_ref: 'research_assistant@v2',
+          points: [
+            { suite_id: 's1', finished_at: '2026-10-15T10:00:00Z', pass_rate: 21 / 29, dataset: 'research-assistant@1', gate_passed: null },
+            { suite_id: 's2', finished_at: '2026-10-16T10:00:00Z', pass_rate: 0.2, dataset: 'imported@1', gate_passed: null },
+            { suite_id: 's3', finished_at: '2026-10-16T11:00:00Z', pass_rate: 22 / 29, dataset: 'research-assistant@1', gate_passed: null },
+          ],
+        },
+      ],
+      recent_suites: [],
+      latest_gate: null,
+    })
+    const { page } = await open(data)
+    const svg = page.find('svg.plot')
+    // research-assistant@1 is one line (s1 → s3); imported@1 is a single point, not a drop.
+    expect(svg.findAll('polyline')).toHaveLength(1)
+    expect(svg.findAll('.marker')).toHaveLength(3)
+    expect(page.findAll('.legend li').map((li) => li.text())).toEqual([
+      'research_assistant@v2 · imported@1',
+      'research_assistant@v2 · research-assistant@1',
+    ])
+  })
+
+  it('draws the gate minimum only for the line it was applied to', async () => {
+    // The newest gated suite is a planner suite: its 90% minimum says nothing about the research agent.
+    const planner = suiteItem({ suite_id: 'suite-tp', agent_ref: 'task_planner@v2', dataset_name: 'task-planner', gate_passed: true })
+    const base = overview()
+    const data = overview({
+      recent_suites: [planner, ...base.recent_suites],
+      pass_rate_series: [
+        ...base.pass_rate_series,
+        {
+          agent_ref: 'task_planner@v2',
+          points: [{ suite_id: 'suite-tp', finished_at: '2026-10-16T12:00:00Z', pass_rate: 0.95, dataset: 'task-planner@1', gate_passed: true }],
+        },
+      ],
+      latest_gate: { ...base.latest_gate!, rules: [{ name: 'min_pass_rate', threshold: 0.9, actual: '19/20', passed: true, detail: '' }] },
+    })
+    let { page } = await open(data)
+    expect(page.find('.legend .rule').text()).toBe('gate minimum 90% · task_planner@v2 · task-planner@1')
+    expect(page.find('svg.plot').attributes('aria-label')).toContain('gate minimum 90% for task_planner@v2 · task-planner@1')
+    page.unmount()
+    ;({ page } = await open(data, '?agent=research_assistant@v1'))
+    expect(page.find('svg.plot line.threshold').exists()).toBe(false)
+    expect(page.find('.legend .rule').exists()).toBe(false)
+  })
+
+  it('says which line the gate belongs to when that line is past the charted ones', async () => {
+    const refs = ['research_assistant@v1', 'research_assistant@v2', 'research_assistant@v3', 'task_planner@v1', 'task_planner@v2']
+    const data = overview({
+      recent_suites: [suiteItem({ suite_id: 'tp-v2', agent_ref: 'task_planner@v2', dataset_name: 'task-planner', gate_passed: true })],
+      pass_rate_series: refs.map((ref, i) => ({
+        agent_ref: ref,
+        points: [
+          {
+            suite_id: ref === 'task_planner@v2' ? 'tp-v2' : `s${i}`,
+            finished_at: `2026-10-16T1${i}:00:00Z`,
+            pass_rate: 0.5,
+            dataset: ref.startsWith('task') ? 'task-planner@1' : 'research-assistant@1',
+            gate_passed: ref === 'task_planner@v2' ? true : null,
+          },
+        ],
+      })),
+      latest_gate: { passed: true, baseline_used: false, rules: [{ name: 'min_pass_rate', threshold: 0.6, actual: '19/27', passed: true, detail: '' }] },
+    })
+    const { page } = await open(data)
+    expect(page.find('svg.plot line.threshold').exists()).toBe(false)
+    expect(page.find('.pass-rate .more').text()).toContain(
+      'The gate minimum of 60% applies to task_planner@v2 · task-planner@1, which is not charted',
+    )
+  })
+
+  it('shows the first-run state on a fresh data dir, where only the built-in datasets exist', async () => {
+    const { page } = await open({ ...EMPTY, counts: { runs: 0, suites: 0, datasets: 2, experiments: 0 } })
+    expect(page.text()).toContain('Nothing recorded yet')
+    expect(page.find('form.filters').exists()).toBe(false)
   })
 
   it('shows the latest gate, providers, recent evaluations and runs', async () => {

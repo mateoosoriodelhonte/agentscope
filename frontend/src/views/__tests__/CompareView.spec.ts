@@ -1,8 +1,8 @@
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { agentsResponse, comparison, datasetSummary, job, suiteItem } from '@/__tests__/builders'
+import { agentsResponse, comparison, datasetSummary, experimentItem, job, runSummary, suiteItem, suiteResult } from '@/__tests__/builders'
 import { loadFixture } from '@/__tests__/fixtures'
-import { calls, json, mockFetch, never, type Reply } from '@/__tests__/mockFetch'
+import { calls, json, mockFetch, never, pageOf, paged, type Reply } from '@/__tests__/mockFetch'
 import { elsewhere, mountAt } from '@/__tests__/router'
 import CompareRunsView from '../CompareRunsView.vue'
 import CompareView from '../CompareView.vue'
@@ -119,12 +119,105 @@ describe('CompareView', () => {
     expect(wrapper!.find('h1').text()).toBe('research_assistant@v1 vs research_assistant@v2')
   })
 
+  it('reuses a stored comparison of the same two suites instead of storing another', async () => {
+    const { router, fetchMock } = await open('/compare?a=suite-v1&b=suite-v2', {
+      'GET /api/experiments': paged([experimentItem({ experiment_id: 'exp-other', b_ref: 'research_assistant@v3' }), experimentItem()]),
+      'GET /api/experiments/exp-1': comparison(),
+      'POST /api/experiments': () => json(comparison({ experiment_id: 'exp-new' }), 201),
+    })
+    await flushPromises()
+    expect(calls(fetchMock, 'POST', '/api/experiments')).toHaveLength(0)
+    // Only the candidate with the same agent versions is checked, by its suite ids.
+    expect(calls(fetchMock, 'GET', '/api/experiments/exp-other')).toHaveLength(0)
+    expect(router.currentRoute.value.query).toMatchObject({ a: 'suite-v1', b: 'suite-v2', experiment: 'exp-1' })
+    expect(wrapper!.find('h1').text()).toBe('research_assistant@v1 vs research_assistant@v2')
+  })
+
+  it('reuses a stored comparison of a suite named in the URL that is older than the listed ones', async () => {
+    const stored = comparison({ experiment_id: 'exp-old' })
+    stored.a = { ...stored.a, suite_id: 'suite-old' }
+    const { router, fetchMock } = await open('/compare?a=suite-old&b=suite-v2', {
+      'GET /api/evaluations/suite-old': suiteResult({ suite_id: 'suite-old' }),
+      'GET /api/experiments': paged([experimentItem({ experiment_id: 'exp-old' })]),
+      'GET /api/experiments/exp-old': stored,
+      'POST /api/experiments': () => json(comparison({ experiment_id: 'exp-new' }), 201),
+    })
+    await flushPromises()
+    expect(calls(fetchMock, 'POST', '/api/experiments')).toHaveLength(0)
+    expect(router.currentRoute.value.query.experiment).toBe('exp-old')
+  })
+
+  it('computes a new comparison when the stored one compared other suites of the same versions', async () => {
+    const older = comparison()
+    older.a = { ...older.a, suite_id: 'suite-v1-old' }
+    const { router, fetchMock } = await open('/compare?a=suite-v1&b=suite-v2', {
+      'GET /api/experiments': paged([experimentItem()]),
+      'GET /api/experiments/exp-1': older,
+      'POST /api/experiments': () => json(comparison({ experiment_id: 'exp-new' }), 201),
+      'GET /api/experiments/exp-new': comparison({ experiment_id: 'exp-new' }),
+    })
+    await flushPromises()
+    expect(calls(fetchMock, 'POST', '/api/experiments')).toHaveLength(1)
+    expect(router.currentRoute.value.query.experiment).toBe('exp-new')
+  })
+
+  it('lists finished suites from the server, narrowed by dataset, and says when the list is cut', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => suiteItem({ suite_id: `s${i}` }))
+    const planner = [
+      suiteItem({ suite_id: 'tp-1', dataset_name: 'task-planner', agent_ref: 'task_planner@v1' }),
+      suiteItem({ suite_id: 'tp-2', dataset_name: 'task-planner', agent_ref: 'task_planner@v2' }),
+    ]
+    const { page, router, fetchMock } = await open('/compare', {
+      'GET /api/evaluations': (url: URL) => (url.searchParams.get('dataset') === 'task-planner' ? paged(planner) : paged(many, 260)),
+      'GET /api/datasets': [datasetSummary(), datasetSummary({ name: 'task-planner', agent: 'task_planner' })],
+    })
+    expect(calls(fetchMock, 'GET', '/api/evaluations')[0]!.url.search).toBe('?status=completed&limit=200')
+    const picker = () => page.find('[aria-labelledby="pick-suites-title"]')
+    expect(picker().text()).toContain('the newest 200 of 260 finished evaluations')
+    await picker().find('select').setValue('task-planner')
+    await flushPromises()
+    expect(router.currentRoute.value.query.dataset).toBe('task-planner')
+    expect(calls(fetchMock, 'GET', '/api/evaluations').pop()!.url.search).toBe('?status=completed&dataset=task-planner&limit=200')
+    const options = picker().findAll('select')[1]!.findAll('option').map((o) => o.attributes('value'))
+    expect(options).toEqual(['', 'tp-1', 'tp-2'])
+    expect(picker().text()).not.toContain('the newest')
+  })
+
+  it('keeps a suite named in the URL pickable when it is older than the listed ones', async () => {
+    const { page } = await open('/compare?a=suite-old', {
+      'GET /api/evaluations/suite-old': suiteResult({ suite_id: 'suite-old', label: 'Last spring' }),
+    })
+    await flushPromises()
+    const a = page.findAll('[aria-labelledby="pick-suites-title"] select')[1]!
+    expect((a.element as HTMLSelectElement).value).toBe('suite-old')
+    expect(a.find('option[value="suite-old"]').text()).toContain('research_assistant@v1 · research-assistant@1 · 2/3')
+  })
+
+  it('pages through stored comparisons', async () => {
+    const all = Array.from({ length: 25 }, (_, i) => experimentItem({ experiment_id: `e${i}`, name: `Comparison ${i}` }))
+    const { page, router, fetchMock } = await open('/compare', { 'GET /api/experiments': pageOf(all) })
+    expect(calls(fetchMock, 'GET', '/api/experiments')[0]!.url.search).toBe('?limit=20&offset=0')
+    const recent = () => page.find('[aria-labelledby="recent-title"]')
+    expect(recent().findAll('tbody tr')).toHaveLength(20)
+    expect(recent().find('.pager').text()).toContain('1–20 of 25')
+    await recent().findAll('.pager button').find((b) => b.text() === 'Next')!.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBe('2')
+    expect(recent().findAll('tbody tr').map((r) => r.find('th a').text())).toEqual([
+      'Comparison 20',
+      'Comparison 21',
+      'Comparison 22',
+      'Comparison 23',
+      'Comparison 24',
+    ])
+  })
+
   it('picks two suites, warning before comparing different dataset content', async () => {
     const { page, router } = await open('/compare', {
       'GET /api/evaluations': [suiteItem(), suiteItem({ suite_id: 'suite-other', dataset_hash: 'sha256:other' })],
       'POST /api/experiments': () => never(),
     })
-    const [a, b] = page.findAll('[aria-labelledby="pick-suites-title"] select')
+    const [, a, b] = page.findAll('[aria-labelledby="pick-suites-title"] select')
     await a!.setValue('suite-v1')
     await b!.setValue('suite-other')
     expect(page.text()).toContain('These evaluations ran different dataset content')
@@ -155,6 +248,28 @@ describe('CompareView', () => {
     expect(router.currentRoute.value.query.experiment).toBe('exp-2')
   })
 
+  it('says why the server refused to run an experiment, issue by issue', async () => {
+    const { page } = await open('/compare', {
+      'POST /api/experiments': () =>
+        json(
+          {
+            detail: 'dataset research-assistant@1 cannot be evaluated with this agent',
+            issues: [{ path: '/cases/0/agent', message: 'does not match task_planner', severity: 'error' }],
+          },
+          422,
+        ),
+    })
+    const selects = page.findAll('[aria-labelledby="run-experiment-title"] select')
+    await selects[0]!.setValue('research-assistant@1')
+    await selects[1]!.setValue('research_assistant@v1')
+    await selects[2]!.setValue('research_assistant@v2')
+    await page.findAll('button').find((x) => x.text() === 'Run both and compare')!.trigger('click')
+    await flushPromises()
+    const alert = page.find('[role="alert"]')
+    expect(alert.text()).toContain('Could not compare: dataset research-assistant@1 cannot be evaluated with this agent')
+    expect(alert.findAll('li').map((li) => li.text())).toEqual(['/cases/0/agent does not match task_planner'])
+  })
+
   it('shows a filled-in example when there are fewer than two evaluations', async () => {
     const { page } = await open('/compare', { 'GET /api/evaluations': [suiteItem()] })
     expect(page.find('.example').text()).toContain('agentscope eval --dataset research-assistant --agent research_assistant@v1')
@@ -178,9 +293,25 @@ describe('CompareRunsView', () => {
     expect(page.findAll('.trace-diff tbody tr')).toHaveLength(4)
   })
 
+  it('suggests recent runs by their full ids', async () => {
+    const { page, fetchMock } = await open('/compare/runs', {
+      'GET /api/runs': { items: [runSummary({ run_id: '6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e' })], total: 1 },
+    })
+    expect(calls(fetchMock, 'GET', '/api/runs')[0]!.url.search).toBe('?limit=50')
+    const list = page.find('datalist')
+    expect(list.findAll('option').map((o) => o.attributes('value'))).toEqual(['6e2fdf5d-ec2f-4201-bfc2-cabeb227ff3e'])
+    for (const input of page.findAll('form.pick input')) expect(input.attributes('list')).toBe(list.attributes('id'))
+  })
+
+  it('explains that a shortened run id is not enough', async () => {
+    const { page } = await open('/compare/runs?a=6e2fdf5d&b=7f3a0e6e')
+    expect(page.find('[role="alert"]').text()).toContain('Could not load the two runs')
+    expect(page.find('.short-ids').text()).toContain('full run id')
+  })
+
   it('asks for two run ids', async () => {
     const { page, router } = await open('/compare/runs')
-    expect(page.text()).toContain('Enter two run ids')
+    expect(page.text()).toContain('Enter two full run ids')
     const inputs = page.findAll('input')
     await inputs[0]!.setValue('r1')
     await inputs[1]!.setValue('r2')
