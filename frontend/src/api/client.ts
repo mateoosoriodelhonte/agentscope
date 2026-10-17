@@ -176,7 +176,11 @@ export const api = {
 
   listExperiments: (signal?: AbortSignal) =>
     request<ExperimentListItem[]>('/api/experiments', { signal }),
+  // Run mode (dataset + a + b): starts a job. Compare mode (suite_a + suite_b): returns the
+  // stored Comparison directly (201), because both suites are already finished.
   createExperiment: (body: ExperimentCreate) => post<JobAccepted>('/api/experiments', body),
+  compareSuites: (body: { name: string; suite_a: string; suite_b: string }) =>
+    post<Comparison>('/api/experiments', body),
   getExperiment: async (experimentId: string, signal?: AbortSignal) =>
     request<Comparison>(`/api/experiments/${seg(experimentId)}`, { signal }),
 

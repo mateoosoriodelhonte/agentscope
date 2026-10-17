@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { api } from '@/api/client'
 import { describeError } from '@/api/errors'
@@ -44,6 +44,9 @@ const experiments = useResource((signal) => api.listExperiments(signal))
 const datasets = useResource((signal) => api.listDatasets(signal))
 const catalog = useResource((signal) => api.agents(signal))
 const creating = useJob()
+// Comparing two finished suites is synchronous: no job to poll.
+const comparing = ref(false)
+const compareError = shallowRef<unknown>(null)
 
 const completed = computed(() => (suites.data.value ?? []).filter((s) => s.status === 'completed'))
 const suiteById = (id: string | null) => completed.value.find((s) => s.suite_id === id) ?? null
@@ -56,10 +59,18 @@ const agentRefs = computed(() => catalog.data.value?.agents.flatMap((a) => a.ver
 watch(
   () => [query.value.a, query.value.b, query.value.experiment, suites.loading.value] as const,
   async ([a, b, experiment, loadingSuites]) => {
-    if (experiment || !a || !b || loadingSuites || creating.running.value) return
+    if (experiment || !a || !b || loadingSuites || creating.running.value || comparing.value) return
     const name = `${suiteById(a)?.agent_ref ?? shortId(a)} vs ${suiteById(b)?.agent_ref ?? shortId(b)}`
-    const done = await creating.start(() => api.createExperiment({ name, suite_a: a, suite_b: b }))
-    if (done) await set({ experiment: done.resource_id })
+    comparing.value = true
+    compareError.value = null
+    try {
+      const stored = await api.compareSuites({ name, suite_a: a, suite_b: b })
+      await set({ experiment: stored.experiment_id })
+    } catch (e) {
+      compareError.value = e
+    } finally {
+      comparing.value = false
+    }
   },
   { immediate: true },
 )
@@ -108,8 +119,11 @@ const diffRuns = useResource(
   },
   () => `${selected.value?.a_run_id}|${selected.value?.b_run_id}`,
 )
-const creatingError = computed(() => (creating.error.value ? describeError(creating.error.value).message : null))
-const showPicker = computed(() => !query.value.experiment && !creating.running.value)
+const creatingError = computed(() => {
+  const failure = creating.error.value ?? compareError.value
+  return failure ? describeError(failure).message : null
+})
+const showPicker = computed(() => !query.value.experiment && !creating.running.value && !comparing.value)
 
 watch(data, (value) => setPageDetail(value ? value.name : null), { immediate: true })
 </script>
@@ -132,8 +146,8 @@ watch(data, (value) => setPageDetail(value ? value.name : null), { immediate: tr
       </div>
     </header>
 
-    <p v-if="creating.running.value" class="callout info" role="status">
-      Computing the comparison… {{ jobProgress(creating.job.value) }}
+    <p v-if="creating.running.value || comparing" class="callout info" role="status">
+      Computing the comparison… {{ comparing ? '' : jobProgress(creating.job.value) }}
     </p>
     <p v-if="creatingError" class="callout fail" role="alert">Could not compare: {{ creatingError }}</p>
 

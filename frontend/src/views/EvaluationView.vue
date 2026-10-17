@@ -117,6 +117,10 @@ watch(data, (value) => setPageDetail(value ? title.value : null), { immediate: t
     <p v-else-if="data?.status === 'running'" class="callout info" role="status">
       Still running: {{ plural(data.cases.length, 'case') }} recorded so far. This page refreshes itself.
     </p>
+    <p v-else-if="data?.status === 'error'" class="callout fail" role="alert">
+      This evaluation did not finish{{ data.error ? `: ${data.error}` : '' }}. Metrics cover only the
+      {{ plural(data.cases.length, 'case') }} recorded before it stopped.
+    </p>
 
     <Skeleton v-if="waiting" :rows="6" />
     <ErrorState v-else-if="suite.error.value && !data" :error="suite.error.value" title="Could not load this evaluation" @retry="suite.reload">

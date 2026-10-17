@@ -108,8 +108,7 @@ describe('CompareView', () => {
 
   it('computes a comparison of two suites named in the URL once, then keeps its id', async () => {
     const { router, fetchMock } = await open('/compare?a=suite-v1&b=suite-v2', {
-      'POST /api/experiments': () => json({ job_id: 'job-x', kind: 'experiment', resource_id: 'exp-1' }, 202),
-      'GET /api/jobs/job-x': job({ job_id: 'job-x', kind: 'experiment', resource_id: 'exp-1' }),
+      'POST /api/experiments': () => json(comparison({ experiment_id: 'exp-1' }), 201),
       'GET /api/experiments/exp-1': comparison(),
     })
     await flushPromises()

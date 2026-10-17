@@ -538,6 +538,8 @@ export interface SuiteResult {
   cases: CaseResult[]
   metrics: SuiteMetrics
   gate: GateResult | null
+  // Why the suite errored (cancelled, interrupted); null otherwise.
+  error?: string | null
 }
 
 // --- domain/experiments.py ---------------------------------------------------------------
