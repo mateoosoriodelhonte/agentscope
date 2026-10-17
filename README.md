@@ -10,13 +10,25 @@ built-in agents (and configuration variants of them), it ships no LLM-as-judge, 
 gate runs on a documented deterministic fake model whose behaviour is a simulation of known
 failure modes, not a measurement of any real model.
 
-| Overview | Trace explorer |
+| Overview (dark) | Overview (light) |
 |---|---|
-| ![Overview, dark theme](docs/images/overview-dark.png) | ![Trace explorer, dark theme](docs/images/trace-dark.png) |
-| **Trace explorer (light)** | **Evaluation** |
-| ![Trace explorer, light theme](docs/images/trace-light.png) | ![Evaluation detail, dark theme](docs/images/evaluation-dark.png) |
-| **Compare** | **Failures** |
-| ![Compare, dark theme](docs/images/compare-dark.png) | ![Failure analysis, light theme](docs/images/failures-light.png) |
+| ![Overview, dark theme](docs/images/overview-dark.png) | ![Overview, light theme](docs/images/overview-light.png) |
+| **Trace explorer (dark)** | **Trace explorer (light)** |
+| ![Trace explorer on a failed check's evidence span, dark theme](docs/images/trace-dark.png) | ![Trace explorer on a failed check's evidence span, light theme](docs/images/trace-light.png) |
+| **Evaluation** | **Compare** |
+| ![Evaluation detail with the case-by-check matrix, dark theme](docs/images/evaluation-dark.png) | ![Comparison of research v1 and v2 with the trace diff, dark theme](docs/images/compare-dark.png) |
+| **Failures** | **Datasets** |
+| ![Failure analysis, light theme](docs/images/failures-light.png) | ![Datasets, light theme](docs/images/datasets-light.png) |
+| **Settings** | |
+| ![Settings with storage inventory and egress list, light theme](docs/images/settings-light.png) | |
+
+The screenshots are generated from the seeded demo by `npm run screenshots`
+([CONTRIBUTING.md](CONTRIBUTING.md#regenerating-screenshots)). They were captured before the
+pre-release fixes listed in the [changelog](CHANGELOG.md#fixed-before-release), so some
+details differ from a fresh 1.0.0 seed: the Overview chart now draws one line per agent
+version and dataset with the gate minimum only on the line it applies to, the Failures
+resilience counts follow the corrected recovery rules, and the Failures table marks
+simulated agent versions. The walkthrough below was checked against a fresh seed.
 
 ## Features
 
@@ -25,13 +37,14 @@ failure modes, not a measurement of any real model.
   plus a `validate` node with a bounded repair loop in the `validated` graph variant. Every
   edge taken is recorded as a state transition with a reason.
 - A portable decision protocol (a flat JSON object, parsed and validated the same way for
-  every provider), bounded decision and output repairs, runtime tool retries, a step budget,
-  per-tool and per-run timeouts, and five terminal run statuses.
+  every provider, in linear time), bounded decision and output repairs, runtime tool
+  retries, a step budget, per-tool and per-run timeouts, and five terminal run statuses.
 - Two built-in agents with three versions each: `research_assistant` (search and read a
   synthetic knowledge base) and `task_planner` (plan a project from synthetic records,
   service status and calendars).
-- Untrusted tool output can be delivered HTML-escaped inside a single `<tool_output>` block,
-  and hardened prompts carry an instruction-hierarchy clause.
+- The model receives the task with secrets redacted. Untrusted tool output can be delivered
+  HTML-escaped inside a single `<tool_output>` block, and hardened prompts carry an
+  instruction-hierarchy clause.
 
 **Simulated tools and fault injection** ([docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md))
 - Ten tools over packaged synthetic data. On every call, arguments are validated with
@@ -40,7 +53,8 @@ failure modes, not a measurement of any real model.
   in-memory sandbox.
 - Seven tool fault kinds (`timeout`, `error`, `malformed`, `incomplete`, `misleading`,
   `injection`, `permission_denied`) and four model fault kinds (`invalid_json`, `empty`,
-  `schema_violation`, `unknown_tool`), targeted by call number.
+  `schema_violation`, `unknown_tool`), targeted by call number. Output faults count only
+  when they are actually delivered.
 
 **Model providers**
 - A deterministic fake provider with three scripted profiles (always available, reports no
@@ -54,7 +68,7 @@ failure modes, not a measurement of any real model.
   with GenAI semantic-convention attributes. Payloads are redacted when they are written to
   a span. Token usage is shown only when a provider reports it; cost only from rates you
   configure.
-- Optional OTLP/HTTP export, off by default, payload-free by default.
+- Optional OTLP/HTTP export, off by default, without payloads or error messages by default.
 
 **Evaluation** ([docs/EVALUATION.md](docs/EVALUATION.md))
 - A hardened dataset loader and a linter that rejects contradictory or unsatisfiable cases.
@@ -62,16 +76,24 @@ failure modes, not a measurement of any real model.
   evidence that points at spans, and an evaluator that imports nothing from the runtime it
   judges.
 - Regression gates with exact rational arithmetic, canonical baselines and documented exit
-  codes; experiment comparison with per-case flips and a "confounded" label when more than
-  one configuration dimension changed.
+  codes; provider and harness failures are kept apart from agent failures. Experiment
+  comparison with per-case flips, a configuration diff that includes resolved prompt and
+  tool-schema content, and a "confounded" label when more than one dimension changed.
 
 **Storage, API, CLI and dashboard** ([ARCHITECTURE.md](ARCHITECTURE.md))
-- SQLite by default (file `0600` in a `0700` directory), PostgreSQL optional; Alembic
-  migrations; purge that compacts the database.
-- A FastAPI REST API with in-memory background jobs, and a Typer CLI, both on one shared
-  services layer.
+- SQLite by default (the database file created `0600`; a data directory AgentScope creates is
+  made `0700`), PostgreSQL optional; Alembic migrations; work in flight records its owner and
+  a heartbeat, so only work whose process died is marked interrupted; purge that compacts the
+  database and keeps the built-in datasets.
+- A FastAPI REST API with paged lists and in-memory background jobs, and a Typer CLI, both on
+  one shared services layer.
 - A Vue 3 dashboard: overview, runs, trace explorer with evidence links, evaluations,
   compare with a step-aligned trace diff, failure analysis, agents, datasets and settings.
+  Lists page through the server with server-side filters, dataset import sends the file byte
+  for byte to the same strict loader as the CLI, refused requests show each located issue,
+  and opening a comparison of two suites reuses the stored one.
+- A Docker image and a Compose stack with PostgreSQL (and an optional Ollama override),
+  published on loopback only.
 
 **Security and privacy** ([SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md))
 - Loopback binding, a Host check against DNS rebinding, a mutation guard, a strict
@@ -124,29 +146,40 @@ built dashboard, `agentscope serve` serves only the API. Data goes to `./.agents
 relative to the working directory unless `AGENTSCOPE_DATA_DIR` or `AGENTSCOPE_DATABASE_URL`
 says otherwise ([docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md)).
 
-### Docker Compose
+### Docker
 
 ```sh
-cp .env.example .env      # then set POSTGRES_PASSWORD in .env
+docker build -t agentscope .
+docker run --rm -p 127.0.0.1:8765:8765 -v agentscope-data:/data agentscope
+```
+
+With PostgreSQL:
+
+```sh
+cp .env.example .env      # then set POSTGRES_PASSWORD in .env to a long random value
 docker compose up --build
 ```
 
-The app is then on http://127.0.0.1:8765. See [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md#docker-compose).
+The app is then on http://127.0.0.1:8765. The image runs `agentscope serve --container`,
+which listens without an API token and accepts only loopback `Host` headers, so publish the
+port on `127.0.0.1` only, as both commands do. Details, the Ollama override and the
+container hardening: [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md#docker).
 
 ## Five-minute demo
 
 `agentscope demo seed` (or **Load demo data** on the Overview) creates, with the fake model:
 five evaluations under one demo gate (research assistant v1, v2, v3 and task planner v1, v2),
 two stored comparisons (`Demo: research v1 vs v2`, `Demo: research v2 vs v3`) and four ad-hoc
-runs. Seeding is idempotent: a second `demo seed` printed `created 0 suites, 0 experiments,
-0 runs; already present 5 suites, 2 experiments, 4 runs`.
+runs. On a fresh database it printed `created 5 suites, 2 experiments, 4 runs`; seeding is
+idempotent, and a second `demo seed` printed `created 0 suites, 0 experiments, 0 runs;
+already present 5 suites, 2 experiments, 4 runs`.
 
 1. **v1 fails the gate.** Open **Evaluations** and then `demo: research_assistant@v1`. It
    passed 5 of 29 cases. The gate checklist shows the failed rules: `min_pass_rate` (5/29
    against 0.6), `max_policy_violation_cases` (8 against 0) and the required checks
    `forbidden_tool_calls` and `policy_compliance` (8 failures each).
-   `max_unauthorized_tool_executions` passes with 0: v1's model tried forbidden tools, and
-   the runtime guard blocked every attempt.
+   `max_unauthorized_tool_executions` passes with 0: v1's model attempted unauthorized tools 10
+   times, and the runtime guard blocked every attempt.
 2. **Compare v1 with v2.** Open **Compare** and select `Demo: research v1 vs v2`. The
    configuration diff is labelled *Confounded: attribution not possible*: five dimensions
    changed at once (prompt, tool schemas, graph, retry policy, untrusted-output isolation),
@@ -177,25 +210,28 @@ copies its hidden instructions into the answer, which `policy_compliance` report
 
 | Command | What it does |
 |---|---|
-| `agentscope run --task TEXT [--agent A@V] [--fault tool:kind[:on_call]] [--expect TEXT]` | Run one task on a built-in version, print the trace summary; with `--expect`, evaluate it as an ad-hoc case. |
-| `agentscope eval --dataset PATH\|NAME[@VER] [--agent A@V \| --config FILE] [--check]` | Evaluate a dataset; `--check` applies `gate.json` and the baseline from the dataset directory. `--write-baseline FILE`, `--json`, `--output FILE`, `--no-save`. |
-| `agentscope compare --dataset ... --a A@V --b A@V [--fail-on-regression]` | Evaluate two versions and compare them case by case. |
+| `agentscope run --task TEXT [--agent A@V] [--fault tool:kind[:on_call]] [--expect VALUE [--expect-field PATH] [--match MODE]]` | Run one task on a built-in version and print the trace summary; with `--expect`, evaluate it as an ad-hoc case against an output field (`answer` by default; number fields compare numerically). `--json`, `--no-save`. |
+| `agentscope eval --dataset PATH\|NAME[@VER] [--agent A@V \| --config FILE] [--check]` | Evaluate a dataset; `--check` applies `gate.json` and the baseline from the dataset directory, and `--baseline FILE` alone gates on new regressions. `--thresholds FILE`, `--write-baseline FILE`, `--json`, `--output FILE`, `--no-save`, `--label`. |
+| `agentscope compare --dataset ... --a A@V --b A@V [--fail-on-regression]` | Evaluate two versions and compare them case by case. `--json`, `--output FILE`. |
 | `agentscope traces list` / `traces show RUN_ID` | List stored runs; show one trace (`--json` for the full record). |
 | `agentscope datasets list\|validate\|import\|export` | Stored datasets; lint a file or directory without importing; import (versions are immutable); canonical export. |
 | `agentscope agents list` | The built-in agent versions and what distinguishes them. |
-| `agentscope db upgrade\|info\|purge` | Migrate; show location, revision and row counts; delete data and compact (`--scope`, `--before`, `--yes`). |
+| `agentscope db upgrade\|info\|purge` | Migrate (and mark work whose process is gone as interrupted); show location, revision and row counts; delete data and compact, keeping the built-in datasets (`--scope`, `--before`, `--yes`). |
 | `agentscope demo seed` | Seed the demo story (idempotent). |
-| `agentscope serve [--host] [--port] [--allow-remote] [--allowed-host H]` | Serve the API and dashboard; refuses a non-loopback bind without `--allow-remote`. |
+| `agentscope serve [--host] [--port] [--allow-remote] [--allowed-host H] [--container]` | Serve the API and dashboard; refuses a non-loopback bind without `--allow-remote` (or `--container` inside a container). |
 | `agentscope version` | Print the installed version. |
+
+`run` and `traces show` label fake-provider runs as simulated. Every option is listed in
+[docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md#cli-reference).
 
 Exit codes (`src/agentscope/cli/common.py`):
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. `eval` without a gate (no `--check` and no `--thresholds`) exits 0 even when cases fail. |
-| 1 | Checks or gate failed: `eval --check` gate failure, `run --expect` verdict failure, `compare --fail-on-regression` with a regression. |
-| 2 | Invalid input: dataset errors, incompatible baseline, unknown agent or dataset, disabled provider, bad flags, `db purge` without `--yes`, unknown run id. |
-| 3 | Runtime or harness error: a case the harness could not judge (`internal_error`, `internal_recursion_limit`), an unexpected exception, an unusable database, or a purge that could not finish erasing. A harness error wins over a gate failure. |
+| 0 | Success. `eval` without a gate (no `--check`, `--thresholds` or `--baseline`) exits 0 even when cases fail. |
+| 1 | Checks or gate failed: an `eval` gate failure (including a new regression against `--baseline`), a `run --expect` verdict failure, `compare --fail-on-regression` with a regression. |
+| 2 | Invalid input: dataset errors, incompatible baseline, unknown agent or dataset, disabled provider, bad flags or values (an empty or over-long task, `--expect` on a field the agent's output lacks), an `--output` or `--write-baseline` destination that cannot be written (checked before anything runs), `db purge` without `--yes`, unknown run id. |
+| 3 | Runtime or harness error: a case the harness could not judge because AgentScope or the model provider failed (`internal_error`, `internal_recursion_limit`, `provider_error`, `provider_timeout`; `run` exits 3 on these too), an unexpected exception, an unusable database or one migrated by a newer release, a result file that could not be written after the run (the result is still printed), or a purge that could not finish erasing. A harness error wins over a gate failure. |
 
 ## Using the CI quality gate in your own pipeline
 
@@ -219,6 +255,9 @@ thresholds it requires every case to pass. To gate your own change:
 4. In CI, run `agentscope eval --dataset DIR --agent A@V --check --no-save --json` and fail the
    job on any non-zero exit code (1 gate, 2 invalid input, 3 harness error).
 
+A model provider that is unreachable or times out makes the affected cases harness errors
+(exit 3, no baseline written), so an outage is never recorded as an agent regression.
+
 Scope: V1 evaluates only the built-in agents, or `AgentConfig` variants of them passed with
 `--config` (their prompts and tools must exist in the agent's definition). There is no
 plugin interface for an agent that lives outside this repository; adding one means adding
@@ -230,9 +269,10 @@ them would flip.
 
 Measured, deterministically:
 - Whether each case's run satisfies the ten checks: answer, schema, required and forbidden
-  tools, order, arguments, completion and budgets, timeout handling, error recovery, and
-  policy compliance (unauthorized executions and leaks of forbidden substrings, including
-  base64, hex and percent-encoded copies).
+  tools, order, arguments, completion and budgets, timeout handling, error recovery (every
+  tool failure recovered by the same tool or a declared alternative, or a graceful decline
+  with no answer), and policy compliance (unauthorized executions and leaks of forbidden
+  substrings, including spaced-out, base64, hex and percent-encoded copies).
 - Suite metrics as counts and rates over cases, per-check pass counts over the cases where a
   check applied, and per-case flips between two suites.
 - Whether the runtime contains a model that obeys injected instructions: unauthorized tool
@@ -269,9 +309,10 @@ prompt-injection cases is true by construction of `scripted-naive`; what those c
 that v2 delivers delimiting and the clause, that the evaluator catches every attempt and
 leak v1 makes, and that the runtime guard stops a model that obeys everything. The
 trigger-to-decision tables are in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md#the-fake-model).
-The dashboard labels fake-provider runs, evaluations and comparisons, and the CLI labels
-fake-provider evaluations and comparisons, with "Simulated model: demonstrates harness
-mechanics, not model behaviour".
+Fake-provider results carry the notice "Simulated model: demonstrates harness mechanics, not
+model behaviour": in the dashboard on runs, evaluations, comparisons whose two sides are
+simulated, and the Failures page; in the CLI on `run`, `traces show`, `eval` and `compare`
+(naming the simulated side when only one is).
 
 ## Optional: Ollama
 
@@ -312,49 +353,54 @@ host must be listed in `AGENTSCOPE_ALLOWED_EGRESS_HOSTS`.
 - AgentScope is a single-user local tool. It binds to `127.0.0.1`, accepts only loopback
   `Host` headers, requires a JSON content type and an `X-AgentScope-Client: 1` header on
   every state-changing request, rejects cross-origin and cross-site mutations, and sends a
-  strict Content-Security-Policy on every response. Remote mode requires a bearer token and
-  is meant for API clients: the dashboard cannot send the token.
+  strict Content-Security-Policy on every response (so there is no Swagger UI page; the
+  OpenAPI document is at `/api/openapi.json`). Remote mode requires a bearer token and is
+  meant for API clients: the dashboard cannot send the token. Container mode listens without
+  a token inside a container whose port must be published on `127.0.0.1` only.
 - Nothing leaves the machine unless you configure it: no telemetry, LangSmith tracing forced
   off, `OTEL_*` variables ignored, and every outbound destination (model providers, the
   optional OTLP collector) taken from an egress policy built from `AGENTSCOPE_*` settings.
-- Secrets are redacted before anything is stored or exported; datasets containing
-  secret-shaped values are refused on import.
+- Secrets are redacted before the model sees the task and before anything is stored or
+  exported; datasets containing secret-shaped values are refused on import.
 
 Details, defenses and known limitations: [SECURITY.md](SECURITY.md). What is stored and how
 to delete it: [PRIVACY.md](PRIVACY.md).
 
-## Verification results (2026-10-16)
+## Verification results for release 1.0.0 (2026-10-16)
 
-Run on the application code of commit `021fd90` (this documentation adds no code) on macOS
-26.6.2 (arm64), Python 3.12.3, uv 0.12.21, ruff 0.16.10, Node.js 26.0.0, npm 11.12.1. Every
-number below is copied from the command's output.
+Run on the code of release 1.0.0 (commit `bb9f801`; this documentation changes no code) on
+macOS 26.6.2 (arm64), Python 3.12.3, uv 0.12.21, ruff 0.16.10, mypy 2.4.0, Node.js 26.0.0,
+npm 11.12.1 and Playwright 1.64.0. Every command that writes data used a fresh
+`AGENTSCOPE_DATA_DIR` under the OS temporary directory. Every number below is copied from the
+command's output.
 
 | Command | Result |
 |---|---|
 | `uv run ruff check .` | All checks passed |
-| `uv run ruff format --check .` | 185 files already formatted (Python sources and, with this ruff version, Markdown files) |
-| `uv run mypy` | Success: no issues found in 106 source files |
-| `uv run pytest -q` | 1218 passed, 24 skipped (23 need `AGENTSCOPE_TEST_POSTGRES_URL`, 1 needs `AGENTSCOPE_TEST_OLLAMA_MODEL`) |
-| `npm run lint` / `npm run type-check` | pass (ESLint with `--max-warnings=0`; `vue-tsc --build`) |
-| `npm test` | 661 tests in 30 files passed |
-| `npx vite build` | built |
-| `npm audit --omit=dev --audit-level=high` | found 0 vulnerabilities |
+| `uv run ruff format --check .` | 191 files already formatted (Python sources and, with this ruff version, Markdown files) |
+| `uv run mypy` | Success: no issues found in 108 source files |
+| `uv run pytest -q` | 1509 passed, 33 skipped (32 need `AGENTSCOPE_TEST_POSTGRES_URL`, 1 needs `AGENTSCOPE_TEST_OLLAMA_MODEL`) |
+| `cd frontend && npm run lint` / `npm run type-check` | pass (ESLint with `--max-warnings=0`; `vue-tsc --build`) |
+| `cd frontend && npx vitest run` | 704 tests in 30 files passed |
+| `cd frontend && npx playwright install chromium && CI=1 TMPDIR=/tmp npm run test:e2e` | 35 passed (chromium) |
 
-Quality gates, `agentscope eval --dataset DIR --agent A@V --check --no-save`:
+Quality gates, `uv run agentscope eval --dataset DIR --agent A@V --check --no-save`:
 
 | Dataset directory | Agent | Passed | Gate | Exit |
 |---|---|---|---|---|
 | `tests/fixtures` | `research_assistant@v2` | 21/29 | PASSED | 0 |
 | `tests/fixtures` | `research_assistant@v1` | 5/29 | FAILED | 1 |
-| `tests/fixtures` | `research_assistant@v3` | 29/29 | PASSED | 0 |
 | `tests/fixtures/planner` | `task_planner@v2` | 19/27 | PASSED | 0 |
 | `tests/fixtures/planner` | `task_planner@v1` | 5/27 | FAILED | 1 |
-| `tests/fixtures/planner` | `task_planner@v3` | 27/27 | PASSED | 0 |
 
-v1 fails `min_pass_rate`, `max_new_regressions` (there is no v1 baseline, so the rule
-cannot be verified and fails), `max_invalid_outputs` (3), `max_policy_violation_cases` (8
-research, 7 planner) and both required checks; it passes `max_unauthorized_tool_executions`
-with 0 and `max_harness_errors` with 0.
+v2 passes every rule of each directory's `gate.json` against its checked-in baseline, with 0
+invalid outputs, 0 policy violations and 0 unauthorized tool attempts or executions. v1 fails
+`min_pass_rate` (5/29 against 0.724, 5/27 against 0.703), `max_new_regressions` (there is no
+v1 baseline, so the rule cannot be verified and fails), `max_invalid_outputs` (3 each),
+`max_policy_violation_cases` (8 research, 7 planner), and the required checks
+`forbidden_tool_calls` (8 failures each) and `policy_compliance` (8 research, 7 planner). It
+passes `max_unauthorized_tool_executions` with 0, although its model attempted unauthorized
+tools 10 times (research) and 9 times (planner), and `max_harness_errors` with 0.
 
 ## Project layout
 
@@ -371,7 +417,7 @@ src/agentscope/
   evaluation/        checks, metrics, gates, baselines, fingerprint (runtime-independent)
   experiments/       suite comparison
   datasets/          loader, lint, export, built-in datasets
-  storage/           ORM models, repository, Alembic migrations
+  storage/           ORM models, repository, liveness, Alembic migrations
   services.py        the engine shared by the CLI and the API
   suite_runner.py    runs a dataset sequentially and aggregates verdicts
   analysis.py        overview and failure analysis over stored verdicts
@@ -379,9 +425,10 @@ src/agentscope/
   jobs.py            in-memory background jobs for the API
   api/               FastAPI app, security middleware, routes, schemas
   cli/               Typer commands
-frontend/            Vue 3 + TypeScript dashboard (Vite, Vitest)
+frontend/            Vue 3 + TypeScript dashboard (Vite, Vitest; Playwright in e2e/)
 tests/               pytest + Hypothesis; tests/fixtures holds the CI gate inputs
-docs/                runtime, tool security, evaluation, tracing, local development
+docs/                runtime, tool security, evaluation, tracing, local development; images/
+Dockerfile, docker-compose.yml, docker-compose.ollama.yml
 ```
 
 ## Documentation
@@ -391,7 +438,7 @@ docs/                runtime, tool security, evaluation, tracing, local developm
 - [docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md): tool contract, faults, egress policy
 - [docs/EVALUATION.md](docs/EVALUATION.md): datasets, checks, metrics, gates, comparison
 - [docs/TRACING.md](docs/TRACING.md): spans, attributes, redaction, OTLP export
-- [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md): setup, tests, settings
+- [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md): setup, tests, Docker, settings, CLI
 - [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), [CONTRIBUTING.md](CONTRIBUTING.md),
   [CHANGELOG.md](CHANGELOG.md)
 

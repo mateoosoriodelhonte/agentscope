@@ -1,7 +1,7 @@
 # Architecture
 
-This document describes AgentScope V1 as implemented in `src/agentscope` and `frontend/`.
-File paths are relative to the repository root.
+This document describes AgentScope 1.0.0 (V1) as implemented in `src/agentscope` and
+`frontend/`. File paths are relative to the repository root.
 
 ## Components and responsibilities
 
@@ -18,9 +18,9 @@ File paths are relative to the repository root.
 | Evaluation | `src/agentscope/evaluation/` | The ten checks, per-case evaluation, metrics, gates, baselines and the environment fingerprint. Imports only `agentscope.domain`, `agentscope.evaluation`, `jsonschema`, `pydantic` and the standard library. |
 | Experiments | `src/agentscope/experiments/compare.py` | Case-by-case comparison of two suite results. |
 | Datasets | `src/agentscope/datasets/` | The hardened loader, the linter, canonical export, and the two built-in datasets. |
-| Suite runner | `src/agentscope/suite_runner.py` | Runs a dataset's cases sequentially against one configuration and aggregates verdicts. Never touches storage or the API (callers persist through its `on_case` hook). |
-| Services | `src/agentscope/services.py` | Wires runtime, evaluation and storage together; the single engine used by both the CLI and the API. Hands back redacted copies of everything it returns. |
-| Storage | `src/agentscope/storage/` | SQLAlchemy 2 ORM models, portable column types, engine setup and SQLite hardening, Alembic migrations, and the repository: the only writer, which redacts every model before saving. |
+| Suite runner | `src/agentscope/suite_runner.py` | Runs a dataset's cases sequentially against one configuration and aggregates verdicts; classifies harness errors (`judge_case`). Never touches storage or the API (callers persist through its `on_case` hook). |
+| Services | `src/agentscope/services.py` | Wires runtime, evaluation and storage together; the single engine used by both the CLI and the API. Hands back redacted copies of everything it returns; heartbeats running suites, recovers interrupted work, and purges while keeping the built-in datasets. |
+| Storage | `src/agentscope/storage/` | SQLAlchemy 2 ORM models, portable column types, engine setup and SQLite hardening, Alembic migrations, liveness of in-flight work (`liveness.py`), and the repository: the only writer, which redacts every model before saving. |
 | Jobs | `src/agentscope/jobs.py` | In-process background jobs for long API operations. |
 | API | `src/agentscope/api/` | FastAPI application, security middleware (`security.py`), routes, request and response schemas (`schemas.py`, the contract the dashboard is built on). |
 | CLI | `src/agentscope/cli/` | Typer commands with documented exit codes and terminal-safe output. |
@@ -48,17 +48,17 @@ sequenceDiagram
     S->>R: run(request)
     R->>R: effective limits (only tighter) and effective tools (configured ∩ permitted − forbidden)
     R->>T: open the root span (invoke_agent)
-    R->>G: astream(initial state) under asyncio.timeout(run_timeout_s)
+    R->>G: astream(system prompt + redacted task) under asyncio.timeout(run_timeout_s)
     loop until finish, step budget, deadline or error
         G->>T: span "node plan"
         G->>P: generate(messages, decision schema) under request_timeout_s
         P-->>G: raw text (+ usage if reported)
         G->>G: parse_decision (repair or fail on invalid)
-        G->>T: span "node guard" (permission, known tool, strict argument validation)
-        alt permitted and valid
-            G->>X: execute(call, attempt) for each attempt (runtime retries)
-            X-->>G: ToolResult (fault applied, output validated, size capped)
-        else denied, unknown or invalid
+        G->>T: span "node guard" (known tool, permission, strict argument validation)
+        alt known, permitted and valid
+            G->>X: run_attempt(call, attempt) for each attempt (runtime retries)
+            X-->>G: ToolResult (fault delivered or still owed, output validated, size capped)
+        else unknown, denied or invalid
             G->>G: synthetic ToolResult, nothing executes
         end
         G->>T: span "node observe" (render result, delimited when isolated)
@@ -67,18 +67,21 @@ sequenceDiagram
     R->>T: finish() drains this run's spans
     R-->>S: TraceRecord (final output and tool payloads unredacted in memory)
     opt a test case was given
-        S->>E: evaluate_case(case, trace, output schema)
+        S->>E: judge_case: evaluate_case(case, trace, output schema), or a harness error
         E-->>S: CaseResult
     end
     S->>DB: save_trace in a worker thread (redact, then one transaction)
     S-->>C: redacted copies of the trace and verdict
 ```
 
-Checks judge the unredacted in-memory trace, so a secret-shaped string the model leaked
-still counts as a leak; everything stored or returned is redacted
-(`tests/integration/test_unredacted_evaluation.py`). Runs are persisted once, after they
-finish; there is no in-progress run row. Suites are created as `running` before their first
-case and every case is stored as soon as it is judged.
+The model receives the task redacted, so a secret pasted into a task never reaches a
+provider. Checks judge the unredacted in-memory trace (final output and tool payloads), so a
+secret-shaped string the model leaked still counts as a leak; everything stored or returned
+is redacted (`tests/integration/test_unredacted_evaluation.py`). A run whose model provider
+failed (`provider_error`, `provider_timeout`) is a harness error, not a verdict on the agent.
+Runs are persisted once, after they finish; there is no in-progress run row. Suites are
+created as `running` (with their owner and a heartbeat) before their first case, and every
+case is stored as soon as it is judged.
 
 ## The state machine
 
@@ -93,8 +96,8 @@ the effective configuration hash:
 | `plan` | `finish` | final answer (basic graph); step budget exhausted (`max_steps`); decision repairs exhausted (`failed`); provider failure or provider timeout (`error`) | both |
 | `plan` | `plan` | invalid decision and a decision repair remains | both |
 | `plan` | `validate` | final answer | validated |
-| `guard` | `act` | permitted tool, known tool, valid arguments | both |
-| `guard` | `observe` | denied, unknown tool or invalid arguments; nothing executes | both |
+| `guard` | `act` | known tool, permitted, valid arguments | both |
+| `guard` | `observe` | unknown tool, denied or invalid arguments; nothing executes | both |
 | `act` | `observe` | always (runtime retries happen inside `act`, one span per attempt) | both |
 | `observe` | `plan` | always | both |
 | `validate` | `finish` | output matches the schema (`completed`), or repairs exhausted (`failed`) | validated |
@@ -108,8 +111,8 @@ stateDiagram-v2
     plan --> plan: invalid decision, repair left
     plan --> validate: final answer (validated)
     plan --> finish: final answer (basic) / max_steps / repairs exhausted / provider error
-    guard --> act: permitted, valid arguments
-    guard --> observe: denied / unknown / invalid arguments
+    guard --> act: known, permitted, valid arguments
+    guard --> observe: unknown / denied / invalid arguments
     act --> observe
     observe --> plan
     validate --> finish: valid, or repairs exhausted
@@ -122,7 +125,9 @@ The step budget is checked at the top of `plan`, before any model call. LangGrap
 2·max_output_repairs + 8` and is only a backstop; if it fires the run ends with status `error`
 and code `internal_recursion_limit`, which the suite runner treats as a harness error. A run
 that passes `run_timeout_s` ends with status `timeout` and keeps the partial state streamed so
-far. Run statuses and error codes are listed in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md).
+far, including a tool call the deadline interrupted; its closing transition starts from the
+node that was running. Run statuses and error codes are listed in
+[docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md).
 
 ## Tracing pipeline
 
@@ -132,7 +137,7 @@ flowchart LR
     SP --> TP[TracerProvider<br/>one per process, never global]
     TP --> RC[RunCollector<br/>buffers spans per trace id]
     TP -.->|only if AGENTSCOPE_OTLP_ENDPOINT is set and allowed| BSP[BatchSpanProcessor]
-    BSP --> CF[ContentFilteringExporter<br/>drops payloads unless opted in]
+    BSP --> CF[ContentFilteringExporter<br/>drops payloads and error messages<br/>unless opted in]
     CF --> OX[OTLPSpanExporter<br/>POST /v1/traces]
     RC -->|drain on finish| REC[SpanRecord list in TraceRecord]
     REC --> DB[(spans table)]
@@ -145,8 +150,10 @@ flowchart LR
 - The first span a `TraceRecorder` opens is the run's root and registers its trace id with the
   collector; spans from unregistered traces are counted and dropped. Each run drains only its
   own buffer, so concurrent runs cannot mix spans.
-- Payloads, string attributes, event attributes and status messages are redacted when written
-  to the span, so neither storage nor the exporter ever sees raw secrets.
+- Span names, payloads, string attributes, event attributes and status messages are redacted
+  when written to the span, so neither storage nor the exporter ever sees raw secrets. Failed
+  spans also carry `error.type`, which is what the exporter sends instead of the status
+  message when payload export is off.
 
 Details: [docs/TRACING.md](docs/TRACING.md).
 
@@ -171,19 +178,24 @@ flowchart TD
 
 - Input problems (wrong agent, unknown configuration, disabled provider, lint errors, no
   enabled checks, incompatible baseline) are raised before any case runs.
-- A harness failure in one case (an exception, or a run that ended with `internal_error` or
-  `internal_recursion_limit`) becomes that case's `harness_error`; it is never counted as a
-  pass and is not judged by any check.
-- `SuiteResult` records `checks_enabled`, `check_engine_version` (in the environment
-  fingerprint), the dataset hash, `config_hash` and `effective_config_hash`.
+- A harness failure in one case (an exception, or a run that ended with `internal_error`,
+  `internal_recursion_limit`, `provider_error` or `provider_timeout`) becomes that case's
+  `harness_error`; it is never counted as a pass, is not judged by any check, fails the gate
+  through `max_harness_errors`, and makes the CLI exit 3.
+- `SuiteResult` records `checks_enabled`, the dataset hash, `config_hash`,
+  `effective_config_hash`, and an environment fingerprint with the check engine version and
+  per-component hashes of the resolved prompt, tool schemas, output schema, graph and fake
+  brain, which comparisons use to name what changed.
 
 Details: [docs/EVALUATION.md](docs/EVALUATION.md).
 
 ## Storage schema
 
-Tables are defined in `src/agentscope/storage/models.py` and created by two Alembic
-revisions (`0001` runs and spans, `0002` datasets, suites, case and check results,
-experiments). Alembic also keeps its own `alembic_version` table.
+Tables are defined in `src/agentscope/storage/models.py` and created by three Alembic
+revisions: `0001` runs and spans; `0002` datasets, suites, case and check results,
+experiments; `0003` the nullable `owner` and `heartbeat_at` columns on `runs` and
+`suite_runs` (added in place, no table rebuild; rows written before it have no owner).
+Alembic also keeps its own `alembic_version` table.
 
 ```mermaid
 erDiagram
@@ -209,6 +221,7 @@ erDiagram
         string case_id
         uuid suite_id FK
         datetime started_at
+        datetime ended_at
         float duration_ms
         int steps
         json config
@@ -222,6 +235,8 @@ erDiagram
         json eval_case
         json evaluation
         bool passed
+        string owner
+        datetime heartbeat_at
     }
     spans {
         string trace_id PK
@@ -266,6 +281,10 @@ erDiagram
         bool gate_passed
         float pass_rate
         datetime started_at
+        datetime finished_at
+        text error
+        string owner
+        datetime heartbeat_at
     }
     case_results {
         bigint id PK
@@ -308,11 +327,46 @@ other content under it is a conflict) and `case_results(suite_id, case_id)`. A m
 convention gives every constraint and index a deterministic name.
 
 SQLite connections set `foreign_keys=ON`, `busy_timeout=5000`, `journal_mode=WAL` and
-`secure_delete=ON`. Migrations run in one transaction (`BEGIN IMMEDIATE` on SQLite, a
-transaction-scoped advisory lock on PostgreSQL), with foreign keys re-checked before commit on
-SQLite; a database revision unknown to the running code raises `DatabaseAheadError` (CLI exit
-3). Startup (`build_services`) upgrades to head, marks runs and suites a crashed process left
-`running` as errors, and registers the built-in datasets.
+`secure_delete=ON`. Only a database directory that AgentScope creates itself is made private
+(`0700`, with a `.gitignore` containing `*`); an existing directory is left as it is, and a
+new database file is created `0600`. Migrations run in one transaction (`BEGIN IMMEDIATE` on
+SQLite, a transaction-scoped advisory lock on PostgreSQL), with foreign keys re-checked before
+commit on SQLite; a database revision unknown to the running code raises `DatabaseAheadError`
+("database revision X is unknown to this AgentScope version; upgrade AgentScope", CLI exit 3).
+`build_services` upgrades to head and registers the built-in datasets; it never changes
+running work, because read-only commands start the same way.
+
+List pages and their totals come from one statement (a `count(*) OVER ()` window), so a row
+committed between two queries can never make a page longer than its total.
+
+### Liveness and recovery
+
+Several processes can share one database: a server, CLI evaluations, another host on
+PostgreSQL. A suite (or a run, should one ever be stored unfinished) that is stored `running`
+records its owner, `host:pid:incarnation` (`src/agentscope/storage/liveness.py`), and a
+heartbeat. `create_suite` writes both, every recorded case refreshes the heartbeat, and
+`Services.run_suite` refreshes it every 30 seconds while a case runs. The incarnation is a
+random value per process, renewed in forked children, so a server restarted in the same
+container (same hostname, pid 1 again) does not mistake its predecessor's rows for its own.
+
+`Repository.mark_interrupted` marks a `running` row `error` with "interrupted: the process
+stopped before this finished" (runs also get `error_code=interrupted`) only when:
+
+- its owner is a process on this host that no longer exists, or an earlier process that had
+  this process's pid; or
+- its owner cannot be checked from here (another host, no owner recorded, or Windows) and its
+  heartbeat (its start time, for rows without one) is older than 5 minutes.
+
+A live pid on this host is never marked, even with a silent heartbeat: the process may be
+suspended and resume. A pid that an unrelated process reused (for example after a reboot)
+also reads as alive, so such a row stays `running` rather than risk marking live work. A
+marked row gets its finish time, so a late writer is refused (`record_case` and
+`finish_suite` reject a finished suite) instead of reviving it.
+
+Recovery runs from `Services.recover_interrupted`, called by the API at startup and every
+minute, and by the CLI commands that start work (`run`, `eval`, `compare`, `demo seed`);
+`agentscope db upgrade` runs it too. Other commands (`traces`, `datasets`, `agents`,
+`db info`, `db purge`) never do.
 
 ## API and in-memory jobs
 
@@ -321,20 +375,20 @@ Routes (`src/agentscope/api/routes/`):
 | Method and path | Purpose |
 |---|---|
 | `GET /api/health` | Status and version. |
-| `GET /api/agents`, `GET /api/providers` | Agent definitions and tool specs; provider status (probes enabled providers). |
-| `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/export` | Run list with filters, run detail (trace, case, verdict), JSON attachment. |
-| `POST /api/runs` | Start a run (202 + job). Built-in `agent_ref` or a full `config`; optional `expected` makes it an ad-hoc case. |
-| `GET /api/datasets`, `GET /api/datasets/{name}/{version}`, `.../export` | Stored datasets, detail, canonical export. |
+| `GET /api/agents`, `GET /api/providers` | Agent definitions (with `version_hashes`: the `config_hash` and `effective_config_hash` of each built-in version) and tool specs; provider status (probes enabled providers). |
+| `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/export` | Run list with filters and `limit` (1 to 200, default 50) / `offset`, answered as `{items, total}`; run detail (trace, case, verdict); JSON attachment. |
+| `POST /api/runs` | Start a run (202 + job). Built-in `agent_ref` or a full `config`; optional `expected` makes it an ad-hoc case. The task must be 1 to 4000 characters without NUL or unpaired surrogates. |
+| `GET /api/datasets`, `GET /api/datasets/{name}/{version}`, `.../export` | Stored datasets; detail, whose `dataset` is the canonical export document, so it can be posted back unchanged (for example to fork a version); canonical export. |
 | `POST /api/datasets`, `POST /api/datasets/validate` | Import (201, 409 conflict, 422 invalid) and lint without importing; the raw JSON document is the body. |
-| `GET /api/evaluations`, `GET /api/evaluations/{id}`, `.../export` | Suite list and detail. |
+| `GET /api/evaluations`, `GET /api/evaluations/{id}`, `.../export` | Suite list (filters `agent_ref`, `dataset`, `status`; `limit` 1 to 200, default 50, and `offset`; a bare array with the total matching count in the `X-Total-Count` header) and detail. |
 | `POST /api/evaluations` | Start a suite (202 + job). |
-| `GET /api/experiments`, `GET /api/experiments/{id}` | Comparisons. |
-| `POST /api/experiments` | `suite_a` + `suite_b`: compare two completed suites now (201). `dataset` + `a` + `b`: run both sides (202 + job). |
+| `GET /api/experiments`, `GET /api/experiments/{id}` | Comparisons (`limit`/`offset` and `X-Total-Count` as above). |
+| `POST /api/experiments` | `suite_a` + `suite_b`: compare two completed suites now (201), or return the stored comparison of the same ordered pair (200); 404 for an unknown suite, 409 for one that is not completed. `dataset` + `a` + `b`: run both sides (202 + job). |
 | `GET /api/overview`, `GET /api/failures` | Read-only aggregations over stored verdicts (the overview also probes providers). |
 | `GET /api/jobs/{id}` | Job state and progress. |
-| `GET /api/settings`, `POST /api/settings/purge` | Redacted effective settings, storage inventory, egress list and privacy statements; purge (body `{"confirm": "PURGE", "scope": ..., "before": ...}`; 409 while jobs run or when the purge could not finish erasing). |
+| `GET /api/settings`, `POST /api/settings/purge` | Redacted effective settings, storage inventory, egress list and privacy statements; purge (body `{"confirm": "PURGE", "scope": ..., "before": ...}`; the built-in datasets are kept). A 409 carries a `code`: `jobs_running` (refused, nothing deleted) or `purge_incomplete` (rows deleted, `result` attached, old contents still on disk). |
 | `POST /api/demo/seed` | Seed the demo story (202 + job; returns the running job if one exists). |
-| `GET /api/openapi.json` | The OpenAPI document. |
+| `GET /api/openapi.json` | The OpenAPI document. There is no interactive docs page: Swagger UI loads assets from a CDN, which the CSP blocks, so it is disabled. |
 
 `LocalOnlyMiddleware` wraps every request: Host check, optional bearer token, mutation guard,
 body limit and security headers ([SECURITY.md](SECURITY.md)). Errors never carry tracebacks:
@@ -345,7 +399,9 @@ and without echoing the submitted values.
 `JobManager` (`src/agentscope/jobs.py`) runs at most 2 jobs at once with up to 16 more queued;
 beyond that `POST` answers 429. It keeps the 200 most recent finished jobs. Jobs exist only in
 the server's memory: after a restart their ids answer 404, while whatever they stored stays,
-and suites a restart cut short are marked `error` with an "interrupted" message at startup.
+and suites a dead process left `running` are marked `error` ("interrupted") by recovery.
+Evaluation and experiment jobs end `failed` (`UnjudgedCasesError: N of M cases could not be
+judged ...`) when any case is a harness error; the suite or comparison is stored all the same.
 Shutdown cancels and awaits unfinished jobs. Clients poll `GET /api/jobs/{id}` and then fetch
 the resource named in `resource_id`.
 
@@ -353,17 +409,28 @@ the resource named in `resource_id`.
 
 | Path | Contents |
 |---|---|
-| `frontend/src/api/` | `client.ts` (typed fetch wrapper; sets `X-AgentScope-Client: 1` and `Content-Type: application/json` on non-GET requests; job polling), `types.ts` (hand-written TypeScript mirror of `api/schemas.py` and the domain models), `errors.ts`. |
+| `frontend/src/api/` | `client.ts` (typed fetch wrapper; sets `X-AgentScope-Client: 1` and `Content-Type: application/json` on non-GET requests; job polling; paged lists read `X-Total-Count`; dataset validation and import send the user's text byte for byte, so the server's strict loader sees exactly the file; the located `issues` of a 422 are kept), `types.ts` (hand-written TypeScript mirror of `api/schemas.py` and the domain models), `errors.ts`. |
 | `frontend/src/router.ts` | Routes: `/overview`, `/runs`, `/runs/:runId`, `/evaluations`, `/evaluations/:suiteId`, `/evaluations/:suiteId/cases/:caseId`, `/compare`, `/compare/runs`, `/failures`, `/agents`, `/agents/:agent/:version`, `/datasets`, `/datasets/:name/:version`, `/settings`. |
 | `frontend/src/views/` | One component per screen. |
 | `frontend/src/components/` | `trace/` (span tree, transition strip, duration bars, verdict panel, span detail tabs), `compare/` (config diff, metric deltas, flip list, trace diff and the pure `alignSteps.ts`), `evaluation/`, `failures/`, `overview/`, `runs/`, `datasets/`, `settings/`, `agents/`, `charts/`, `shell/`, `ui/` (JSON viewer built from text nodes, redacted-value and truncation notices, status badges). |
-| `frontend/src/composables/` | `useTraceModel.ts` (pure step model of a trace), `useQueryState.ts` (view state in the URL), `keybindings.ts` (the single shortcut registry), resource loading, job polling, theme. |
+| `frontend/src/composables/` | `useTraceModel.ts` (pure step model of a trace), `useQueryState.ts` (view state in the URL), `keybindings.ts` (the single shortcut registry), resource loading, job polling, paging (`paging.ts`), the New run drawer state, theme. |
 | `frontend/src/styles/` | `tokens.css` (semantic color tokens for both themes, checked for WCAG AA contrast by `styles/__tests__/contrast.spec.ts`) and `base.css`. |
 | `frontend/public/theme-init.js` | Applies the saved theme before first paint; an external file because the CSP forbids inline scripts. |
+| `frontend/e2e/`, `frontend/playwright.config.ts` | Playwright end-to-end tests against the real stack: the built dashboard served by `agentscope serve` on `127.0.0.1:8799` over a freshly seeded throwaway database; the `screenshots` project regenerates `docs/images/`. |
 
 Trace and dataset strings are treated as hostile: ESLint enforces `vue/no-v-html: error`, and
 `src/__tests__/no-raw-html.spec.ts` fails on `v-html`, `innerHTML`/`outerHTML`,
 `insertAdjacentHTML` and `document.write(` in application sources.
+
+## Deployment
+
+`Dockerfile` builds one image (dashboard built with Node, AgentScope installed from
+`uv.lock` with the `postgres` extra, run as the unprivileged user `agentscope`, data in the
+`/data` volume) whose command is `agentscope serve --container`. `docker-compose.yml` adds
+PostgreSQL on an internal network and publishes only `127.0.0.1:8765`;
+`docker-compose.ollama.yml` adds a local Ollama server. Container mode and its exposure rules
+are described in [SECURITY.md](SECURITY.md#container-mode) and
+[docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md#docker).
 
 ## Key decisions and trade-offs
 
@@ -380,7 +447,10 @@ Trace and dataset strings are treated as hostile: ESLint enforces `vue/no-v-html
 | Gates compare rationals parsed from the written decimal. | Float comparison. | In floats, a drop from 4/10 to 3/10 is 10.000000000000004 pp and fails a 10 pp limit. |
 | Canonical JSON baselines without ids, timestamps or durations, written only by `--write-baseline`. | Comparing against the last stored run. | Baseline changes show up as reviewable diffs, and regenerating from unchanged inputs gives identical bytes. |
 | Cases run sequentially; jobs limited to 2 running and 16 queued. | Concurrent case execution. | Deterministic order and output; fake runs are fast and a local model gains little from concurrency. |
-| In-memory jobs. | A persistent job queue. | A single local process needs no broker; what a job stores is persisted as it goes, and interrupted suites are marked at startup. |
+| In-memory jobs. | A persistent job queue. | A single local process needs no broker; what a job stores is persisted as it goes, and suites whose process died are marked by recovery. |
+| An owner (`host:pid:incarnation`) and a heartbeat on running suites; recovery marks only rows whose owner is gone or, when that cannot be checked, silent for 5 minutes. | Marking every `running` row at startup. | The CLI and the server share one database: blind marking turned another process's live suite into an error whenever any command started. |
+| The guard checks that a tool exists before checking permission. | Permission first. | A hallucinated or corrupted name is not an attempt at a real capability; counting it as unauthorized inflated the security metric. The cost is that a model can tell which unpermitted names exist. |
+| Output faults stay owed until delivered; failure faults apply by call position. | Consuming every fault on its scheduled call. | An injection scheduled on a call that failed, or had nothing to carry it, would vanish unrecorded, and the injection checks would pass without being exercised. |
 | `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)` as the canonical encoding. | Full RFC 8785 (JCS). | Inputs are validated and finite, so a documented `json.dumps` profile is deterministic without a new dependency. |
 | No LLM judge in V1; contracts have no judge field. | A model-based score next to the deterministic checks. | A judge field inside shared models is how judge scores end up in metrics and gates; doing it properly also needs injection-safe prompting and recorded model digests. |
 | SQLite by default, PostgreSQL optional, one schema for both. | PostgreSQL only. | A local tool should work with no server; portable column types keep one migration history. |
