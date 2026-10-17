@@ -160,6 +160,22 @@ describe('dataset import', () => {
     expect(page.find('[role="dialog"]').text()).toContain('from qa.json')
   })
 
+  it('refuses a picked file that is not valid UTF-8 instead of sending replaced characters', async () => {
+    const { page, fetchMock } = await open('/datasets', { 'GET /api/datasets': [], 'POST /api/datasets/validate': valid })
+    await button(page, 'Import dataset').trigger('click')
+    const input = page.find('input[type="file"]')
+    // "Café" in Latin-1: byte 0xE9 is not UTF-8. Decoded leniently it would become "Caf�".
+    const bytes = new Uint8Array([...new TextEncoder().encode('{"name": "Caf'), 0xe9, ...new TextEncoder().encode('"}')])
+    const file = new File([bytes], 'latin1.json', { type: 'application/json' })
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    await vi.waitFor(() =>
+      expect(page.find('[role="dialog"] [role="alert"]').text()).toContain('latin1.json is not valid UTF-8 text'),
+    )
+    expect((page.find('[role="dialog"] textarea').element as HTMLTextAreaElement).value).toBe('')
+    expect(calls(fetchMock, 'POST', '/api/datasets/validate')).toHaveLength(0)
+  })
+
   it('explains a version conflict', async () => {
     const { page } = await open('/datasets', {
       'GET /api/datasets': [],

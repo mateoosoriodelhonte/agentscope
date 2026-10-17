@@ -107,21 +107,36 @@ function optionOf(suite: SuiteResult): SuiteOption {
   }
 }
 
-// A suite named in the URL but older than the listed ones (e.g. "Compare…" on an old
-// evaluation) is loaded on its own, so it can still be picked.
-watch(
-  () => [query.value.a, query.value.b, suitesReady.value] as const,
-  async ([a, b, ready]) => {
-    if (!ready) return
-    for (const id of new Set([a, b])) {
-      if (!id || known.value.has(id)) continue
+/**
+ * Loads a finished suite missing from the list (older than the listed ones, or of another
+ * dataset), so it can still be picked, named, and matched against stored comparisons.
+ */
+const fetching = new Map<string, Promise<void>>()
+function ensureKnown(id: string | null): Promise<void> {
+  if (!id || known.value.has(id)) return Promise.resolve()
+  let pending = fetching.get(id)
+  if (!pending) {
+    pending = (async () => {
       try {
         const suite = await api.getEvaluation(id)
         if (suite.status === 'completed') remember([optionOf(suite)])
       } catch {
         /* not pickable: comparing it reports the reason */
+      } finally {
+        fetching.delete(id)
       }
-    }
+    })()
+    fetching.set(id, pending)
+  }
+  return pending
+}
+
+// A suite named in the URL but not listed (e.g. "Compare…" on an old evaluation) is loaded
+// on its own, so it can still be picked.
+watch(
+  () => [query.value.a, query.value.b, suitesReady.value] as const,
+  async ([a, b, ready]) => {
+    if (ready) await Promise.all([ensureKnown(a), ensureKnown(b)])
   },
   { immediate: true },
 )
@@ -153,10 +168,13 @@ watch(
   () => [query.value.a, query.value.b, query.value.experiment, suitesReady.value, experimentsReady.value] as const,
   async ([a, b, experiment, readySuites, readyExperiments]) => {
     if (experiment || !a || !b || !readySuites || !readyExperiments || creating.running.value || comparing.value) return
-    const name = `${suiteById(a)?.agent_ref ?? shortId(a)} vs ${suiteById(b)?.agent_ref ?? shortId(b)}`
     comparing.value = true
     compareError.value = null
     try {
+      // An unlisted suite is loaded first: without it the stored comparison of these two
+      // suites could not be recognised, and every visit would store another.
+      await Promise.all([ensureKnown(a), ensureKnown(b)])
+      const name = `${suiteById(a)?.agent_ref ?? shortId(a)} vs ${suiteById(b)?.agent_ref ?? shortId(b)}`
       const stored = (await storedComparison(a, b)) ?? (await api.compareSuites({ name, suite_a: a, suite_b: b }))
       await set({ experiment: stored.experiment_id })
     } catch (e) {

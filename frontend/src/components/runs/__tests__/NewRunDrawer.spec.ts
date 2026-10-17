@@ -118,6 +118,26 @@ describe('NewRunDrawer', () => {
     })
   })
 
+  it('does not show a run that failed in the background as the failure of a newer form', async () => {
+    let state: 'running' | 'failed' = 'running'
+    fetchMock = mockFetch({
+      'GET /api/agents': agentsResponse(),
+      'POST /api/runs': () => json({ job_id: 'job-9', kind: 'run', resource_id: 'run-9' }, 202),
+      'GET /api/jobs/job-9': () => job({ job_id: 'job-9', resource_id: 'run-9', state, error: state === 'failed' ? 'provider unreachable' : null }),
+    })
+    await submit(await openDrawer({ agentRef: 'research_assistant@v1', task: 'Who founded the library?' }))
+    closeNewRun()
+    const drawer = await openDrawer({ agentRef: 'research_assistant@v2', task: 'Another question' })
+    expect(drawer.find('[role="dialog"] .progress').text()).toContain('Another run is still in progress')
+    state = 'failed'
+    await vi.waitFor(() => expect(drawer.find('.run-notice').text()).toContain('The run failed: provider unreachable'), {
+      timeout: 3000,
+    })
+    // The newer form started nothing: it neither claims the failure nor stays blocked.
+    expect(drawer.find('[role="dialog"]').text()).not.toContain('Could not start the run')
+    expect(drawer.find('[role="dialog"] .modal-foot .btn.primary').attributes('disabled')).toBeUndefined()
+  })
+
   it('lists what to fix instead of sending an invalid form', async () => {
     const drawer = await openDrawer()
     await drawer.findAll('button').find((b) => b.text() === 'Add tool fault')!.trigger('click')

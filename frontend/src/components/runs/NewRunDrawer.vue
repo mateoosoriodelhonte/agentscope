@@ -183,6 +183,9 @@ async function submit(): Promise<void> {
     const described = describeError(failure)
     if (!onScreen) {
       finished.value = { error: described.message }
+      // The notice reports it. A newer form on screen never started this run, so it must not
+      // show the failure as its own ("Could not start the run").
+      job.error.value = null
     } else if (described.issues.length) {
       // The server's located reasons join the form's own list and mark their fields.
       issues.value = described.issues.map(({ path, message }) => ({ path, message }))

@@ -133,6 +133,20 @@ describe('CompareView', () => {
     expect(wrapper!.find('h1').text()).toBe('research_assistant@v1 vs research_assistant@v2')
   })
 
+  it('reuses a stored comparison of a suite named in the URL that is older than the listed ones', async () => {
+    const stored = comparison({ experiment_id: 'exp-old' })
+    stored.a = { ...stored.a, suite_id: 'suite-old' }
+    const { router, fetchMock } = await open('/compare?a=suite-old&b=suite-v2', {
+      'GET /api/evaluations/suite-old': suiteResult({ suite_id: 'suite-old' }),
+      'GET /api/experiments': paged([experimentItem({ experiment_id: 'exp-old' })]),
+      'GET /api/experiments/exp-old': stored,
+      'POST /api/experiments': () => json(comparison({ experiment_id: 'exp-new' }), 201),
+    })
+    await flushPromises()
+    expect(calls(fetchMock, 'POST', '/api/experiments')).toHaveLength(0)
+    expect(router.currentRoute.value.query.experiment).toBe('exp-old')
+  })
+
   it('computes a new comparison when the stored one compared other suites of the same versions', async () => {
     const older = comparison()
     older.a = { ...older.a, suite_id: 'suite-v1-old' }

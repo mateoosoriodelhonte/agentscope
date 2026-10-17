@@ -60,13 +60,22 @@ function readFile(event: Event): void {
   }
   const reader = new FileReader()
   reader.onload = () => {
-    source.value = typeof reader.result === 'string' ? reader.result : ''
+    // Strict UTF-8, as the server reads it: readAsText would replace invalid bytes with U+FFFD,
+    // so a file the loader rejects would be sent as valid text with different content.
+    let text: string
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(reader.result as ArrayBuffer)
+    } catch {
+      error.value = `${file.name} is not valid UTF-8 text; datasets must be UTF-8 encoded.`
+      return
+    }
+    source.value = text
     fileName.value = file.name
   }
   reader.onerror = () => {
     error.value = `Could not read ${file.name}.`
   }
-  reader.readAsText(file)
+  reader.readAsArrayBuffer(file)
 }
 
 const issues = computed(() => {
