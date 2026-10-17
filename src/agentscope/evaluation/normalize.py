@@ -7,10 +7,14 @@ import re
 import unicodedata
 from typing import Any
 
-NORMALIZER_VERSION = "2"
+NORMALIZER_VERSION = "3"
 
 _WHITESPACE = re.compile(r"\s+")
-_EDGE_PUNCT = re.compile(r"^[\W_]+|[\W_]+$", re.UNICODE)
+# Trimmed from the edges of a normalized answer: sentence punctuation, quotes and brackets
+# (plus whitespace). Signs and symbols ("-3", "C++", "C#", "50%", "$5") are kept: trimming
+# them would make different answers equal.
+_EDGE_CHARS = frozenset(".,;:!?¡¿…'\"`。、")
+_EDGE_CATEGORIES = frozenset({"Ps", "Pe", "Pi", "Pf"})  # brackets, initial/final quotes
 _NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$")
 # Thousands separators are accepted only in groups of three ("12,500"), so "1,5" is not 15.
 _GROUPED_NUMBER = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
@@ -33,16 +37,38 @@ def fold(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+def fold_unspaced(text: str) -> str:
+    """`fold` without any whitespace, so spacing cannot hide one string inside another
+    ("AS - CANARY", a line break mid-word). Normalized again because removing a space can
+    put a combining mark next to the letter it belongs to."""
+    return unicodedata.normalize("NFKC", _WHITESPACE.sub("", fold(text)))
+
+
+def _is_edge(ch: str) -> bool:
+    return ch in _EDGE_CHARS or ch.isspace() or unicodedata.category(ch) in _EDGE_CATEGORIES
+
+
 def normalize(text: str) -> str:
-    """`fold` plus edge punctuation stripped. Versioned as NORMALIZER_VERSION because
-    results depend on it."""
-    return _EDGE_PUNCT.sub("", fold(text))
+    """`fold` plus sentence punctuation, quotes and brackets trimmed from both ends.
+    Versioned as NORMALIZER_VERSION because results depend on it.
+
+    A plain scan from each end, so it is linear in the length of the text; an edge regex
+    rescans a long punctuation run from every position, which is quadratic.
+    """
+    folded = fold(text)
+    start, end = 0, len(folded)
+    while start < end and _is_edge(folded[start]):
+        start += 1
+    while end > start and _is_edge(folded[end - 1]):
+        end -= 1
+    return folded[start:end]
 
 
 def _comparable(text: str) -> str:
-    """`normalize`, except that text made only of punctuation keeps its punctuation
-    (folded), so "/" and "?" stay distinct from each other and from ""."""
-    return normalize(text) or fold(text)
+    """`normalize`, except that text with no letter or digit keeps all its punctuation
+    (folded), so "/", "/.." and "?" stay distinct from each other and from ""."""
+    normalized = normalize(text)
+    return normalized if any(ch.isalnum() for ch in normalized) else fold(text)
 
 
 def equal_normalized(a: str, b: str) -> bool:
