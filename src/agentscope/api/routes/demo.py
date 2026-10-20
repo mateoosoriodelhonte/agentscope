@@ -4,7 +4,7 @@ from fastapi import APIRouter
 
 from agentscope.api.deps import JobsDep, ServicesDep, accepted, submit
 from agentscope.api.schemas import JobAccepted
-from agentscope.demo import DEMO_STEPS, seed_demo
+from agentscope.demo import demo_steps, seed_demo
 from agentscope.jobs import Job
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
@@ -23,4 +23,4 @@ async def seed(services: ServicesDep, jobs: JobsDep) -> JobAccepted:
     async def work(job: Job) -> None:
         await seed_demo(services, progress=job.report)
 
-    return accepted(submit(jobs, "demo_seed", DEMO_RESOURCE, work, total=DEMO_STEPS))
+    return accepted(submit(jobs, "demo_seed", DEMO_RESOURCE, work, total=demo_steps()))

@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import delete, update
 
 from agentscope import demo
-from agentscope.demo import DEMO_RUNS, DEMO_STEPS, seed_demo
+from agentscope.demo import DEMO_RUNS, demo_steps, seed_demo
 from agentscope.services import Services
 from agentscope.storage.models import DatasetRow, ExperimentRow
 
@@ -31,7 +31,7 @@ def without_ablation(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_seed_tells_the_story(services: Services) -> None:
     progress: list[tuple[int, int]] = []
     summary = await seed_demo(services, progress=lambda done, total: progress.append((done, total)))
-    assert progress[-1] == (DEMO_STEPS, DEMO_STEPS)
+    assert progress[-1] == (demo_steps(), demo_steps())
     assert summary.created == {
         "suites": 5,
         "experiments": 2,

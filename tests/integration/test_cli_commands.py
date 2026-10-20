@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner, Result
 
+from agentscope import demo
 from agentscope.cli.main import app
 from agentscope.config import get_settings
 from agentscope.datasets.io import export_dataset
@@ -139,15 +140,17 @@ def test_db_info_reports_a_pending_migration(
     assert "agentscope db upgrade" in result.stdout
 
 
-def test_demo_seed_is_idempotent() -> None:
+def test_demo_seed_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The command's plumbing, without the 20-suite ablation (tests/unit/test_demo.py seeds
+    # the full story, ablation included, and checks that reseeding reuses it).
+    monkeypatch.setattr(demo, "DEMO_ABLATIONS", ())
     first = invoke("demo", "seed", "--json")
     assert first.exit_code == 0, first.output
     created = json.loads(first.stdout)
-    assert created["created"] == {"suites": 5, "experiments": 2, "ablations": 1, "runs": 4}
+    assert created["created"] == {"suites": 5, "experiments": 2, "ablations": 0, "runs": 4}
     second = json.loads(invoke("demo", "seed", "--json").stdout)
     assert second["created"] == {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
     assert second["suites"] == created["suites"]
-    assert second["ablations"] == created["ablations"]
     assert "demo seeded" in invoke("demo", "seed").stdout
 
 

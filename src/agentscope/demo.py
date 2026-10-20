@@ -125,7 +125,11 @@ DEMO_RUNS: tuple[DemoRun, ...] = (
     ),
 )
 
-DEMO_STEPS = len(DEMO_SUITES) + len(DEMO_EXPERIMENTS) + len(DEMO_ABLATIONS) + len(DEMO_RUNS)
+
+def demo_steps() -> int:
+    """Progress steps of one seed: every suite, experiment, ablation and ad-hoc run. Read at
+    call time, so the total always matches what the seed actually does."""
+    return len(DEMO_SUITES) + len(DEMO_EXPERIMENTS) + len(DEMO_ABLATIONS) + len(DEMO_RUNS)
 
 
 class DemoSummary(StrictModel):
@@ -155,7 +159,8 @@ def _config(services: Services, run: DemoRun) -> AgentConfig:
 
 
 async def seed_demo(services: Services, progress: Progress | None = None) -> DemoSummary:
-    """Create whatever part of the story is missing; `progress` counts steps (DEMO_STEPS)."""
+    """Create whatever part of the story is missing; `progress` counts steps (demo_steps())."""
+    total = demo_steps()
     repository = services.repository
     created = {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
     reused = {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
@@ -166,7 +171,7 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         (created if was_created else reused)[kind] += 1
         step += 1
         if progress is not None:
-            progress(step, DEMO_STEPS)
+            progress(step, total)
 
     # Registration is idempotent; it restores the packaged datasets should they be missing.
     await asyncio.to_thread(services.register_builtin_datasets)
