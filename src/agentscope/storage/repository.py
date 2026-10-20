@@ -35,6 +35,7 @@ from agentscope.api.schemas import (
     SuiteListItem,
     TableInventory,
 )
+from agentscope.domain.ablations import Ablation, AblationListItem
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.common import StrictModel
 from agentscope.domain.datasets import Dataset, EvalCase
@@ -60,6 +61,7 @@ from agentscope.domain.traces import (
 from agentscope.storage.db import session_factory
 from agentscope.storage.liveness import STALE_AFTER, owner_alive, process_owner
 from agentscope.storage.models import (
+    AblationRow,
     Base,
     CaseResultRow,
     CheckResultRow,
@@ -87,15 +89,20 @@ _INVENTORY: tuple[tuple[type[Base], str], ...] = (
     (CaseResultRow, "Per-case verdicts of evaluation runs, with check messages and evidence."),
     (CheckResultRow, "Per-check status and reason code of each case verdict."),
     (ExperimentRow, "Comparisons between two evaluation runs."),
+    (AblationRow, "Ablations: which configuration changes explain a comparison, per case."),
 )
 
 # What each purge scope deletes, and the column `before` is compared with. Foreign keys
-# cascade the rest: a suite takes its case results, its runs, and experiments built on it.
-_PURGE_TARGETS: dict[str, tuple[type[Base], InstrumentedAttribute[datetime]]] = {
-    "experiments": (ExperimentRow, ExperimentRow.created_at),
-    "evaluations": (SuiteRunRow, SuiteRunRow.started_at),
-    "runs": (RunRow, RunRow.started_at),
-    "datasets": (DatasetRow, DatasetRow.created_at),
+# cascade the rest: a suite takes its case results, its runs, and the experiments and
+# ablations built on it. Purge itself deletes the variant suites of every deleted ablation.
+_PURGE_TARGETS: dict[str, tuple[tuple[type[Base], InstrumentedAttribute[datetime]], ...]] = {
+    "experiments": (
+        (ExperimentRow, ExperimentRow.created_at),
+        (AblationRow, AblationRow.created_at),
+    ),
+    "evaluations": ((SuiteRunRow, SuiteRunRow.started_at),),
+    "runs": ((RunRow, RunRow.started_at),),
+    "datasets": ((DatasetRow, DatasetRow.created_at),),
 }
 
 # JSON documents the suite list view never needs.
@@ -460,8 +467,9 @@ class Repository:
 
     # --- evaluation suites ------------------------------------------------------------
 
-    def create_suite(self, header: SuiteHeader) -> None:
-        """Insert a `running` suite before its first case runs."""
+    def create_suite(self, header: SuiteHeader, *, ablation_id: str | None = None) -> None:
+        """Insert a `running` suite before its first case runs. `ablation_id` makes it a
+        variant suite of that ablation, which lists leave out by default."""
         clean = self._scrub(header)
         row = SuiteRunRow(
             id=uuid.UUID(clean.suite_id),
@@ -485,6 +493,7 @@ class Repository:
             started_at=clean.started_at,
             owner=process_owner(),
             heartbeat_at=datetime.now(UTC),
+            ablation_id=uuid.UUID(ablation_id) if ablation_id else None,
         )
         with self.session() as session, session.begin():
             session.add(row)
@@ -612,10 +621,15 @@ class Repository:
         dataset_name: str | None = None,
         status: str | None = None,
         label: str | None = None,
+        include_ablations: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[SuiteListItem], int]:
+        """Newest first. An ablation's variant suites are left out unless `include_ablations`:
+        they are reached through their ablation."""
         query = select(SuiteRunRow)
+        if not include_ablations:
+            query = query.where(SuiteRunRow.ablation_id.is_(None))
         if agent_ref:
             query = query.where(SuiteRunRow.agent_ref == agent_ref)
         if dataset_name:
@@ -638,9 +652,10 @@ class Repository:
 
     def latest_suite_ids(self, *, agent_refs: Sequence[str] = ()) -> list[str]:
         """The most recent completed suite of each agent version (optionally only `agent_refs`),
-        ordered by agent version."""
+        ordered by agent version. Ablation variants are not versions anyone chose, so they
+        never count."""
         query = select(SuiteRunRow.agent_ref, SuiteRunRow.id).where(
-            SuiteRunRow.status == "completed"
+            SuiteRunRow.status == "completed", SuiteRunRow.ablation_id.is_(None)
         )
         if agent_refs:
             query = query.where(SuiteRunRow.agent_ref.in_(agent_refs))
@@ -778,6 +793,97 @@ class Repository:
             )
             return [_experiment_item(r) for r in rows], total
 
+    # --- ablations --------------------------------------------------------------------
+
+    def save_ablation(self, ablation: Ablation) -> None:
+        clean = self._scrub(ablation)
+        row = AblationRow(
+            id=uuid.UUID(clean.ablation_id),
+            name=clean.name,
+            created_at=clean.created_at,
+            experiment_id=uuid.UUID(clean.experiment_id) if clean.experiment_id else None,
+            dataset_name=clean.dataset_name,
+            dataset_version=clean.dataset_version,
+            dataset_hash=clean.dataset_hash,
+            a_suite_id=uuid.UUID(clean.a.suite_id),
+            b_suite_id=uuid.UUID(clean.b.suite_id),
+            a_ref=clean.a.agent_ref,
+            b_ref=clean.b.agent_ref,
+            deterministic=clean.deterministic,
+            total_effect_pp=clean.total_effect_pp,
+            interaction_pp=clean.interaction_pp,
+            dimensions=list(clean.dimensions),
+            result=clean.model_dump(mode="json"),
+        )
+        with self.session() as session, session.begin():
+            session.add(row)
+
+    def get_ablation(self, ablation_id: str) -> Ablation | None:
+        key = _uuid(ablation_id)
+        if key is None:
+            return None
+        with self.session() as session:
+            found = session.execute(
+                select(AblationRow.result, AblationRow.experiment_id).where(AblationRow.id == key)
+            ).one_or_none()
+        if found is None:
+            return None
+        document, experiment = found
+        ablation = Ablation.model_validate(document)
+        if experiment is None and ablation.experiment_id is not None:
+            # The experiment was deleted on its own: the link to it would dangle.
+            return ablation.model_copy(update={"experiment_id": None})
+        return ablation
+
+    def list_ablations(
+        self, *, experiment_id: str | None = None, limit: int = 50, offset: int = 0
+    ) -> tuple[list[AblationListItem], int]:
+        """Newest first; with `experiment_id`, only those explaining that comparison."""
+        query = select(AblationRow)
+        if experiment_id is not None:
+            key = _uuid(experiment_id)
+            if key is None:  # no experiment can have this id
+                return [], 0
+            query = query.where(AblationRow.experiment_id == key)
+        with self.session() as session:
+            rows, total = _page(
+                session,
+                query.options(defer(AblationRow.result)),
+                (AblationRow.created_at.desc(), AblationRow.id),
+                limit,
+                offset,
+            )
+            return [_ablation_item(r) for r in rows], total
+
+    def latest_ablation_for_experiment(self, experiment_id: str) -> Ablation | None:
+        key = _uuid(experiment_id)
+        if key is None:
+            return None
+        with self.session() as session:
+            document = session.scalar(
+                select(AblationRow.result)
+                .where(AblationRow.experiment_id == key)
+                .order_by(AblationRow.created_at.desc(), AblationRow.id)
+                .limit(1)
+            )
+        return Ablation.model_validate(document) if document is not None else None
+
+    def discard_ablation_variants(self, ablation_id: str) -> int:
+        """Delete the variant suites of an ablation that was never stored (with their case
+        results, runs and spans): nothing could reach them, and lists hide them. Does nothing
+        once the ablation is stored, since they then belong to it. Returns how many went."""
+        key = _uuid(ablation_id)
+        if key is None:
+            return 0
+        # One statement, so SQLite takes the write lock at once (waiting busy_timeout) rather
+        # than upgrading a read and failing while another connection writes.
+        stored = select(AblationRow.id).where(AblationRow.id == key).exists()
+        with self.engine.begin() as connection:
+            deleted = connection.execute(
+                delete(SuiteRunRow).where(SuiteRunRow.ablation_id == key, ~stored)
+            )
+        return deleted.rowcount
+
     # --- inventory and purge ----------------------------------------------------------
 
     def inventory(self) -> StorageInventory:
@@ -813,11 +919,12 @@ class Repository:
         """Delete stored data, then compact so the content is gone from disk, not just unlinked.
 
         `before` limits deletion to rows created (runs and suites: started) before it. A suite
-        takes its case results, runs and experiments with it; purging runs keeps verdicts but
-        unlinks them. Datasets whose content hash is in `keep_datasets` (those packaged with
-        AgentScope) are never deleted. SQLite overwrites deleted cells (secure_delete), VACUUM
-        rebuilds the file and the WAL is truncated; PostgreSQL rewrites the affected tables
-        (VACUUM FULL).
+        takes its case results, runs, experiments and ablations with it; purging experiments
+        purges ablations too; a deleted ablation takes its variant suites; purging runs keeps
+        verdicts but unlinks them. Datasets whose content hash is in `keep_datasets` (those
+        packaged with AgentScope) are never deleted. SQLite overwrites deleted cells
+        (secure_delete), VACUUM rebuilds the file and the WAL is truncated; PostgreSQL
+        rewrites the affected tables (VACUUM FULL).
 
         Raises PurgeIncomplete (carrying the result) when SQLite could not truncate the WAL
         because another connection was reading: the rows are gone, but old copies of their
@@ -825,7 +932,8 @@ class Repository:
         """
         if before is not None and before.tzinfo is None:
             raise ValueError("before must be timezone-aware")
-        targets = list(_PURGE_TARGETS.values()) if scope == "all" else [_PURGE_TARGETS[scope]]
+        scopes = list(_PURGE_TARGETS) if scope == "all" else [scope]
+        targets = [target for name in scopes for target in _PURGE_TARGETS[name]]
         size_before = self._size_bytes()
         with self.engine.begin() as connection:
             if connection.dialect.name == "sqlite":
@@ -833,6 +941,7 @@ class Repository:
                 # lock first so the counts and the deletes see the same rows.
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             counts_before = _row_counts(connection)
+            ablations = set(connection.scalars(select(AblationRow.id)))
             for model, moment in targets:
                 statement = delete(model)
                 if before is not None:
@@ -840,6 +949,7 @@ class Repository:
                 if model is DatasetRow and keep_datasets:
                     statement = statement.where(DatasetRow.content_hash.not_in(keep_datasets))
                 connection.execute(statement)
+            _delete_orphaned_variants(connection, ablations)
             counts_after = _row_counts(connection)
         deleted = {name: max(0, counts_before[name] - counts_after[name]) for name in counts_before}
         erased = self._compact([name for name, count in deleted.items() if count])
@@ -978,6 +1088,19 @@ def _locate(document: Any, loc: Sequence[int | str]) -> tuple[Any, Any]:
     return container, key
 
 
+def _delete_orphaned_variants(connection: Connection, ablations: set[uuid.UUID]) -> None:
+    """Delete the variant suites of every ablation in `ablations` that is gone. Repeated
+    until none is: a variant suite can be the A or B of another ablation, and deleting it
+    cascades to that one."""
+    while True:
+        remaining = set(connection.scalars(select(AblationRow.id)))
+        gone = ablations - remaining
+        if not gone:
+            return
+        connection.execute(delete(SuiteRunRow).where(SuiteRunRow.ablation_id.in_(gone)))
+        ablations = remaining
+
+
 def _locked_suite(session: Session, key: uuid.UUID) -> SuiteRunRow:
     suite = session.get(SuiteRunRow, key, with_for_update=True)
     if suite is None:
@@ -1110,6 +1233,25 @@ def _experiment_item(row: ExperimentRow) -> ExperimentListItem:
         fixes=row.fixes,
         confounded=row.confounded,
         deterministic=row.deterministic,
+    )
+
+
+def _ablation_item(row: AblationRow) -> AblationListItem:
+    return AblationListItem.model_validate(
+        {
+            "ablation_id": str(row.id),
+            "name": row.name,
+            "created_at": row.created_at,
+            "experiment_id": str(row.experiment_id) if row.experiment_id else None,
+            "dataset_name": row.dataset_name,
+            "dataset_version": row.dataset_version,
+            "a_ref": row.a_ref,
+            "b_ref": row.b_ref,
+            "dimensions": row.dimensions,
+            "total_effect_pp": row.total_effect_pp,
+            "interaction_pp": row.interaction_pp,
+            "deterministic": row.deterministic,
+        }
     )
 
 

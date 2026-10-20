@@ -228,8 +228,14 @@ def test_demo_seed_job(client: TestClient) -> None:
     if second["job_id"] != accepted["job_id"]:
         assert wait_for_job(client, second["job_id"])["state"] == "succeeded"
     suites = client.get("/api/evaluations").json()
-    assert len(suites) == 5
+    assert len(suites) == 5  # the ablation's 20 variant suites are listed only on request
     assert len(client.get("/api/experiments").json()) == 2
+    (ablation,) = client.get("/api/ablations").json()
+    experiments = client.get("/api/experiments").json()
+    v1_v2 = next(e for e in experiments if e["name"] == "Demo: research v1 vs v2")
+    assert ablation["experiment_id"] == v1_v2["experiment_id"]
+    everything = client.get("/api/evaluations", params={"include_ablations": True, "limit": 200})
+    assert len(everything.json()) == 5 + 20
 
 
 def test_lists_page_with_a_total_count_header(client: TestClient) -> None:

@@ -26,9 +26,10 @@ plain-language privacy statements.
 `agentscope db info` prints the location (password masked), schema revision, size and row
 count per table.
 
-`--no-save` (on `run` and `eval`) keeps that run or suite out of the database, but the command
-still opens the database, creating and migrating it when needed, and registers the built-in
-datasets in it. `agentscope compare` always stores its two suites and the comparison.
+`--no-save` (on `run`, `eval` and `ablate`) keeps that run, suite or ablation (with every
+suite it evaluates) out of the database, but the command still opens the database, creating and
+migrating it when needed, and registers the built-in datasets in it. `agentscope compare`
+always stores its two suites and the comparison.
 
 ## What is stored, table by table
 
@@ -39,10 +40,11 @@ Every value below is redacted before it is written (see [Redaction](#redaction))
 | `runs` | Identity and configuration: run and trace ids, agent and version, configuration hashes, provider and model, the full agent configuration, effective limits and permitted tools. Content: the task text, the final output, every tool call with its arguments, outputs, attempts and denial reasons, state transitions with their reasons, guardrail events, injected tool faults (with payloads) and model faults. Outcome: status, error code and error text, step and call counts, provider-reported token usage and cost estimate when available. Evaluation: the test case the run was judged against (expected answers and forbidden substrings included) and the verdict. Timestamps and duration. `owner` and `heartbeat_at` columns exist for a run stored while in flight; runs are stored only once finished, so they stay empty. |
 | `spans` | Per span: trace, span and parent ids, name, kind, status and status message, start and end time, attributes (model parameters, tool names, outcomes, hashes), events, and input and output payloads. Payloads include the full messages sent to the model (system prompt included), the model's replies, tool arguments and results, guard decisions and scanner excerpts. |
 | `datasets` | Name, version, content hash, description, agent, case count, tags, and the complete dataset document. |
-| `suite_runs` | Label, status, dataset name, version and hash, agent reference, configuration hashes, provider and model, whether it was deterministic, the agent configuration, enabled checks, environment fingerprint (AgentScope, check engine, Python and LangGraph versions, a hash of the packaged tool data, provider, model, and hashes of the resolved prompt text, tool schemas, output schema, graph and fake brain version), metrics (including a token usage summary and timings), gate result, counts, timestamps, and an error message for suites that did not finish. Its owner, the machine's hostname, process id and a random per-process value (`host:pid:incarnation`), and the time of its last heartbeat, so recovery can tell whether its process still lives; both are written when the suite starts and kept after it finishes. |
+| `suite_runs` | Label, status, dataset name, version and hash, agent reference, configuration hashes, provider and model, whether it was deterministic, the agent configuration, enabled checks, environment fingerprint (AgentScope, check engine, Python and LangGraph versions, a hash of the packaged tool data, provider, model, and hashes of the resolved prompt text, tool schemas, output schema, graph and fake brain version), metrics (including a token usage summary and timings), gate result, counts, timestamps, and an error message for suites that did not finish. Its owner, the machine's hostname, process id and a random per-process value (`host:pid:incarnation`), and the time of its last heartbeat, so recovery can tell whether its process still lives; both are written when the suite starts and kept after it finishes. For an ablation's variant suite, the id of that ablation. |
 | `case_results` | Per case: id and content hash, link to its run, verdict, run status, harness error text, and the full case result (check messages, expected and actual values, evidence). |
 | `check_results` | Per case and check: check name, status and reason code. |
 | `experiments` | Name, dataset name, version and hash, links to the two suites, the full comparison (configuration differences, metric deltas, per-case and per-check changes), and summary counts. |
+| `ablations` | Name, creation time, link to the comparison it explains (if any), dataset name, version and hash, links to the A and B suites and their agent references, the ablated dimensions, total effect and interaction, whether every suite was deterministic, and the full ablation (configuration differences not ablated, each variant's agent reference, configuration hash, suite id, counts, effects and the case ids it gained or lost, pair interactions, per-case attribution with run ids, warnings). The variant suites themselves are rows of `suite_runs`, with their runs and spans. |
 | `alembic_version` | The schema revision. |
 
 What is **not** stored: provider API keys, the API token, OTLP header values and the database
@@ -150,8 +152,8 @@ background jobs are running it answers 409 with `code: "jobs_running"` and delet
 |---|---|---|
 | `all` | everything below | |
 | `runs` | runs (by start time) | their spans; case results keep their verdicts but lose the link to the run |
-| `evaluations` | suite runs (by start time) | their case results and check results, their runs and spans, and experiments built on them |
-| `experiments` | experiments (by creation time) | |
+| `evaluations` | suite runs (by start time), ablation variant suites included | their case results and check results, their runs and spans, experiments and ablations built on them, and the variant suites of those ablations |
+| `experiments` | experiments and ablations (by creation time) | the variant suites of the deleted ablations, with their results, runs and spans |
 | `datasets` | imported datasets (by creation time) | none |
 
 The datasets packaged with the running release are never deleted, in any scope: they are

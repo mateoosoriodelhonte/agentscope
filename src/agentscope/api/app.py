@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from agentscope import __version__
 from agentscope.api.deps import InvalidInput, invalid_input_response
 from agentscope.api.routes import (
+    ablations,
     agents,
     datasets,
     demo,
@@ -145,6 +146,7 @@ def create_app(
         datasets,
         evaluations,
         experiments,
+        ablations,
         insights,
         jobs,
         settings,

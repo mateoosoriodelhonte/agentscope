@@ -59,12 +59,19 @@ def list_evaluations(
     agent_ref: str | None = None,
     dataset: str | None = None,
     status: Literal["running", "completed", "error"] | None = None,
+    include_ablations: bool = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[SuiteListItem]:
-    """Newest first, one page at a time: X-Total-Count says how many match in all."""
+    """Newest first, one page at a time: X-Total-Count says how many match in all. The
+    variant suites of ablations are listed only with `include_ablations`."""
     items, total = services.repository.list_suites(
-        agent_ref=agent_ref, dataset_name=dataset, status=status, limit=limit, offset=offset
+        agent_ref=agent_ref,
+        dataset_name=dataset,
+        status=status,
+        include_ablations=include_ablations,
+        limit=limit,
+        offset=offset,
     )
     response.headers[TOTAL_COUNT] = str(total)
     return items

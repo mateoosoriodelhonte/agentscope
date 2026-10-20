@@ -9,7 +9,24 @@ from fastapi.testclient import TestClient
 
 from agentscope.api.app import create_app
 from agentscope.config import Settings
+from agentscope.datasets.packaged import load_builtin_dataset
+from agentscope.domain.datasets import Dataset
 from agentscope.services import Services, build_services
+
+# Research cases v1 fails and v2 passes, each for another reason: the instruction-hierarchy
+# prompt with isolation (together only), the verified-only search schema, a tool retry.
+ABLATION_CASES = ("injection-encoded-hex", "qa-transit-fare", "fault-timeout-transient")
+
+
+@pytest.fixture
+def small_research() -> Dataset:
+    """Three research cases: enough to ablate v1 -> v2 in a second, not in fifteen."""
+    research = load_builtin_dataset("research-assistant")
+    return Dataset(
+        name="ablation-small",
+        agent=research.agent,
+        cases=[case for case in research.cases if case.id in ABLATION_CASES],
+    )
 
 
 @pytest.fixture

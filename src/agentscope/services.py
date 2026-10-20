@@ -37,6 +37,13 @@ from agentscope.config import Settings, get_settings
 from agentscope.datasets.issues import DatasetError, Issue, json_pointer
 from agentscope.datasets.lint import lint
 from agentscope.datasets.packaged import UnknownDatasetError, builtin_datasets
+from agentscope.domain.ablations import (
+    MAX_ABLATION_DIMENSIONS,
+    MAX_PAIRWISE_DIMENSIONS,
+    Ablation,
+    AblationPair,
+    AblationVariant,
+)
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.common import utcnow
 from agentscope.domain.datasets import Dataset, EvalCase
@@ -52,6 +59,7 @@ from agentscope.domain.traces import TraceRecord
 from agentscope.evaluation.baseline import Baseline, ensure_compatible
 from agentscope.evaluation.checks import CHECKS
 from agentscope.evaluation.fingerprint import environment_fingerprint
+from agentscope.experiments.ablation import Variant, ablatable_dimensions, attribute, plan_variants
 from agentscope.experiments.compare import compare
 from agentscope.providers.base import ModelProvider
 from agentscope.providers.http import EgressPolicy
@@ -89,6 +97,16 @@ class UnknownSuiteError(LookupError):
     pass
 
 
+class UnknownExperimentError(LookupError):
+    pass
+
+
+class AblationRefused(ValueError):
+    """An ablation that could not explain anything was refused before anything ran: its
+    suites evaluated different dataset content, or A and B differ in no configuration field
+    that can be changed on its own, or in too many."""
+
+
 class UnjudgedCasesError(RuntimeError):
     """Work finished and was stored, but some cases could not be judged: AgentScope or the
     model provider failed (harness errors), so the verdict says nothing about the agent."""
@@ -119,6 +137,46 @@ def ensure_comparison_judged(comparison: Comparison) -> None:
         a.total + b.total,
         None,
     )
+
+
+def ensure_ablation_judged(ablation: Ablation) -> None:
+    """A and B count every case; variants count the compared ones (what they report)."""
+    a, b = ablation.a.metrics, ablation.b.metrics
+    variants: list[AblationVariant | AblationPair] = [*ablation.variants, *ablation.pairs]
+    ensure_judged(
+        f"ablation {ablation.ablation_id}",
+        a.harness_errors + b.harness_errors + sum(v.harness_errors for v in variants),
+        a.total + b.total + sum(v.total for v in variants),
+        None,
+    )
+
+
+@dataclass(frozen=True)
+class AblationPlan:
+    """An ablation checked and ready to run; nothing has been run or stored for it yet."""
+
+    ablation_id: str
+    name: str
+    dataset: Dataset
+    a_config: AgentConfig
+    b_config: AgentConfig
+    # Reused when given; otherwise evaluated before the variants.
+    a_suite: SuiteResult | None
+    b_suite: SuiteResult | None
+    experiment_id: str | None
+    variants: list[Variant]  # valid ones only, in plan order
+    pairs_skipped: bool
+    warnings: list[str]  # variants skipped as invalid
+
+    @property
+    def suites(self) -> int:
+        """Suites still to run."""
+        return len(self.variants) + (self.a_suite is None) + (self.b_suite is None)
+
+    @property
+    def total(self) -> int:
+        """Cases still to run: the unit progress is reported in."""
+        return self.suites * len(self.dataset.cases)
 
 
 def build_redactor(settings: Settings) -> Redactor:
@@ -306,7 +364,7 @@ class Services:
                 f"{storage.location}. It sends no telemetry, analytics or crash reports.",
                 "Stored: agent runs (task text, final outputs, tool calls with their arguments "
                 "and results), trace spans (prompts and model responses), imported datasets, "
-                "evaluation verdicts and comparisons.",
+                "evaluation verdicts, comparisons and ablations.",
                 "Secrets are redacted before anything is stored: configured keys and tokens, "
                 "values under sensitive key names, and secret-shaped strings such as API keys, "
                 "bearer tokens, JWTs and private keys.",
@@ -446,12 +504,14 @@ class Services:
         progress: Progress | None = None,
         suite_id: str | None = None,
         save: bool = True,
+        ablation_id: str | None = None,
     ) -> SuiteResult:
         """Evaluate `dataset` on `config` and return the redacted result.
 
         When saved, the suite exists (as `running`) before its first case, every case is
         stored as soon as it is judged, and a suite that cannot finish (cancelled, crashed)
         is marked as errored, so a partial suite is never mistaken for a complete one.
+        `ablation_id` marks it as a variant suite of that ablation.
         """
         enabled = self.check_suite_inputs(dataset, config, checks=checks, baseline=baseline)
         suite_id = suite_id or str(uuid.uuid4())
@@ -480,7 +540,7 @@ class Services:
                 environment=environment_fingerprint(config, self.runner.resolved_content(config)),
                 started_at=utcnow(),
             )
-            await asyncio.to_thread(self.repository.create_suite, header)
+            await asyncio.to_thread(self.repository.create_suite, header, ablation_id=ablation_id)
         heartbeat = asyncio.create_task(self._heartbeat(suite_id)) if save else None
         try:
             result = await SuiteRunner(self.runner, self.catalog).run(
@@ -586,6 +646,231 @@ class Services:
         comparison = compare(a, b, name, experiment_id=experiment_id)
         self.repository.save_experiment(comparison)
         return self.redacted(comparison)
+
+    # --- ablations ----------------------------------------------------------------------
+
+    def plan_ablation(
+        self,
+        name: str,
+        dataset: Dataset,
+        a_config: AgentConfig,
+        b_config: AgentConfig,
+        *,
+        a_suite: SuiteResult | None = None,
+        b_suite: SuiteResult | None = None,
+        experiment_id: str | None = None,
+        pairs: bool = True,
+    ) -> AblationPlan:
+        """Everything that can be wrong before an ablation starts, raised before anything is
+        run or stored: AblationRefused, or what check_suite_inputs raises for A or B when
+        they still have to run. A variant the catalog or the dataset rejects is skipped with
+        a warning instead, and so is a pair missing one of its single-dimension variants."""
+        digest = dataset.content_hash()
+        for side, suite, config in (("A", a_suite, a_config), ("B", b_suite, b_config)):
+            if suite is None:
+                self.check_suite_inputs(dataset, config)
+            elif suite.dataset_hash != digest:
+                raise AblationRefused(
+                    f"{side} (evaluation {suite.suite_id}) evaluated other content than "
+                    f"{dataset.name}@{dataset.version}: every suite of an ablation must "
+                    "evaluate the same dataset version"
+                )
+            elif suite.status != "completed" or suite.config_hash != config.config_hash():
+                raise AblationRefused(
+                    f"{side} (evaluation {suite.suite_id}) is not a completed evaluation of "
+                    f"{config.ref}"
+                )
+        fields = ablatable_dimensions(a_config, b_config)
+        if not fields:
+            raise AblationRefused(
+                f"nothing to ablate: {a_config.ref} and {b_config.ref} differ in no "
+                "configuration field that can be changed on its own"
+            )
+        if len(fields) > MAX_ABLATION_DIMENSIONS:
+            raise AblationRefused(
+                f"{a_config.ref} and {b_config.ref} differ in {len(fields)} dimensions "
+                f"({', '.join(fields)}); an ablation explains at most {MAX_ABLATION_DIMENSIONS}"
+            )
+        with_pairs = pairs and len(fields) <= MAX_PAIRWISE_DIMENSIONS
+        variants: list[Variant] = []
+        warnings: list[str] = []
+        for variant in plan_variants(a_config, b_config, fields, pairs=with_pairs):
+            problem = self._variant_problem(dataset, variant, variants)
+            if problem is None:
+                variants.append(variant)
+            else:
+                warnings.append(f"{variant.config.ref} ({variant.config.label}) skipped: {problem}")
+        if all(variant.is_pair for variant in variants):
+            raise AblationRefused(f"nothing to ablate: {'; '.join(warnings)}")
+        return AblationPlan(
+            ablation_id=str(uuid.uuid4()),
+            name=name,
+            dataset=dataset,
+            a_config=a_config,
+            b_config=b_config,
+            a_suite=a_suite,
+            b_suite=b_suite,
+            experiment_id=experiment_id,
+            variants=variants,
+            pairs_skipped=len(fields) > 1 and not with_pairs,
+            warnings=warnings,
+        )
+
+    def _variant_problem(
+        self, dataset: Dataset, variant: Variant, accepted: Sequence[Variant]
+    ) -> str | None:
+        if variant.is_pair:
+            keys = {v.key for v in accepted}
+            if any(f"forward:{dimension}" not in keys for dimension in variant.dimensions):
+                return "its single-dimension variants were skipped"
+        try:
+            self.check_suite_inputs(dataset, variant.config)
+        except (ValueError, LookupError) as exc:
+            return str(exc)
+        return None
+
+    def plan_experiment_ablation(
+        self, experiment_id: str, *, name: str = "", pairs: bool = True
+    ) -> AblationPlan:
+        """Explain a stored comparison: its A and B suites are reused, with the stored dataset
+        version they evaluated (its content hash must still match theirs). Raises
+        UnknownExperimentError, UnknownDatasetError, or what plan_ablation raises."""
+        comparison = self.repository.get_experiment(experiment_id)
+        if comparison is None:
+            raise UnknownExperimentError(f"experiment {experiment_id} not found")
+        suites = []
+        for summary in (comparison.a, comparison.b):
+            suite = self.repository.get_suite(summary.suite_id)
+            if suite is None:
+                raise UnknownSuiteError(f"evaluation {summary.suite_id} not found")
+            suites.append(suite)
+        a, b = suites
+        ref = f"{comparison.dataset_name}@{comparison.dataset_version}"
+        try:
+            dataset = self.stored_dataset(comparison.dataset_name, comparison.dataset_version)
+        except UnknownDatasetError:
+            raise UnknownDatasetError(
+                f"experiment {experiment_id} evaluated {ref}, which is not stored; import "
+                "that dataset version (agentscope datasets import) to ablate it"
+            ) from None
+        return self.plan_ablation(
+            name or comparison.name,
+            dataset,
+            a.agent_config,
+            b.agent_config,
+            a_suite=a,
+            b_suite=b,
+            experiment_id=comparison.experiment_id,
+            pairs=pairs,
+        )
+
+    async def execute_ablation(
+        self, plan: AblationPlan, *, progress: Progress | None = None, save: bool = True
+    ) -> Ablation:
+        """Run what `plan` needs one suite at a time (A and B unless reused, then every
+        variant), attribute the change and store the ablation. Variant suites are stored as
+        they run, linked to the ablation, so their traces open like any other. An ablation
+        that does not finish (an error, a cancelled job, an interrupted command) deletes the
+        variant suites it stored: lists hide them and nothing else would ever reach them. A
+        and B, when evaluated here, stay as ordinary evaluations."""
+        cases = len(plan.dataset.cases)
+        done = 0
+
+        def report(offset: int) -> Progress | None:
+            callback = progress
+            if callback is None:
+                return None
+            return lambda finished, _total: callback(offset + finished, plan.total)
+
+        async def evaluate(
+            config: AgentConfig, label: str, ablation_id: str | None = None
+        ) -> SuiteResult:
+            nonlocal done
+            result = await self.run_suite(
+                plan.dataset,
+                config,
+                label=f"{plan.name} ({label})",
+                progress=report(done),
+                save=save,
+                ablation_id=ablation_id,
+            )
+            done += cases
+            return result
+
+        a = plan.a_suite if plan.a_suite is not None else await evaluate(plan.a_config, "A")
+        b = plan.b_suite if plan.b_suite is not None else await evaluate(plan.b_config, "B")
+        try:
+            evaluated = [
+                (variant, await evaluate(variant.config, variant.config.label, plan.ablation_id))
+                for variant in plan.variants
+            ]
+            ablation = attribute(
+                a,
+                b,
+                evaluated,
+                name=plan.name,
+                ablation_id=plan.ablation_id,
+                experiment_id=plan.experiment_id,
+                pairs_skipped=plan.pairs_skipped,
+                warnings=plan.warnings,
+            )
+            if save:
+                await asyncio.to_thread(self.repository.save_ablation, ablation)
+        except BaseException:
+            if save:
+                self._discard_variants(plan.ablation_id)
+            raise
+        return self.redacted(ablation)
+
+    def _discard_variants(self, ablation_id: str) -> None:
+        # Synchronous on purpose, like _fail_suite: it must complete while being cancelled.
+        try:
+            self.repository.discard_ablation_variants(ablation_id)
+        except Exception:
+            # Left hidden; purging evaluations deletes them (see docs/EVALUATION.md).
+            _log.warning("could not delete the variant suites of ablation %s", ablation_id)
+
+    async def run_ablation(
+        self,
+        name: str,
+        dataset: Dataset,
+        a_config: AgentConfig,
+        b_config: AgentConfig,
+        *,
+        a_suite: SuiteResult | None = None,
+        b_suite: SuiteResult | None = None,
+        experiment_id: str | None = None,
+        pairs: bool = True,
+        progress: Progress | None = None,
+        save: bool = True,
+    ) -> Ablation:
+        """Attribute the change from `a_config` to `b_config` on `dataset`, one dimension at
+        a time (see plan_ablation and execute_ablation)."""
+        plan = self.plan_ablation(
+            name,
+            dataset,
+            a_config,
+            b_config,
+            a_suite=a_suite,
+            b_suite=b_suite,
+            experiment_id=experiment_id,
+            pairs=pairs,
+        )
+        return await self.execute_ablation(plan, progress=progress, save=save)
+
+    async def ablate_experiment(
+        self,
+        experiment_id: str,
+        *,
+        name: str = "",
+        pairs: bool = True,
+        progress: Progress | None = None,
+    ) -> Ablation:
+        """Attribute a stored comparison, reusing its A and B suites."""
+        plan = await asyncio.to_thread(
+            self.plan_experiment_ablation, experiment_id, name=name, pairs=pairs
+        )
+        return await self.execute_ablation(plan, progress=progress)
 
 
 _tracing_installed = False

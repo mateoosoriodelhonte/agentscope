@@ -16,6 +16,7 @@ from pydantic import JsonValue, ValidationError
 from rich.text import Text
 
 from agentscope import __version__
+from agentscope.cli.ablate import ablate_command
 from agentscope.cli.common import SIMULATED, Exit, concise, console, err, fail, open_services
 from agentscope.cli.database import db_app
 from agentscope.cli.evaluate import compare_command, eval_command
@@ -44,6 +45,7 @@ app.add_typer(db_app, name="db", no_args_is_help=True)
 app.add_typer(demo_app, name="demo", no_args_is_help=True)
 app.command("eval")(eval_command)
 app.command("compare")(compare_command)
+app.command("ablate")(ablate_command)
 
 
 # Remote mode refuses shorter API tokens.
