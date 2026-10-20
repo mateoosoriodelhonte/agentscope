@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Ablation attribution (#39): explains a confounded comparison by evaluating the same dataset
+  version with one configuration dimension changed at a time, forward (A + d) and backward
+  (B − d), and with forward pairs (A + d1 + d2) for up to 6 dimensions. It reports each
+  dimension's effect in percentage points over the compared cases, the cases it gains or
+  loses, each pair's interaction, the interaction left over (total minus the sum of the
+  forward effects), and for every regression or fix the dimensions that are sufficient or
+  necessary for it and the pairs that are sufficient together. Effects are exact fractions
+  rounded once. Differences no configuration field expresses (the agent, resolved content,
+  the AgentScope version, tool data) are reported as not ablated.
+- `agentscope ablate (--experiment ID | --dataset ... --a A@V --b A@V) [--no-pairs]`, with
+  `--json`, `--output` and `--save/--no-save`, and exit codes 0, 2 and 3.
+- `POST /api/ablations` (job kind `ablation`), `GET /api/ablations` (filter `experiment_id`,
+  paged with `X-Total-Count`) and `GET /api/ablations/{id}`; `GET /api/evaluations` gains
+  `include_ablations`.
+- Migration `0004`: the `ablations` table and `suite_runs.ablation_id`. An ablation's
+  variant suites are ordinary stored suites linked to it, left out of the evaluation list,
+  the overview and the failure analysis's default selection; purging experiments also purges
+  ablations, and a purged ablation takes its variant suites.
+- The demo seed adds an ablation of `Demo: research v1 vs v2`, reusing its suites: the
+  instruction-hierarchy prompt and untrusted-output isolation add nothing alone and +41.4 pp
+  together.
+
 ## [1.0.0] - 2026-10-16
 
 First release (V1): a local-first platform to debug, evaluate and compare AI agents.

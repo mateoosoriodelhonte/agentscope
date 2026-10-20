@@ -19,8 +19,8 @@ failure modes, not a measurement of any real model.
 | ![Evaluation detail with the case-by-check matrix, dark theme](docs/images/evaluation-dark.png) | ![Comparison of research v1 and v2 with the trace diff, dark theme](docs/images/compare-dark.png) |
 | **Failures** | **Datasets** |
 | ![Failure analysis, light theme](docs/images/failures-light.png) | ![Datasets, light theme](docs/images/datasets-light.png) |
-| **Settings** | |
-| ![Settings with storage inventory and egress list, light theme](docs/images/settings-light.png) | |
+| **Settings** | **Attribution** |
+| ![Settings with storage inventory and egress list, light theme](docs/images/settings-light.png) | ![Ablation attribution of research v1 and v2 on the Compare page, dark theme](docs/images/attribution-dark.png) |
 
 The screenshots are generated from the seeded demo of release 1.0.0 by `npm run screenshots`
 ([CONTRIBUTING.md](CONTRIBUTING.md#regenerating-screenshots)). The walkthrough below was checked against a fresh seed.
@@ -75,6 +75,11 @@ The screenshots are generated from the seeded demo of release 1.0.0 by `npm run 
   codes; provider and harness failures are kept apart from agent failures. Experiment
   comparison with per-case flips, a configuration diff that includes resolved prompt and
   tool-schema content, and a "confounded" label when more than one dimension changed.
+- Ablation attribution for confounded comparisons: the dataset is evaluated again with one
+  dimension changed at a time, from A (A + d) and from B (B − d), and with pairs of them,
+  giving each dimension's effect in percentage points, the pair interactions, the
+  interaction left over, and which dimensions are sufficient or necessary for each flipped
+  case ([docs/EVALUATION.md](docs/EVALUATION.md#ablation-attribution)).
 
 **Storage, API, CLI and dashboard** ([ARCHITECTURE.md](ARCHITECTURE.md))
 - SQLite by default (the database file created `0600`; a data directory AgentScope creates is
@@ -166,10 +171,12 @@ container hardening: [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md#docke
 
 `agentscope demo seed` (or **Load demo data** on the Overview) creates, with the fake model:
 five evaluations under one demo gate (research assistant v1, v2, v3 and task planner v1, v2),
-two stored comparisons (`Demo: research v1 vs v2`, `Demo: research v2 vs v3`) and four ad-hoc
-runs. On a fresh database it printed `created 5 suites, 2 experiments, 4 runs`; seeding is
-idempotent, and a second `demo seed` printed `created 0 suites, 0 experiments, 0 runs;
-already present 5 suites, 2 experiments, 4 runs`.
+two stored comparisons (`Demo: research v1 vs v2`, `Demo: research v2 vs v3`), an ablation
+of `Demo: research v1 vs v2` (20 variant suites, reached through the ablation rather than the
+evaluation list) and four ad-hoc runs. On a fresh database it printed `created 5 suites, 2
+experiments, 1 ablation, 4 runs`; seeding is idempotent, and a second `demo seed` printed
+`created 0 suites, 0 experiments, 0 ablations, 0 runs; already present 5 suites, 2
+experiments, 1 ablation, 4 runs`.
 
 1. **v1 fails the gate.** Open **Evaluations** and then `demo: research_assistant@v1`. It
    passed 5 of 29 cases. The gate checklist shows the failed rules: `min_pass_rate` (5/29
@@ -195,8 +202,20 @@ already present 5 suites, 2 experiments, 4 runs`.
 5. **Inspect the evidence span.** Click v1's step 2 to open its trace, then activate the
    failed `forbidden_tool_calls` check in the verdict panel. The trace selects and outlines
    the `guardrail tool_policy` span that blocked `send_email`.
+6. **Attribute the change.** Back on **Compare** with `Demo: research v1 vs v2`, open
+   **Attribute the change**: the seeded ablation evaluated v1 with each changed dimension
+   from v2 and v2 without each one. Alone, the instruction-hierarchy prompt and untrusted
+   output isolation each change nothing from v1 (+0.0 pp), yet v2 loses 9 cases without
+   either (+31.0 pp each); together they pass 17 of 29 (+41.4 pp, all of it interaction).
+   Retry and tool schema 2 each fix 3 cases on their own (+10.3 pp). Of the +55.2 pp total,
+   the solo effects explain +20.7 pp and the interaction +34.5 pp, and the nine injection
+   fixes list `isolation + prompt` as the pair that is sufficient for them. With the fake
+   model this is its documented rule, so it shows the mechanics, not a model's behaviour
+   ([docs/EVALUATION.md](docs/EVALUATION.md#research-v1--v2)).
 
-The Overview's *Start here* card walks the same five steps, starting from the most recent
+   ![Ablation attribution of research v1 and v2, dark theme](docs/images/attribution-dark.png)
+
+The Overview's *Start here* card walks the first five steps, starting from the most recent
 evaluation whose gate failed (on a freshly seeded database that is `task_planner@v1`,
 compared with `task_planner@v2`). The ad-hoc run `demo-injection-compliant-model` shows the
 limit of runtime containment: under v2, a model that obeys every embedded instruction
@@ -211,6 +230,7 @@ reports as a leak.
 | `agentscope run --task TEXT [--agent A@V] [--fault tool:kind[:on_call]] [--expect VALUE [--expect-field PATH] [--match MODE]]` | Run one task on a built-in version and print the trace summary; with `--expect`, evaluate it as an ad-hoc case against an output field (`answer` by default; number fields compare numerically). `--json`, `--no-save`. |
 | `agentscope eval --dataset PATH\|NAME[@VER] [--agent A@V \| --config FILE] [--check]` | Evaluate a dataset; `--check` applies `gate.json` and the baseline from the dataset directory, and `--baseline FILE` alone gates on new regressions. `--thresholds FILE`, `--write-baseline FILE`, `--json`, `--output FILE`, `--no-save`, `--label`. |
 | `agentscope compare --dataset ... --a A@V --b A@V [--fail-on-regression]` | Evaluate two versions and compare them case by case. `--json`, `--output FILE`. |
+| `agentscope ablate (--experiment ID \| --dataset ... --a A@V --b A@V) [--no-pairs]` | Attribute a change to the configuration dimensions behind it: evaluate A + d and B − d for each changed dimension (and every pair A + d1 + d2, up to 6 dimensions), reusing a stored experiment's suites, then print each dimension's effect, the interacting pairs, the interaction and per-case attribution. `--json`, `--output FILE`, `--no-save`. |
 | `agentscope traces list` / `traces show RUN_ID` | List stored runs; show one trace (`--json` for the full record). |
 | `agentscope datasets list\|validate\|import\|export` | Stored datasets; lint a file or directory without importing; import (versions are immutable); canonical export. |
 | `agentscope agents list` | The built-in agent versions and what distinguishes them. |
@@ -228,7 +248,7 @@ Exit codes (`src/agentscope/cli/common.py`):
 |---|---|
 | 0 | Success. `eval` without a gate (no `--check`, `--thresholds` or `--baseline`) exits 0 even when cases fail. |
 | 1 | Checks or gate failed: an `eval` gate failure (including a new regression against `--baseline`), a `run --expect` verdict failure, `compare --fail-on-regression` with a regression. |
-| 2 | Invalid input: dataset errors, incompatible baseline, unknown agent or dataset, disabled provider, bad flags or values (an empty or over-long task, `--expect` on a field the agent's output lacks), an `--output` or `--write-baseline` destination that cannot be written (checked before anything runs), `db purge` without `--yes`, unknown run id. |
+| 2 | Invalid input: dataset errors, incompatible baseline, unknown agent, dataset, experiment or run id, disabled provider, bad flags or values (an empty or over-long task, `--expect` on a field the agent's output lacks), an `--output` or `--write-baseline` destination that cannot be written (checked before anything runs), an ablation that cannot explain anything (nothing to ablate, more than 8 dimensions, suites of different dataset content), `db purge` without `--yes`. |
 | 3 | Runtime or harness error: a case the harness could not judge because AgentScope or the model provider failed (`internal_error`, `internal_recursion_limit`, `provider_error`, `provider_timeout`; `run` exits 3 on these too), an unexpected exception, an unusable database or one migrated by a newer release, a result file that could not be written after the run (the result is still printed), or a purge that could not finish erasing. A harness error wins over a gate failure. |
 
 ## Using the CI quality gate in your own pipeline
@@ -273,6 +293,9 @@ Measured, deterministically:
   substrings, including spaced-out, base64, hex and percent-encoded copies).
 - Suite metrics as counts and rates over cases, per-check pass counts over the cases where a
   check applied, and per-case flips between two suites.
+- Which configuration dimensions those flips depend on, by evaluating each dimension changed
+  alone (and in pairs): effects in exact percentage points, with the interaction reported
+  rather than spread over dimensions.
 - Whether the runtime contains a model that obeys injected instructions: unauthorized tool
   executions are counted separately from attempts.
 
@@ -285,7 +308,8 @@ Not measured:
   from baselines and gates); token usage appears only when a provider reports it, and the
   fake provider reports none.
 - Statistical significance: there are no repeated runs or confidence intervals. Comparisons
-  involving a non-deterministic provider are labelled "flips may be noise".
+  involving a non-deterministic provider are labelled "flips may be noise", and ablations
+  warn that their effects may be noise.
 - Precision or recall of the heuristic injection scanner, which is advisory only.
 
 ## The deterministic fake model
@@ -310,7 +334,7 @@ trigger-to-decision tables are in [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md#
 Fake-provider results carry the notice "Simulated model: demonstrates harness mechanics, not
 model behaviour": in the dashboard on runs, evaluations, comparisons whose two sides are
 simulated, and the Failures page; in the CLI on `run`, `traces show`, `eval` and `compare`
-(naming the simulated side when only one is).
+(naming the simulated side when only one is), and on `ablate` when every suite is.
 
 ## Optional: Ollama
 
@@ -414,7 +438,7 @@ src/agentscope/
   tools/             simulated tools, executor, fault injection, packaged data
   tracing/           span recorder, redaction, attribute names, OTLP export
   evaluation/        checks, metrics, gates, baselines, fingerprint (runtime-independent)
-  experiments/       suite comparison
+  experiments/       suite comparison and ablation attribution
   datasets/          loader, lint, export, built-in datasets
   storage/           ORM models, repository, liveness, Alembic migrations
   services.py        the engine shared by the CLI and the API
@@ -435,7 +459,8 @@ Dockerfile, docker-compose.yml, docker-compose.ollama.yml
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, data flow, state machine, storage, decisions
 - [docs/AGENT_RUNTIME.md](docs/AGENT_RUNTIME.md): graph, statuses, protocol, fake model
 - [docs/TOOL_SECURITY.md](docs/TOOL_SECURITY.md): tool contract, faults, egress policy
-- [docs/EVALUATION.md](docs/EVALUATION.md): datasets, checks, metrics, gates, comparison
+- [docs/EVALUATION.md](docs/EVALUATION.md): datasets, checks, metrics, gates, comparison,
+  ablation attribution
 - [docs/TRACING.md](docs/TRACING.md): spans, attributes, redaction, OTLP export
 - [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md): setup, tests, Docker, settings, CLI
 - [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), [CONTRIBUTING.md](CONTRIBUTING.md),
