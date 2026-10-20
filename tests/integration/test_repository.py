@@ -738,10 +738,10 @@ def test_discarding_variants_spares_a_stored_ablation(repo: Repository) -> None:
 
     unfinished = str(uuid.uuid4())
     stray = run_suite(repo, version="v3", ablation_id=unfinished)
-    runs = repo.list_runs()[1]
+    runs = repo.list_runs(include_ablations=True)[1]
     assert repo.discard_ablation_variants(unfinished) == 1
     assert repo.get_suite(stray.suite_id) is None
-    assert repo.list_runs()[1] == runs - 1
+    assert repo.list_runs(include_ablations=True)[1] == runs - 1
     assert repo.discard_ablation_variants("not-a-uuid") == 0
 
 

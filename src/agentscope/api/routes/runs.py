@@ -28,6 +28,7 @@ def list_runs(
     verdict: Literal["passed", "failed", "none"] | None = None,
     case_id: str | None = None,
     suite_id: str | None = None,
+    include_ablations: bool = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> RunList:
@@ -40,6 +41,7 @@ def list_runs(
         verdict=verdict,
         case_id=case_id,
         suite_id=suite_id,
+        include_ablations=include_ablations,
         limit=limit,
         offset=offset,
     )

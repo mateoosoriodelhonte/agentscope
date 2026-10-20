@@ -267,7 +267,7 @@ from the process environment, with one warning naming them (never their values).
 | `agentscope eval` | `--dataset/-d PATH\|NAME[@VERSION]` (required), `--agent/-a A@V` or `--config FILE`, `--check`, `--thresholds FILE`, `--baseline FILE`, `--write-baseline FILE`, `--output/-o FILE`, `--json`, `--save/--no-save`, `--label TEXT` |
 | `agentscope compare` | `--dataset/-d ...` (required), `--a A@V`, `--b A@V` (required), `--json`, `--output/-o FILE`, `--fail-on-regression` |
 | `agentscope ablate` | either `--experiment/-e ID` (a stored experiment, reusing its suites and the stored dataset version it evaluated) or `--dataset/-d PATH\|NAME[@VERSION]` with `--a A@V` and `--b A@V`; `--pairs/--no-pairs` (default: pairs, up to 6 dimensions), `--json`, `--output/-o FILE`, `--save/--no-save`. Exit 0, 2 (invalid input, nothing to ablate) or 3 (a case could not be judged) |
-| `agentscope traces list` / `show RUN_ID` | `list`: `--limit N` (1 to 200, default 20), `--agent NAME`, `--json`; `show`: `--json` |
+| `agentscope traces list` / `show RUN_ID` | `list`: `--limit N` (1 to 200, default 20), `--agent NAME`, `--include-ablations` (also list runs of ablation variants), `--json`; `show`: `--json` |
 | `agentscope datasets list\|validate PATH\|import PATH\|export REF` | `--json` on list, validate and import; `export`: `--output/-o DIR` |
 | `agentscope agents list` | `--json` |
 | `agentscope db upgrade\|info\|purge` | `info`: `--json`; `purge`: `--scope all\|runs\|evaluations\|experiments\|datasets`, `--before ISO`, `--yes` (required), `--json` |

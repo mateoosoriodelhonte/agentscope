@@ -639,9 +639,10 @@ stores this ablation for `Demo: research v1 vs v2`, reusing its suites.
 
 Variant suites are stored as they run, as ordinary suites linked to their ablation
 (`suite_runs.ablation_id`), so their traces open like any other. The evaluation list, the
-overview's suite count, recent suites and pass-rate series, and the failure analysis's
-default selection leave them out (`GET /api/evaluations?include_ablations=true` lists them);
-their runs are ordinary runs, listed and counted among the runs. The ablation itself
+run list, the overview's suite and run counts, recent suites and runs and pass-rate series,
+and the failure analysis's default selection leave them and their runs out
+(`GET /api/evaluations?include_ablations=true` and `GET /api/runs?include_ablations=true` list
+them; the runs of one variant suite are listed with `GET /api/runs?suite_id=...`). The ablation itself
 (`ablations` table, the full `Ablation` document) is stored once every variant finished. An
 ablation job or command with a case that could not be judged in any of its suites (A, B,
 reused or not, or a variant) still stores the ablation, then fails (job `failed`, CLI exit

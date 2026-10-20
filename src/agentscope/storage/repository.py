@@ -19,6 +19,7 @@ from sqlalchemy import (
     cast,
     delete,
     func,
+    or_,
     select,
     text,
     update,
@@ -317,11 +318,20 @@ class Repository:
         verdict: Literal["passed", "failed", "none"] | None = None,
         case_id: str | None = None,
         suite_id: str | None = None,
+        include_ablations: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[RunSummary], int]:
-        """Newest first. `verdict="none"` selects runs that were never evaluated."""
+        """Newest first. `verdict="none"` selects runs that were never evaluated.
+
+        Runs of an ablation's variant suites are left out unless `include_ablations` or the
+        variant suite itself is asked for: one ablation adds hundreds of runs that are reached
+        through its attribution, and would otherwise crowd out everything else.
+        """
         query = select(RunRow)
+        if not include_ablations and not suite_id:
+            variants = select(SuiteRunRow.id).where(SuiteRunRow.ablation_id.is_not(None))
+            query = query.where(or_(RunRow.suite_id.is_(None), RunRow.suite_id.not_in(variants)))
         if agent:
             query = query.where(RunRow.agent == agent)
         if agent_version:

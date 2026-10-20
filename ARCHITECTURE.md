@@ -369,9 +369,10 @@ List pages and their totals come from one statement (a `count(*) OVER ()` window
 committed between two queries can never make a page longer than its total.
 
 An ablation's variant suites are ordinary suites (their runs and traces open like any other)
-with `ablation_id` set. The suite list leaves them out unless asked (`include_ablations`);
-the overview (its suite count, recent suites, pass-rate series and latest gate; their runs
-still count among the runs) and the failure analysis's default selection always do.
+with `ablation_id` set. The suite list and the run list leave them and their runs out unless
+asked (`include_ablations`, or listing the runs of one variant suite by `suite_id`); the
+overview (its suite and run counts, recent suites and runs, pass-rate series and latest gate)
+and the failure analysis's default selection always do.
 `ablation_id` is not a foreign
 key: a variant suite is created, `running`, before its ablation is stored, which happens only
 once every variant finished. The repository therefore cascades itself: a purge that deletes

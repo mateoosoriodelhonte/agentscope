@@ -374,7 +374,8 @@ def test_compare(tmp_path: Path) -> None:
     )
     assert reverse.exit_code == 1
     assert "regression" in reverse.stdout
-    assert "confounded: attribution not possible" in reverse.stdout
+    assert "confounded: no single change can be credited" in reverse.stdout
+    assert "agentscope ablate" in reverse.stdout
 
     unknown = invoke("compare", "--dataset", "research-assistant", "--a", "x", "--b", "y")
     assert unknown.exit_code == 2

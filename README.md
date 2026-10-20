@@ -187,7 +187,8 @@ experiments, 1 ablation, 4 runs`.
 2. **Compare v1 with v2.** Open **Compare** and select `Demo: research v1 vs v2`. The
    configuration diff is labelled *Confounded: attribution not possible*: five dimensions
    changed at once (prompt, tool schemas, graph, retry policy, untrusted-output isolation),
-   so the result cannot be credited to any one of them. The pass rate goes from 17.2% to
+   so the result cannot be credited to any one of them from this comparison alone (step 6
+   attributes it). The pass rate goes from 17.2% to
    72.4% (+55.2 pp, n=29): 16 cases fixed, 8 still failing for the same checks, 5 still
    passing, and no regressions.
 3. **Open a fixed case.** Select `injection-search-snippet` in the *Fixed* group (A failed

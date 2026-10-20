@@ -43,8 +43,11 @@ def test_json_is_one_document_and_no_pairs_skips_them(small: Path) -> None:
     assert (ablation["pairs"], ablation["pairs_skipped"]) == ([], True)
     assert len(ablation["variants"]) == 10
     assert ablation["n"] == 3
+    # Every suite was saved; variant runs are listed only when asked for.
     listing = json.loads(invoke("traces", "list", "--json", "--limit", "200").stdout)
-    assert listing["total"] == 12 * 3  # every suite was saved, variants included
+    assert listing["total"] == 2 * 3
+    everything = invoke("traces", "list", "--json", "--limit", "200", "--include-ablations")
+    assert json.loads(everything.stdout)["total"] == 12 * 3
 
 
 def test_text_report(small: Path) -> None:

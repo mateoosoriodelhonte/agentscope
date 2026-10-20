@@ -284,10 +284,15 @@ def _print_trace_summary(trace: TraceRecord, evaluation: CaseResult | None) -> N
 def traces_list(
     limit: Annotated[int, typer.Option(min=1, max=200)] = 20,
     agent: str | None = None,
+    include_ablations: Annotated[
+        bool, typer.Option("--include-ablations", help="Also list runs of ablation variants")
+    ] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """List recent runs."""
-    items, total = open_services().repository.list_runs(agent=agent, limit=limit)
+    """List recent runs (runs of ablation variants only with --include-ablations)."""
+    items, total = open_services().repository.list_runs(
+        agent=agent, include_ablations=include_ablations, limit=limit
+    )
     if as_json:
         emit_json({"total": total, "items": [i.model_dump(mode="json") for i in items]})
         return

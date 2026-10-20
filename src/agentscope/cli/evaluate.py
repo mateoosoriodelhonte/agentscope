@@ -406,7 +406,12 @@ def _render_comparison(comparison: Comparison, simulated: Sequence[str] = ()) ->
         console.print(safe(f"warning: {warning}", "yellow"))
 
     if comparison.config_diff:
-        note = " (confounded: attribution not possible)" if comparison.confounded else ""
+        note = (
+            " (confounded: no single change can be credited from this comparison alone;"
+            " `agentscope ablate` attributes it)"
+            if comparison.confounded
+            else ""
+        )
         console.print(safe(f"config changes{note}:", "bold"))
         for diff in comparison.config_diff:
             console.print(
