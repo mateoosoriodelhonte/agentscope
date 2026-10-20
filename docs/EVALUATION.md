@@ -493,7 +493,7 @@ time, in both directions:
   `--no-pairs`). With more than 6, or turned off, `pairs_skipped` is true; with a single
   dimension there is no pair to skip. Pairs locate changes that only work together.
 
-With k dimensions that is 2k + k(k−1)/2 variant suites (k without pairs), plus A and B when
+With k dimensions that is 2k + k(k−1)/2 variant suites (2k without pairs), plus A and B when
 they are not reused: the five dimensions of research v1 → v2 take 20 variant suites. Started
 from a stored experiment (`agentscope ablate --experiment ID`, `POST /api/ablations` with
 `experiment_id`, **Attribute the change** on the dashboard's Compare page), the comparison's
@@ -539,13 +539,15 @@ Everything below is decided before any suite runs:
   content hash) or is not a completed evaluation of its configuration, A and B differ in no
   field that can be changed on its own (`nothing to ablate`), or they differ in more than 8
   dimensions (`MAX_ABLATION_DIMENSIONS`). An experiment whose dataset version is not stored
-  (it was evaluated from a file) must have that version imported first. An unknown
-  experiment is invalid input for the CLI (exit 2) and 404 in the API.
+  (it was evaluated from a file) must have that version imported first (CLI exit 2, API
+  404). An unknown experiment is invalid input for the CLI (exit 2) and 404 in the API.
 - **Skipped with a warning**: a variant the catalog, the provider list or the dataset's lint
   rejects (as a suite of it would be), and a pair whose single-dimension variant from A was
   skipped, since its interaction could not be measured. A dimension with no remaining variant
-  is not ablated and appears in `not_ablated`. With no single-dimension variant left, the
-  ablation is refused.
+  is not ablated and appears in `not_ablated`. A dimension left with only its B − d variant is
+  ablated, but its solo effect is missing from `sum_of_solo_effects_pp`, so a warning says
+  the interaction includes it. With no single-dimension variant left, the ablation is
+  refused.
 
 ### What each number means
 
@@ -636,14 +638,18 @@ stores this ablation for `Demo: research v1 vs v2`, reusing its suites.
 ### Storage
 
 Variant suites are stored as they run, as ordinary suites linked to their ablation
-(`suite_runs.ablation_id`), so their traces open like any other; the evaluation list, the
-overview and the failure analysis's default selection leave them out
-(`GET /api/evaluations?include_ablations=true` lists them). The ablation itself (`ablations` table, the full `Ablation` document) is stored
-once every variant finished. An ablation job or command whose variants had harness errors
-still stores the ablation, then fails (job `failed`, CLI exit 3). An ablation that does not
-finish leaves the variant suites it completed, still hidden; purging evaluations removes
-them. Purging experiments also purges ablations, and a purged ablation takes its variant
-suites with it.
+(`suite_runs.ablation_id`), so their traces open like any other. The evaluation list, the
+overview's suite count, recent suites and pass-rate series, and the failure analysis's
+default selection leave them out (`GET /api/evaluations?include_ablations=true` lists them);
+their runs are ordinary runs, listed and counted among the runs. The ablation itself
+(`ablations` table, the full `Ablation` document) is stored once every variant finished. An
+ablation job or command with a case that could not be judged in any of its suites (A, B,
+reused or not, or a variant) still stores the ablation, then fails (job `failed`, CLI exit
+3). An ablation that does not finish (an exception, a job
+cancelled at shutdown, an interrupted command) deletes the variant suites it stored, with
+their runs; only when its process dies outright are they left behind, still hidden, until
+purging evaluations removes them. Purging experiments also purges ablations, and a purged
+ablation takes its variant suites with it.
 
 ## Reproducibility
 

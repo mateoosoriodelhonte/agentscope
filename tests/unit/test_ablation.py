@@ -358,6 +358,23 @@ def test_a_pair_needs_both_of_its_forward_variants() -> None:
     assert ablation.sum_of_solo_effects_pp == float(Fraction(100, 6))
 
 
+def test_a_dimension_ablated_only_backward_is_named_in_a_warning() -> None:
+    """Without A + prompt, the prompt's solo effect is not in the sum: the interaction
+    absorbs it, and a warning must say so rather than present it as interaction."""
+    a, b, evaluated = scenario()
+    backward_only = [(v, s) for v, s in evaluated if v.key != "forward:prompt" and not v.is_pair]
+    ablation = attribute(a, b, backward_only, name="x")
+    assert ablation.dimensions == ["isolation", "prompt"]
+    assert ablation.sum_of_solo_effects_pp == float(Fraction(100, 6))  # isolation alone
+    assert ablation.interaction_pp == float(Fraction(100, 6))
+    assert ablation.warnings[-1] == (
+        "no A + d variant was evaluated for prompt: the sum of solo effects leaves it out, "
+        "so the interaction includes its effect"
+    )
+    complete = attribute(a, b, evaluated, name="x")
+    assert not any("no A + d variant" in warning for warning in complete.warnings)
+
+
 def test_no_compared_case_means_no_effect() -> None:
     a = suite(A, {"c1": None})
     b = suite(B, {"c1": True})

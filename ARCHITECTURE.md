@@ -377,8 +377,11 @@ key: a variant suite is created, `running`, before its ablation is stored, which
 once every variant finished. The repository therefore cascades itself: a purge that deletes
 ablations (scope `experiments`, or a deleted A or B suite cascading through
 `a_suite_id`/`b_suite_id`) then deletes their variant suites, repeating while that cascades
-to further ablations. An ablation that never finished leaves the variant suites it completed,
-still hidden; purging evaluations deletes them.
+to further ablations. An ablation that does not finish (an exception, a cancelled job, an
+interrupted command) deletes the variant suites it stored
+(`Repository.discard_ablation_variants`, which does nothing once the ablation is stored);
+only a process that dies outright leaves them, still hidden, until purging evaluations
+deletes them.
 
 ### Liveness and recovery
 

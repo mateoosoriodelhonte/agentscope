@@ -171,6 +171,35 @@ async def test_a_stored_comparison_is_explained_with_its_own_suites(
     assert stored == ablation
 
 
+async def test_an_ablation_that_does_not_finish_leaves_no_hidden_suites(
+    services: Services, small_research: Dataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A, B and two variants finish, the third variant fails after its suite was created:
+    the variant suites (finished and failed, with their runs) go, A and B stay."""
+    from agentscope.suite_runner import SuiteRunner
+
+    run = SuiteRunner.run
+    calls = 0
+
+    async def failing_third_variant(self: SuiteRunner, *args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 5:
+            raise RuntimeError("disk on fire")
+        return await run(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SuiteRunner, "run", failing_third_variant)
+    v1, v2 = services.catalog.resolve(V1), services.catalog.resolve(V2)
+    with pytest.raises(RuntimeError, match="disk on fire"):
+        await services.run_ablation("x", small_research, v1, v2, pairs=False)
+    repository = services.repository
+    suites, total = repository.list_suites(include_ablations=True)
+    assert total == 2
+    assert {s.agent_ref for s in suites} == {V1, V2}
+    assert repository.list_runs()[1] == 2 * len(small_research.cases)
+    assert repository.list_ablations()[1] == 0
+
+
 def test_refusals_come_before_anything_runs(
     services: Services, small_research: Dataset, monkeypatch: pytest.MonkeyPatch
 ) -> None:

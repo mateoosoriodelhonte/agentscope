@@ -25,8 +25,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `include_ablations`.
 - Migration `0004`: the `ablations` table and `suite_runs.ablation_id`. An ablation's
   variant suites are ordinary stored suites linked to it, left out of the evaluation list,
-  the overview and the failure analysis's default selection; purging experiments also purges
-  ablations, and a purged ablation takes its variant suites.
+  the overview's suite count, recent suites and pass-rate series, and the failure analysis's
+  default selection (their runs are listed like any other); an ablation that does not finish
+  deletes the variant suites it stored; purging experiments also purges ablations, and a
+  purged ablation takes its variant suites.
 - The demo seed adds an ablation of `Demo: research v1 vs v2`, reusing its suites: the
   instruction-hierarchy prompt and untrusted-output isolation add nothing alone and +41.4 pp
   together.

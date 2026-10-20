@@ -15,7 +15,7 @@ exactly the effect minus the solo effects, not that difference plus rounding noi
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
@@ -325,8 +325,22 @@ def attribute(
             *diff_warnings,
             *warnings,
             *_caveats(a, b, len(shared), n, outcomes, deterministic=deterministic),
+            *_unmeasured(d for d in dimensions if d not in solo),
         ],
     )
+
+
+def _unmeasured(dimensions: Iterable[ConfigDimension]) -> list[str]:
+    """Dimensions ablated only backward (their A + d variant was skipped): their solo effect
+    is missing from the sum, so the interaction silently absorbs it unless this says so."""
+    missing = list(dimensions)
+    if not missing:
+        return []
+    it, its = ("it", "its") if len(missing) == 1 else ("them", "their")
+    return [
+        f"no A + d variant was evaluated for {', '.join(missing)}: the sum of solo effects "
+        f"leaves {it} out, so the interaction includes {its} effect"
+    ]
 
 
 def _attributions(

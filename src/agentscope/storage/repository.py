@@ -868,6 +868,22 @@ class Repository:
             )
         return Ablation.model_validate(document) if document is not None else None
 
+    def discard_ablation_variants(self, ablation_id: str) -> int:
+        """Delete the variant suites of an ablation that was never stored (with their case
+        results, runs and spans): nothing could reach them, and lists hide them. Does nothing
+        once the ablation is stored, since they then belong to it. Returns how many went."""
+        key = _uuid(ablation_id)
+        if key is None:
+            return 0
+        # One statement, so SQLite takes the write lock at once (waiting busy_timeout) rather
+        # than upgrading a read and failing while another connection writes.
+        stored = select(AblationRow.id).where(AblationRow.id == key).exists()
+        with self.engine.begin() as connection:
+            deleted = connection.execute(
+                delete(SuiteRunRow).where(SuiteRunRow.ablation_id == key, ~stored)
+            )
+        return deleted.rowcount
+
     # --- inventory and purge ----------------------------------------------------------
 
     def inventory(self) -> StorageInventory:

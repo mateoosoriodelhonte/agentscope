@@ -10,6 +10,7 @@ from agentscope.api.deps import InvalidInput, JobsDep, ServicesDep, accepted, su
 from agentscope.api.routes.evaluations import TOTAL_COUNT, suite_inputs
 from agentscope.api.schemas import AblationCreate, JobAccepted
 from agentscope.datasets.issues import DatasetError
+from agentscope.datasets.packaged import UnknownDatasetError
 from agentscope.domain.ablations import Ablation, AblationListItem
 from agentscope.jobs import Job
 from agentscope.services import (
@@ -56,7 +57,9 @@ def _plan(services: Services, body: AblationCreate) -> AblationPlan:
         _, b_config = suite_inputs(services, body.dataset, body.b.agent_ref, body.b.config)
         name = body.name or f"{a_config.ref} vs {b_config.ref}"
         return services.plan_ablation(name, dataset, a_config, b_config)
-    except UnknownExperimentError as exc:
+    except (UnknownExperimentError, UnknownDatasetError) as exc:
+        # An experiment whose dataset version is not stored is answered like an unknown
+        # dataset given by name (suite_inputs): 404.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DatasetError as exc:
         raise InvalidInput("the dataset cannot be ablated with these agents", exc.issues) from exc

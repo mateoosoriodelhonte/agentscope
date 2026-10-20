@@ -3,6 +3,7 @@ that hides variant suites unless asked."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -115,6 +116,24 @@ def test_invalid_input_is_refused_before_a_job_starts(client: TestClient) -> Non
         assert detail in response.json()["detail"], body
     assert jobs(client).active() == []
     assert client.get("/api/ablations").headers["X-Total-Count"] == "0"
+
+
+def test_an_experiment_on_an_unstored_dataset_is_404(
+    client: TestClient, services: Services, small_research: Dataset
+) -> None:
+    """Its suites evaluated a dataset that was never imported: like an unknown dataset."""
+    comparison = asyncio.run(
+        services.run_experiment(
+            "unstored",
+            small_research,
+            services.catalog.resolve(V1["agent_ref"]),
+            services.catalog.resolve(V2["agent_ref"]),
+        )
+    )
+    response = post(client, "/api/ablations", {"experiment_id": comparison.experiment_id})
+    assert response.status_code == 404, response.text
+    assert "which is not stored" in response.json()["detail"]
+    assert jobs(client).active() == []
 
 
 def test_ablation_documents_and_pages(client: TestClient) -> None:

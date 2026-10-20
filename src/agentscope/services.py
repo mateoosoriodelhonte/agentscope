@@ -769,7 +769,10 @@ class Services:
     ) -> Ablation:
         """Run what `plan` needs one suite at a time (A and B unless reused, then every
         variant), attribute the change and store the ablation. Variant suites are stored as
-        they run, linked to the ablation, so their traces open like any other."""
+        they run, linked to the ablation, so their traces open like any other. An ablation
+        that does not finish (an error, a cancelled job, an interrupted command) deletes the
+        variant suites it stored: lists hide them and nothing else would ever reach them. A
+        and B, when evaluated here, stay as ordinary evaluations."""
         cases = len(plan.dataset.cases)
         done = 0
 
@@ -796,23 +799,36 @@ class Services:
 
         a = plan.a_suite if plan.a_suite is not None else await evaluate(plan.a_config, "A")
         b = plan.b_suite if plan.b_suite is not None else await evaluate(plan.b_config, "B")
-        evaluated = [
-            (variant, await evaluate(variant.config, variant.config.label, plan.ablation_id))
-            for variant in plan.variants
-        ]
-        ablation = attribute(
-            a,
-            b,
-            evaluated,
-            name=plan.name,
-            ablation_id=plan.ablation_id,
-            experiment_id=plan.experiment_id,
-            pairs_skipped=plan.pairs_skipped,
-            warnings=plan.warnings,
-        )
-        if save:
-            await asyncio.to_thread(self.repository.save_ablation, ablation)
+        try:
+            evaluated = [
+                (variant, await evaluate(variant.config, variant.config.label, plan.ablation_id))
+                for variant in plan.variants
+            ]
+            ablation = attribute(
+                a,
+                b,
+                evaluated,
+                name=plan.name,
+                ablation_id=plan.ablation_id,
+                experiment_id=plan.experiment_id,
+                pairs_skipped=plan.pairs_skipped,
+                warnings=plan.warnings,
+            )
+            if save:
+                await asyncio.to_thread(self.repository.save_ablation, ablation)
+        except BaseException:
+            if save:
+                self._discard_variants(plan.ablation_id)
+            raise
         return self.redacted(ablation)
+
+    def _discard_variants(self, ablation_id: str) -> None:
+        # Synchronous on purpose, like _fail_suite: it must complete while being cancelled.
+        try:
+            self.repository.discard_ablation_variants(ablation_id)
+        except Exception:
+            # Left hidden; purging evaluations deletes them (see docs/EVALUATION.md).
+            _log.warning("could not delete the variant suites of ablation %s", ablation_id)
 
     async def run_ablation(
         self,

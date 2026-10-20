@@ -728,6 +728,23 @@ def test_variant_suites_are_hidden_unless_asked_for(repo: Repository) -> None:
         assert repo.get_suite(suite_id) is not None  # still a normal, readable suite
 
 
+def test_discarding_variants_spares_a_stored_ablation(repo: Repository) -> None:
+    """What an unfinished ablation stored goes (with its runs); a stored one keeps its own."""
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    ablation, variants = save_ablation(repo, a, b)
+    assert repo.discard_ablation_variants(ablation.ablation_id) == 0
+    assert all(repo.get_suite(suite_id) is not None for suite_id in variants)
+
+    unfinished = str(uuid.uuid4())
+    stray = run_suite(repo, version="v3", ablation_id=unfinished)
+    runs = repo.list_runs()[1]
+    assert repo.discard_ablation_variants(unfinished) == 1
+    assert repo.get_suite(stray.suite_id) is None
+    assert repo.list_runs()[1] == runs - 1
+    assert repo.discard_ablation_variants("not-a-uuid") == 0
+
+
 def test_an_experiment_deleted_alone_unlinks_its_ablation(repo: Repository) -> None:
     a = run_suite(repo, version="v1", passed=False)
     b = run_suite(repo, version="v2")
