@@ -1,12 +1,19 @@
 import type {
+  Ablation,
+  AblationDirection,
+  AblationListItem,
+  AblationPair,
+  AblationVariant,
   AgentConfig,
   AgentsResponse,
+  CaseAttribution,
   CaseComparison,
   CaseResult,
   CheckName,
   CheckResult,
   CheckStatus,
   Comparison,
+  ConfigDimension,
   Dataset,
   DatasetSummary,
   EvalCase,
@@ -409,6 +416,156 @@ export function experimentItem(overrides: Partial<ExperimentListItem> = {}): Exp
     regressions: 1,
     fixes: 2,
     confounded: true,
+    deterministic: true,
+    ...overrides,
+  }
+}
+
+/*
+ * An ablation of v1 -> v2 over 10 cases: A passes 5, B 9 (+40 pp). Alone, graph gains a case
+ * and retry loses one, so the solo effects sum to 0 pp; prompt and isolation only help
+ * together (+30 pp as a pair), and the interaction is the whole +40 pp.
+ */
+const ABLATED: ConfigDimension[] = ['prompt', 'graph', 'isolation', 'retry']
+const ABLATED_PATHS: Partial<Record<ConfigDimension, string>> = {
+  prompt: 'prompt_version',
+  graph: 'graph',
+  isolation: 'isolate_untrusted',
+  retry: 'retry',
+}
+
+export function ablationVariant(
+  dimension: ConfigDimension,
+  direction: AblationDirection,
+  passed: number,
+  effect: number,
+  overrides: Partial<AblationVariant> = {},
+): AblationVariant {
+  const forward = direction === 'forward'
+  return {
+    dimension,
+    direction,
+    paths: [ABLATED_PATHS[dimension] ?? dimension],
+    agent_ref: forward ? `research_assistant@v1-with-${dimension}` : `research_assistant@v2-without-${dimension}`,
+    config_hash: HASH('a'),
+    suite_id: `suite-${direction}-${dimension}`,
+    passed,
+    total: 10,
+    harness_errors: 0,
+    effect_pp: effect,
+    gained: [],
+    lost: [],
+    ...overrides,
+  }
+}
+
+function ablationPair(dimensions: [ConfigDimension, ConfigDimension], passed: number, effect: number, interaction: number): AblationPair {
+  return {
+    dimensions,
+    agent_ref: `research_assistant@v1-with-${dimensions.join('-')}`,
+    config_hash: HASH('p'),
+    suite_id: `suite-pair-${dimensions.join('-')}`,
+    passed,
+    total: 10,
+    harness_errors: 0,
+    effect_pp: effect,
+    interaction_pp: interaction,
+    gained: [],
+    lost: [],
+  }
+}
+
+/** Every run key of a case ("a", "forward:prompt", "pair:prompt+isolation", ...) to a run id. */
+function ablationRuns(caseId: string): Record<string, string> {
+  const keys = ['a', 'b', ...ABLATED.flatMap((d) => [`forward:${d}`, `backward:${d}`]), 'pair:prompt+isolation']
+  return Object.fromEntries(keys.map((key) => [key, `run-${key.replace(/[:+]/g, '-')}-${caseId}`]))
+}
+
+function attribution(caseId: string, change: 'regression' | 'fix', overrides: Partial<CaseAttribution> = {}): CaseAttribution {
+  return {
+    case_id: caseId,
+    change,
+    sufficient: [],
+    necessary: [],
+    needs_combination: false,
+    sufficient_pairs: [],
+    runs: ablationRuns(caseId),
+    ...overrides,
+  }
+}
+
+export function ablation(overrides: Partial<Ablation> = {}): Ablation {
+  const summary = (suiteId: string, agentRef: string, passed: number) => ({
+    suite_id: suiteId,
+    agent_ref: agentRef,
+    config_hash: HASH('1'),
+    effective_config_hash: HASH('e'),
+    dataset_hash: HASH('d'),
+    metrics: metrics({ total: 10, passed, failed: 10 - passed, pass_rate: passed / 10 }),
+  })
+  const pair = ['prompt', 'isolation'] as ConfigDimension[]
+  return {
+    ablation_id: 'abl-1',
+    name: 'Attribution: research_assistant@v1 vs research_assistant@v2',
+    created_at: '2026-10-16T12:00:00Z',
+    experiment_id: 'exp-1',
+    dataset_name: 'research-assistant',
+    dataset_version: '1',
+    dataset_hash: HASH('d'),
+    deterministic: true,
+    a: summary('suite-v1', 'research_assistant@v1', 5),
+    b: summary('suite-v2', 'research_assistant@v2', 9),
+    dimensions: [...ABLATED],
+    not_ablated: [],
+    variants: [
+      ablationVariant('prompt', 'forward', 5, 0),
+      ablationVariant('prompt', 'backward', 7, 20, { gained: ['qa-pair', 'qa-fixed'] }),
+      ablationVariant('graph', 'forward', 6, 10, { gained: ['qa-graph'] }),
+      ablationVariant('graph', 'backward', 8, 10, { gained: ['qa-graph'] }),
+      ablationVariant('isolation', 'forward', 5, 0),
+      ablationVariant('isolation', 'backward', 7, 20, { gained: ['qa-pair', 'qa-iso'] }),
+      ablationVariant('retry', 'forward', 4, -10, { lost: ['qa-broken'] }),
+      ablationVariant('retry', 'backward', 10, -10, { lost: ['qa-broken'] }),
+    ],
+    pairs: [
+      ablationPair(['prompt', 'graph'], 6, 10, 0),
+      { ...ablationPair(['prompt', 'isolation'], 8, 30, 30), gained: ['qa-pair', 'qa-fixed', 'qa-iso'] },
+      ablationPair(['prompt', 'retry'], 4, -10, 0),
+      ablationPair(['graph', 'isolation'], 6, 10, 0),
+      ablationPair(['graph', 'retry'], 6, 10, 10),
+      ablationPair(['isolation', 'retry'], 3, -20, -10),
+    ],
+    pairs_skipped: false,
+    total_effect_pp: 40,
+    sum_of_solo_effects_pp: 0,
+    interaction_pp: 40,
+    n: 10,
+    cases: [
+      attribution('qa-graph', 'fix', { sufficient: ['graph'], necessary: ['graph'] }),
+      attribution('qa-pair', 'fix', { necessary: ['prompt', 'isolation'], needs_combination: true, sufficient_pairs: [pair] }),
+      attribution('qa-fixed', 'fix', { necessary: ['prompt'], needs_combination: true, sufficient_pairs: [pair] }),
+      attribution('qa-iso', 'fix', { necessary: ['isolation'], needs_combination: true, sufficient_pairs: [pair] }),
+      attribution('qa-triple', 'fix', { needs_combination: true }),
+      attribution('qa-broken', 'regression', { sufficient: ['retry'], necessary: ['retry'] }),
+    ],
+    warnings: [],
+    ...overrides,
+  }
+}
+
+export function ablationItem(overrides: Partial<AblationListItem> = {}): AblationListItem {
+  return {
+    ablation_id: 'abl-1',
+    name: 'Attribution: research_assistant@v1 vs research_assistant@v2',
+    created_at: '2026-10-16T12:00:00Z',
+    experiment_id: 'exp-1',
+    dataset_name: 'research-assistant',
+    dataset_version: '1',
+    a_ref: 'research_assistant@v1',
+    b_ref: 'research_assistant@v2',
+    dimensions: [...ABLATED],
+    total_effect_pp: 40,
+    interaction_pp: 40,
     deterministic: true,
     ...overrides,
   }

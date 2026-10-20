@@ -639,6 +639,122 @@ export interface Comparison {
   warnings?: string[]
 }
 
+// --- domain/ablations.py -----------------------------------------------------------------
+
+/** Upper bound on dimensions ablated in one run (two suites each). */
+export const MAX_ABLATION_DIMENSIONS = 8
+/** Pairs are evaluated only up to this many dimensions (k choose 2 extra suites). */
+export const MAX_PAIRWISE_DIMENSIONS = 6
+
+/** forward: A plus one dimension from B. backward: B minus one dimension (A's value restored). */
+export type AblationDirection = 'forward' | 'backward'
+
+/** One variant configuration, evaluated on the full dataset. */
+export interface AblationVariant {
+  dimension: ConfigDimension
+  direction: AblationDirection
+  /** Configuration paths this variant takes from the other side, e.g. ["isolate_untrusted"]. */
+  paths: string[]
+  agent_ref: string
+  config_hash: string
+  suite_id: string
+  passed: number
+  total: number
+  harness_errors: number
+  /** Forward: pass rate of A + d minus A. Backward: pass rate of B minus B - d. */
+  effect_pp: number
+  /** Forward: failing in A, passing in A + d. Backward: passing in B, failing in B - d. */
+  gained: string[]
+  /** Forward: passing in A, failing in A + d. Backward: failing in B, passing in B - d. */
+  lost: string[]
+}
+
+/** A forward variant with two dimensions taken from B: "A + d1 + d2". */
+export interface AblationPair {
+  dimensions: [ConfigDimension, ConfigDimension]
+  agent_ref: string
+  config_hash: string
+  suite_id: string
+  passed: number
+  total: number
+  harness_errors: number
+  /** Pass rate of A + d1 + d2 minus pass rate of A. */
+  effect_pp: number
+  /** effect_pp minus both forward solo effects: what the two add only in combination. */
+  interaction_pp: number
+  gained: string[]
+  lost: string[]
+}
+
+/** Why one case's verdict differs between A and B. */
+export interface CaseAttribution {
+  case_id: string
+  /** regression or fix. */
+  change: CaseChange
+  /** Applying d alone to A already gives B's verdict. */
+  sufficient: ConfigDimension[]
+  /** Removing d from B gives back A's verdict. */
+  necessary: ConfigDimension[]
+  /** True when no single dimension is sufficient: the change needs a combination. */
+  needs_combination: boolean
+  /** When no single dimension is sufficient: the evaluated pairs that are. */
+  sufficient_pairs: ConfigDimension[][]
+  /**
+   * Run ids for this case, keyed "a", "b", "forward:<dimension>", "backward:<dimension>" and
+   * "pair:<dimension>+<dimension>" (pair keys in configuration order).
+   */
+  runs: Record<string, string>
+}
+
+export interface Ablation {
+  ablation_id: string
+  name: string
+  created_at: DateTime
+  /** The stored comparison this ablation explains, when it was started from one. */
+  experiment_id: string | null
+  dataset_name: string
+  dataset_version: string
+  dataset_hash: string
+  /** Every suite (A, B and all variants) used the fake provider. */
+  deterministic: boolean
+  a: SuiteSummary
+  b: SuiteSummary
+  /** Ablated dimensions, in configuration order. */
+  dimensions: ConfigDimension[]
+  /** Differences no configuration field expresses: reported, not ablated. */
+  not_ablated: ConfigDifference[]
+  variants: AblationVariant[]
+  /** Forward pairs; empty when pairwise analysis was skipped (see pairs_skipped). */
+  pairs: AblationPair[]
+  pairs_skipped: boolean
+  /** Pass rate of B minus pass rate of A. */
+  total_effect_pp: number
+  /** Sum of the forward effects. */
+  sum_of_solo_effects_pp: number
+  /** total_effect_pp minus sum_of_solo_effects_pp. */
+  interaction_pp: number
+  /** Cases compared (shared, same content, judged on every side). */
+  n: number
+  /** Only cases whose verdict differs between A and B. */
+  cases: CaseAttribution[]
+  warnings: string[]
+}
+
+export interface AblationListItem {
+  ablation_id: string
+  name: string
+  created_at: DateTime
+  experiment_id: string | null
+  dataset_name: string
+  dataset_version: string
+  a_ref: string
+  b_ref: string
+  dimensions: ConfigDimension[]
+  total_effect_pp: number
+  interaction_pp: number
+  deterministic: boolean
+}
+
 // --- api/schemas.py: agents, tools, providers --------------------------------------------
 
 export interface AgentInfo {
@@ -677,7 +793,7 @@ export interface ProviderStatus {
 
 // --- api/schemas.py: jobs ----------------------------------------------------------------
 
-export type JobKind = 'run' | 'evaluation' | 'experiment' | 'demo_seed'
+export type JobKind = 'run' | 'evaluation' | 'experiment' | 'ablation' | 'demo_seed'
 export type JobState = 'queued' | 'running' | 'succeeded' | 'failed'
 
 export interface JobAccepted {
@@ -801,6 +917,18 @@ export interface ExperimentCreate {
   b?: AgentSelector | null
   suite_a?: string | null
   suite_b?: string | null
+}
+
+/**
+ * Explain a stored comparison (`experiment_id`, reusing its A and B suites) or two agent
+ * versions run now on one dataset (`dataset` + `a` + `b`).
+ */
+export interface AblationCreate {
+  name?: string
+  experiment_id?: string | null
+  dataset?: DatasetRef | null
+  a?: AgentSelector | null
+  b?: AgentSelector | null
 }
 
 export interface ExperimentListItem {

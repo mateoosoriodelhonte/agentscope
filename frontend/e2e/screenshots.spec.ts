@@ -63,6 +63,18 @@ test('compare-dark.png', async ({ page, request }) => {
   await capture(page, 'compare-dark.png')
 })
 
+test('attribution-dark.png', async ({ page, request }) => {
+  const experiment = await demoExperimentId(request, 'Demo: research v1 vs v2')
+  await openThemed(page, `/compare?experiment=${experiment}`, 'dark')
+  const panel = page.getByRole('region', { name: 'Attribution' })
+  await expect(panel.getByRole('region', { name: 'Effect of each dimension' })).toBeVisible()
+  await expect(panel.getByRole('region', { name: 'Interactions' }).getByRole('listitem').first()).toBeVisible()
+  // The stored ablation of the demo comparison, from the panel's heading down.
+  await page.locator('#attribution').evaluate((element) => element.scrollIntoView({ block: 'start' }))
+  await expect(panel.getByRole('heading', { name: 'Attribution', exact: true })).toBeInViewport()
+  await capture(page, 'attribution-dark.png')
+})
+
 test('failures-light.png', async ({ page }) => {
   await openThemed(page, '/failures', 'light')
   await expect(page.getByRole('region', { name: 'Prompt injection' })).toBeVisible()

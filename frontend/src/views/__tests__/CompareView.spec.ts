@@ -18,6 +18,8 @@ const ROUTES = [
 const BASE: Record<string, Reply> = {
   'GET /api/evaluations': [suiteItem(), suiteItem({ suite_id: 'suite-v2', agent_ref: 'research_assistant@v2', gate_passed: true })],
   'GET /api/experiments': [],
+  // No comparison has been attributed (the attribution panel has its own spec).
+  'GET /api/ablations': [],
   'GET /api/datasets': [datasetSummary()],
   'GET /api/agents': agentsResponse(),
 }

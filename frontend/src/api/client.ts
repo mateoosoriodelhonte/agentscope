@@ -1,4 +1,7 @@
 import type {
+  Ablation,
+  AblationCreate,
+  AblationListItem,
   AgentsResponse,
   Comparison,
   DatasetDetail,
@@ -211,6 +214,13 @@ export interface ExperimentListQuery {
   offset?: number
 }
 
+/** Filters for GET /api/ablations: `experiment_id` finds the ablations of one comparison. */
+export interface AblationListQuery {
+  experiment_id?: string
+  limit?: number
+  offset?: number
+}
+
 /** The most rows one list request may ask for (the API's own cap). */
 export const MAX_PAGE = 200
 
@@ -275,6 +285,13 @@ export const api = {
     post<Comparison>('/api/experiments', body),
   getExperiment: async (experimentId: string, signal?: AbortSignal) =>
     request<Comparison>(`/api/experiments/${seg(experimentId)}`, { signal }),
+
+  listAblations: (query: AblationListQuery = {}, signal?: AbortSignal) =>
+    requestPage<AblationListItem>(`/api/ablations${queryString(query)}`, signal),
+  // Evaluates every variant in the background: always a job, even for a stored comparison.
+  createAblation: (body: AblationCreate) => post<JobAccepted>('/api/ablations', body),
+  getAblation: async (ablationId: string, signal?: AbortSignal) =>
+    request<Ablation>(`/api/ablations/${seg(ablationId)}`, { signal }),
 
   failures: (query: FailureQuery = {}, signal?: AbortSignal) =>
     request<FailureAnalysis>(`/api/failures${queryString(query)}`, { signal }),
