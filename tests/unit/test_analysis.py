@@ -36,6 +36,8 @@ def test_default_selection_is_the_latest_suite_per_agent(
 ) -> None:
     services, summary = seeded
     analysis = failure_analysis(services.repository)
+    # The demo ablation's variant suites are not agent versions anyone chose: never picked.
+    assert services.repository.list_suites(include_ablations=True)[1] == 5 + 20
     assert set(analysis.suites_considered) == set(summary.suites.values())
     narrowed = failure_analysis(services.repository, agent_refs=[V2])
     assert narrowed.suites_considered == [summary.suites[V2]]
@@ -111,6 +113,7 @@ def test_overview(seeded: tuple[Services, DemoSummary]) -> None:
     providers = [ProviderStatus(name="fake", enabled=True, deterministic=True, reachable=True)]
     view = overview(services.repository, providers)
     runs = services.repository.list_runs(limit=1)[1]
+    # Counts, recent suites and pass-rate series leave out the 20 ablation variant suites.
     assert view.counts == {
         "runs": runs,
         "suites": 5,

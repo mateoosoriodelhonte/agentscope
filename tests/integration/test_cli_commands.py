@@ -143,10 +143,11 @@ def test_demo_seed_is_idempotent() -> None:
     first = invoke("demo", "seed", "--json")
     assert first.exit_code == 0, first.output
     created = json.loads(first.stdout)
-    assert created["created"] == {"suites": 5, "experiments": 2, "runs": 4}
+    assert created["created"] == {"suites": 5, "experiments": 2, "ablations": 1, "runs": 4}
     second = json.loads(invoke("demo", "seed", "--json").stdout)
-    assert second["created"] == {"suites": 0, "experiments": 0, "runs": 0}
+    assert second["created"] == {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
     assert second["suites"] == created["suites"]
+    assert second["ablations"] == created["ablations"]
     assert "demo seeded" in invoke("demo", "seed").stdout
 
 

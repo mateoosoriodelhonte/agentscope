@@ -1,7 +1,7 @@
 """Request and response bodies for the HTTP API — the contract the dashboard is built on.
 
-Long-running work (runs, evaluations, experiments, demo seeding) is started with a POST
-that returns 202 and a job id; clients poll `GET /api/jobs/{job_id}` and then fetch the
+Long-running work (runs, evaluations, experiments, ablations, demo seeding) is started with a
+POST that returns 202 and a job id; clients poll `GET /api/jobs/{job_id}` and then fetch the
 result resource named in the job.
 """
 
@@ -78,7 +78,7 @@ class JobStatus(StrictModel):
     resource_id: str
     created_at: datetime
     finished_at: datetime | None = None
-    progress: int = 0  # cases completed (evaluations/experiments)
+    progress: int = 0  # cases completed (evaluations/experiments/ablations)
     total: int = 0
     error: str | None = None
 

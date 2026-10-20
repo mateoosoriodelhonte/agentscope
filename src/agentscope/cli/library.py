@@ -143,6 +143,11 @@ def agents_list(as_json: JsonOption = False) -> None:
     console.print(grid)
 
 
+def _counted(count: int, kind: str) -> str:
+    """`1 ablation`, `2 ablations`: every kind the demo counts is a plural ending in s."""
+    return f"{count} {kind.removesuffix('s') if count == 1 else kind}"
+
+
 @demo_app.command("seed")
 def demo_seed(as_json: JsonOption = False) -> None:
     """Seed the demo story (idempotent: seeding again adds nothing)."""
@@ -153,8 +158,8 @@ def demo_seed(as_json: JsonOption = False) -> None:
     if as_json:
         emit_json(summary.model_dump(mode="json"))
         return
-    created = ", ".join(f"{count} {kind}" for kind, count in summary.created.items())
-    reused = ", ".join(f"{count} {kind}" for kind, count in summary.reused.items())
+    created = ", ".join(_counted(count, kind) for kind, count in summary.created.items())
+    reused = ", ".join(_counted(count, kind) for kind, count in summary.reused.items())
     console.print(safe(f"demo seeded: created {created}; already present {reused}"))
     console.print(
         safe(f"open http://127.0.0.1:{services.settings.port}/ after `agentscope serve`", "dim")
