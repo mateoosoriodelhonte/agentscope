@@ -450,7 +450,7 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
           {{ warning }}
         </p>
 
-        <ConfigDiff :diff="data.config_diff" :confounded="data.confounded" />
+        <ConfigDiff :diff="data.config_diff" :confounded="data.confounded" :attributable="attributable" />
 
         <AttributionPanel
           v-if="attributable"

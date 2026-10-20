@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, useId } from 'vue'
+import { computed, ref, useId } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { Ablation, AblationDirection, AblationVariant, ConfigDifference, ConfigDimension } from '@/api/types'
 import Icon from '@/components/ui/Icon.vue'
@@ -114,6 +114,14 @@ function toggle(dimension: ConfigDimension): void {
   emit('expand', props.expanded === dimension ? null : dimension)
 }
 
+const root = ref<HTMLElement | null>(null)
+/** Closes the detail from inside it, handing focus back to the dimension that opened it. */
+function collapse(): void {
+  const dimension = props.expanded
+  emit('expand', null)
+  root.value?.querySelector<HTMLElement>(`[data-dimension="${dimension}"] button.dim`)?.focus()
+}
+
 // --- the expanded dimension ----------------------------------------------------------------
 
 const detail = computed(() => {
@@ -146,7 +154,7 @@ const caseLink = (variant: AblationVariant, caseId: string) =>
 </script>
 
 <template>
-  <div class="effects">
+  <div ref="root" class="effects">
     <template v-if="view === 'chart'">
       <ul class="legend" aria-label="Legend">
         <li><span class="swatch forward"></span>alone from A: A + d minus A</li>
@@ -269,7 +277,7 @@ const caseLink = (variant: AblationVariant, caseId: string) =>
           enough alone for {{ plural(detail.row.sufficient, 'flipped case') }}, needed in B for
           {{ plural(detail.row.necessary, 'flipped case') }}
         </span>
-        <button type="button" class="btn ghost close" @click="emit('expand', null)">Collapse</button>
+        <button type="button" class="btn ghost close" @click="collapse">Collapse</button>
       </div>
       <table v-if="detail.changes.length" class="data-table changes">
         <caption class="visually-hidden">Configuration values this dimension swaps</caption>

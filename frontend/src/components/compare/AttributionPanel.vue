@@ -1,8 +1,17 @@
+<script lang="ts">
+/*
+ * Ablation jobs started from this panel and not yet finished, by comparison. Leaving the page
+ * stops polling but not the job; coming back to the comparison follows that job again
+ * instead of offering to start a second ablation while the first is still running.
+ */
+const inFlight = new Map<string, string>()
+</script>
+
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { api } from '@/api/client'
 import { describeError } from '@/api/errors'
-import type { Comparison, ConfigDimension } from '@/api/types'
+import type { Comparison, ConfigDimension, JobAccepted, JobStatus } from '@/api/types'
 import { MAX_PAIRWISE_DIMENSIONS } from '@/api/types'
 import ErrorState from '@/components/ui/ErrorState.vue'
 import Icon from '@/components/ui/Icon.vue'
@@ -48,13 +57,14 @@ const offer = computed(() => {
   return `Attribution evaluates ${name}@${version} again with one dimension changed at a time, so ${each} its own effect: 2 × ${n} variant evaluations${pairs}.`
 })
 
-const existing = useResource((signal) =>
-  api.listAblations({ experiment_id: props.comparison.experiment_id, limit: 1 }, signal),
-)
+const experimentId = props.comparison.experiment_id
+const existing = useResource((signal) => api.listAblations({ experiment_id: experimentId, limit: 1 }, signal))
+/** The newest stored ablation of this comparison (never another comparison's). */
+const found = computed(() => existing.data.value?.items.find((item) => item.experiment_id === experimentId) ?? null)
 const runner = useJob()
 /** The ablation this panel started, which wins over the one found stored. */
 const started = ref<string | null>(null)
-const ablationId = computed(() => started.value ?? existing.data.value?.items[0]?.ablation_id ?? null)
+const ablationId = computed(() => started.value ?? found.value?.ablation_id ?? null)
 const ablation = useResource(
   (signal) => (ablationId.value ? api.getAblation(ablationId.value, signal) : Promise.resolve(null)),
   () => ablationId.value,
@@ -66,16 +76,33 @@ const progress = computed(() => {
   return job && job.total > 0 ? { value: job.progress, max: job.total } : null
 })
 
-async function attribute(): Promise<void> {
-  const done = await runner.start(() => api.createAblation({ experiment_id: props.comparison.experiment_id }))
+/** The section heading keeps focus while the start button gives way to progress, then the result. */
+const heading = ref<HTMLElement | null>(null)
+
+/** Shows the job's ablation once it ends; a job only stays in flight when polling was stopped. */
+function settle(done: JobStatus | null): void {
+  if (done || runner.error.value) inFlight.delete(experimentId)
   if (done) started.value = done.resource_id
 }
+
+async function attribute(): Promise<void> {
+  void nextTick(() => heading.value?.focus())
+  const done = await runner.start(async (): Promise<JobAccepted> => {
+    const accepted = await api.createAblation({ experiment_id: experimentId })
+    inFlight.set(experimentId, accepted.job_id)
+    return accepted
+  })
+  settle(done)
+}
+
+const pending = inFlight.get(experimentId)
+if (pending) void runner.follow(pending).then(settle)
 </script>
 
 <template>
   <section id="attribution" class="attribution section" aria-labelledby="attribution-title">
     <div class="section-head">
-      <h2 id="attribution-title" class="section-title">Attribution</h2>
+      <h2 id="attribution-title" ref="heading" class="section-title" tabindex="-1">Attribution</h2>
       <div v-if="data" class="actions">
         <SimulatedBadge v-if="data.deterministic" compact />
       </div>
@@ -204,6 +231,10 @@ async function attribute(): Promise<void> {
 <style scoped>
 .attribution {
   gap: 10px;
+}
+/* Focus is parked on the heading while the panel swaps states; it is not a control. */
+.section-title:focus {
+  outline: none;
 }
 .callout p {
   margin: 0;

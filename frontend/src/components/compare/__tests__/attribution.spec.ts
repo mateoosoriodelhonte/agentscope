@@ -82,7 +82,15 @@ describe('overallReading', () => {
     expect(read(20, 20.02)).toBe('The dimensions add up: their effects one at a time account for the whole change.')
     expect(read(20, 35)).toBe('The dimensions overlap or cancel out: one at a time they add up to more than the change together.')
     expect(read(0, 10)).toBe('The dimensions overlap or cancel out: one at a time they add up to more than the change together.')
-    expect(read(0, 0)).toBe('No dimension changes the pass rate, alone or all together.')
+    // Graph (+10 pp) and retry (−10 pp) still change the pass rate one at a time.
+    expect(read(0, 0)).toBe('The dimensions cancel out: their effects one at a time add up to no change.')
+    const still = ablation({
+      variants: [ablationVariant('prompt', 'forward', 5, 0), ablationVariant('graph', 'forward', 5, 0.04)],
+      total_effect_pp: 0,
+      sum_of_solo_effects_pp: 0.04,
+      interaction_pp: -0.04,
+    })
+    expect(overallReading(still)).toBe('No dimension changes the pass rate, alone or all together.')
   })
 })
 
@@ -91,8 +99,8 @@ describe('interactions', () => {
     const rows = interactions(ablation())
     expect(rows.map((r) => [r.pair.dimensions.join('+'), r.pair.interaction_pp, r.reading])).toEqual([
       ['prompt+isolation', 30, 'only together'],
-      ['graph+retry', 10, 'better together than apart'],
-      ['isolation+retry', -10, 'worse together than apart'],
+      ['graph+retry', 10, 'more together than their solo effects add up to'],
+      ['isolation+retry', -10, 'less together than their solo effects add up to'],
     ])
     expect(rows[0]!.solo).toEqual([0, 0])
   })
@@ -110,9 +118,18 @@ describe('interactions', () => {
     expect(interactions(data)[0]!.reading).toBe('overlap: either one is enough')
   })
 
+  it('compares a pair with its two solo effects added up, not with either one', () => {
+    // Together (+25 pp) beats each alone (+20, +10 pp) but falls 5 pp short of their sum.
+    const data = ablation({
+      variants: [ablationVariant('prompt', 'forward', 7, 20), ablationVariant('graph', 'forward', 6, 10)],
+      pairs: [pair(['prompt', 'graph'], 25, -5)],
+    })
+    expect(interactions(data)[0]!.reading).toBe('less together than their solo effects add up to')
+  })
+
   it('reads the sign alone when a solo effect is not reported', () => {
     const data = ablation({ variants: [], pairs: [pair(['prompt', 'graph'], 20, 5)] })
-    expect(interactions(data)[0]).toMatchObject({ solo: [null, null], reading: 'better together than apart' })
+    expect(interactions(data)[0]).toMatchObject({ solo: [null, null], reading: 'more together than their solo effects add up to' })
   })
 })
 

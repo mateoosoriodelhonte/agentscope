@@ -59,6 +59,18 @@ describe('AttributionPanel', () => {
     expect(calls(fetchMock, 'GET', '/api/ablations')[0]!.url.search).toBe('?experiment_id=exp-1&limit=1')
     expect(panel().find('h2').text()).toBe('Attribution')
     expect(calls(fetchMock, 'POST', '/api/ablations')).toHaveLength(0)
+    // The confounded label points at the attribution that separates the dimensions.
+    expect(page.find('.config-diff .confounded').text()).toContain(
+      'credited to any one of them from this comparison alone: the attribution below changes them one at a time.',
+    )
+  })
+
+  it("never shows another comparison's ablation", async () => {
+    const { panel, fetchMock } = await open('', {
+      'GET /api/ablations': paged([ablationItem({ ablation_id: 'abl-9', experiment_id: 'exp-9' })]),
+    })
+    expect(panel().find('.callout.start').exists()).toBe(true)
+    expect(calls(fetchMock, 'GET', '/api/ablations/abl-9')).toHaveLength(0)
   })
 
   it('offers to attribute the change, saying what it will run', async () => {
@@ -109,6 +121,47 @@ describe('AttributionPanel', () => {
     await vi.waitFor(() => expect(panel().find('.summary').exists()).toBe(true), { timeout: 3000 })
     expect(panel().find('[role="status"]').exists()).toBe(false)
     expect(calls(fetchMock, 'GET', '/api/ablations/abl-1')).toHaveLength(1)
+  })
+
+  it('keeps focus on the panel heading while the start button gives way to progress', async () => {
+    const { panel } = await open('', { 'GET /api/ablations': paged([]), 'POST /api/ablations': () => never() })
+    const button = panel().find('.callout.start button')
+    ;(button.element as HTMLButtonElement).focus()
+    await button.trigger('click')
+    await flushPromises()
+    expect(panel().find('.callout.start').exists()).toBe(false)
+    expect(document.activeElement).toBe(panel().find('h2').element)
+  })
+
+  it('follows its job again when the page is left and reopened, instead of starting another', async () => {
+    let state: 'running' | 'succeeded' = 'running'
+    const routes: Record<string, Reply> = {
+      'GET /api/ablations': paged([]),
+      'POST /api/ablations': () => json({ job_id: 'job-b', kind: 'ablation', resource_id: 'abl-1' }, 202),
+      'GET /api/jobs/job-b': () =>
+        job({ job_id: 'job-b', kind: 'ablation', resource_id: 'abl-1', state, progress: 3, total: 60, finished_at: null }),
+      'GET /api/ablations/abl-1': ablation(),
+    }
+    const first = await open('', routes)
+    await first.panel().find('.callout.start button').trigger('click')
+    await flushPromises()
+    expect(first.panel().find('[role="status"]').text()).toContain('3/60')
+    first.page.unmount()
+    wrapper = null
+
+    const again = await open('', routes)
+    expect(again.panel().find('.callout.start').exists()).toBe(false)
+    expect(again.panel().find('[role="status"]').text()).toContain('Attributing the change… 3/60')
+    expect(calls(again.fetchMock, 'POST', '/api/ablations')).toHaveLength(0)
+    state = 'succeeded'
+    await vi.waitFor(() => expect(again.panel().find('.summary').exists()).toBe(true), { timeout: 3000 })
+
+    // Once it has ended, a later visit shows the stored ablation, not the job.
+    again.page.unmount()
+    wrapper = null
+    const later = await open('', stored())
+    expect(calls(later.fetchMock, 'GET', '/api/jobs/job-b')).toHaveLength(0)
+    expect(later.panel().find('.summary').exists()).toBe(true)
   })
 
   it('shows an indeterminate progress bar before the job reports a total', async () => {
@@ -291,6 +344,8 @@ describe('AttributionPanel', () => {
       await flushPromises()
       expect(router.currentRoute.value.query.dimension).toBeUndefined()
       expect(panel().find('.dimension-detail').exists()).toBe(false)
+      // Focus goes back to the dimension that opened the detail, not to the page.
+      expect(document.activeElement).toBe(row(panel(), 'prompt').find('button').element)
     })
 
     it('opens a deep-linked dimension in the table view too', async () => {
@@ -315,8 +370,8 @@ describe('AttributionPanel', () => {
       const section = panel().find('[aria-labelledby="interactions-title"]')
       expect(section.findAll('li .headline').map((h) => h.text())).toEqual([
         'Prompt × Untrusted-output isolation: +30.0 pp, only together',
-        'Graph × Retry policy: +10.0 pp, better together than apart',
-        'Untrusted-output isolation × Retry policy: −10.0 pp, worse together than apart',
+        'Graph × Retry policy: +10.0 pp, more together than their solo effects add up to',
+        'Untrusted-output isolation × Retry policy: −10.0 pp, less together than their solo effects add up to',
       ])
       expect(section.find('li .detail').text()).toBe(
         'A + prompt + untrusted-output isolation 8/10 (+30.0 pp from A); alone ±0.0 pp and ±0.0 pp',
@@ -418,6 +473,7 @@ describe('AttributionPanel', () => {
       }),
     })
     expect(page.find('.config-diff').exists()).toBe(true)
+    expect(page.find('.config-diff .confounded').text()).not.toContain('attribution below')
     expect(page.find('#attribution').exists()).toBe(false)
     expect(calls(fetchMock, 'GET', '/api/ablations')).toHaveLength(0)
   })

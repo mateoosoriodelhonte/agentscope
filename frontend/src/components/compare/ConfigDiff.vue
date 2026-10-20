@@ -10,7 +10,12 @@ import { DIMENSION_LABELS, DIMENSION_ORDER } from './dimensions'
  * than one dimension changed, no difference in results can be credited to any single one,
  * and the page says so prominently.
  */
-const props = defineProps<{ diff: ConfigDifference[]; confounded: boolean }>()
+const props = defineProps<{
+  diff: ConfigDifference[]
+  confounded: boolean
+  /** An attribution panel follows, which can separate the dimensions by ablation. */
+  attributable?: boolean
+}>()
 
 const groups = computed(() =>
   DIMENSION_ORDER.map((dimension) => ({ dimension, items: props.diff.filter((d) => d.dimension === dimension) })).filter(
@@ -19,6 +24,9 @@ const groups = computed(() =>
 )
 const isConfounded = computed(() => props.confounded || groups.value.length > 1)
 const names = computed(() => groups.value.map((g) => DIMENSION_LABELS[g.dimension].toLowerCase()))
+const alone = computed(() =>
+  props.attributable ? ' from this comparison alone: the attribution below changes them one at a time' : '',
+)
 </script>
 
 <template>
@@ -29,7 +37,7 @@ const names = computed(() => groups.value.map((g) => DIMENSION_LABELS[g.dimensio
       <span>
         <strong>Confounded: attribution not possible.</strong>
         {{ groups.length }} dimensions changed at once ({{ names.join(', ') }}),
-        so no difference in results can be credited to any one of them.
+        so no difference in results can be credited to any one of them{{ alone }}.
       </span>
     </p>
     <p v-else-if="groups.length === 1" class="callout info" role="note">

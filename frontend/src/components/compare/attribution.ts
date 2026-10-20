@@ -82,7 +82,9 @@ export interface Interaction {
 /**
  * How a pair combines, against its two solo effects: only together (neither changes the
  * pass rate alone), overlapping (both help alone, and together they do what the better one
- * does), or better or worse than the two effects added up.
+ * does), or more or less than the two solo effects added up. The interaction compares the
+ * pair with the sum of its solo effects, not with either one: a pair can do better than
+ * each dimension alone and still less than both added up.
  */
 function pairReading(pair: AblationPair, [first, second]: [number | null, number | null]): string {
   if (first !== null && second !== null) {
@@ -90,7 +92,7 @@ function pairReading(pair: AblationPair, [first, second]: [number | null, number
     if (s1 === 0 && s2 === 0) return 'only together'
     if (s1 > 0 && s2 > 0 && together === Math.max(s1, s2)) return 'overlap: either one is enough'
   }
-  return pair.interaction_pp > 0 ? 'better together than apart' : 'worse together than apart'
+  return `${pair.interaction_pp > 0 ? 'more' : 'less'} together than their solo effects add up to`
 }
 
 /** Pairs whose interaction is not zero as printed, the largest (in either sign) first. */
@@ -110,7 +112,11 @@ export function overallReading(ablation: Ablation): string {
   const total = rounded(ablation.total_effect_pp)
   const sum = rounded(ablation.sum_of_solo_effects_pp)
   const interaction = rounded(ablation.interaction_pp)
-  if (total === 0 && sum === 0) return 'No dimension changes the pass rate, alone or all together.'
+  const soloEffects = ablation.variants.filter((v) => v.direction === 'forward').map((v) => rounded(v.effect_pp))
+  if (total === 0 && sum === 0 && soloEffects.every((e) => e === 0)) {
+    return 'No dimension changes the pass rate, alone or all together.'
+  }
+  if (total === 0 && interaction === 0) return 'The dimensions cancel out: their effects one at a time add up to no change.'
   if (interaction === 0) return 'The dimensions add up: their effects one at a time account for the whole change.'
   if (total !== 0 && Math.sign(interaction) === Math.sign(total)) {
     return Math.abs(interaction) >= Math.abs(total) / 2
