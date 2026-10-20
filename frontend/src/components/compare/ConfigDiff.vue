@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ConfigDifference, ConfigDimension } from '@/api/types'
+import type { ConfigDifference } from '@/api/types'
 import Icon from '@/components/ui/Icon.vue'
 import { compact } from '@/composables/format'
+import { DIMENSION_LABELS, DIMENSION_ORDER } from './dimensions'
 
 /*
  * What changed between the two configurations, grouped by behaviour dimension. When more
@@ -11,25 +12,13 @@ import { compact } from '@/composables/format'
  */
 const props = defineProps<{ diff: ConfigDifference[]; confounded: boolean }>()
 
-const ORDER: ConfigDimension[] = ['prompt', 'model', 'tool_schema', 'graph', 'retry', 'isolation', 'tools', 'limits', 'other']
-const LABELS: Record<ConfigDimension, string> = {
-  prompt: 'Prompt',
-  model: 'Model',
-  tool_schema: 'Tool schemas',
-  graph: 'Graph',
-  retry: 'Retry policy',
-  isolation: 'Untrusted-output isolation',
-  tools: 'Permitted tools',
-  limits: 'Limits',
-  other: 'Other',
-}
-
 const groups = computed(() =>
-  ORDER.map((dimension) => ({ dimension, items: props.diff.filter((d) => d.dimension === dimension) })).filter(
+  DIMENSION_ORDER.map((dimension) => ({ dimension, items: props.diff.filter((d) => d.dimension === dimension) })).filter(
     (group) => group.items.length,
   ),
 )
 const isConfounded = computed(() => props.confounded || groups.value.length > 1)
+const names = computed(() => groups.value.map((g) => DIMENSION_LABELS[g.dimension].toLowerCase()))
 </script>
 
 <template>
@@ -39,13 +28,13 @@ const isConfounded = computed(() => props.confounded || groups.value.length > 1)
       <Icon name="alert" :size="16" />
       <span>
         <strong>Confounded: attribution not possible.</strong>
-        {{ groups.length }} dimensions changed at once ({{ groups.map((g) => LABELS[g.dimension].toLowerCase()).join(', ') }}),
+        {{ groups.length }} dimensions changed at once ({{ names.join(', ') }}),
         so no difference in results can be credited to any one of them.
       </span>
     </p>
     <p v-else-if="groups.length === 1" class="callout info" role="note">
       <Icon name="check" :size="14" />
-      <span>Only one dimension changed ({{ LABELS[groups[0]!.dimension].toLowerCase() }}).</span>
+      <span>Only one dimension changed ({{ names[0] }}).</span>
     </p>
     <p v-else class="callout info" role="note">
       <Icon name="check" :size="14" />
@@ -63,7 +52,7 @@ const isConfounded = computed(() => props.confounded || groups.value.length > 1)
         </thead>
         <tbody v-for="group in groups" :key="group.dimension">
           <tr class="group">
-            <th scope="rowgroup" colspan="3">{{ LABELS[group.dimension] }}</th>
+            <th scope="rowgroup" colspan="3">{{ DIMENSION_LABELS[group.dimension] }}</th>
           </tr>
           <tr v-for="item in group.items" :key="item.path">
             <th scope="row" class="mono path">{{ item.path }}</th>
