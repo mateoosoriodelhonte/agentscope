@@ -36,6 +36,8 @@ describe('api reads', () => {
     ['getEvaluation', () => api.getEvaluation('s1'), '/api/evaluations/s1'],
     ['listExperiments', () => api.listExperiments(), '/api/experiments'],
     ['getExperiment', () => api.getExperiment('e1'), '/api/experiments/e1'],
+    ['listAblations', () => api.listAblations(), '/api/ablations'],
+    ['getAblation', () => api.getAblation('a/1'), '/api/ablations/a%2F1'],
     ['failures', () => api.failures(), '/api/failures'],
     ['settings', () => api.settings(), '/api/settings'],
   ])('%s → GET %s without mutation headers', async (_name, call, url) => {
@@ -98,6 +100,8 @@ describe('api mutations', () => {
     ['validateDataset', () => api.validateDataset('{"name": "qa"}'), '/api/datasets/validate', { name: 'qa' }],
     ['createEvaluation', () => api.createEvaluation({ agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }), '/api/evaluations', { agent_ref: 'a@v1', dataset: { name: 'qa', version: '1' } }],
     ['createExperiment', () => api.createExperiment({ name: 'x', suite_a: 's1', suite_b: 's2' }), '/api/experiments', { name: 'x', suite_a: 's1', suite_b: 's2' }],
+    ['createAblation', () => api.createAblation({ experiment_id: 'e1' }), '/api/ablations', { experiment_id: 'e1' }],
+    ['createAblation (run mode)', () => api.createAblation({ dataset: { name: 'qa', version: '1' }, a: { agent_ref: 'a@v1' }, b: { agent_ref: 'a@v2' } }), '/api/ablations', { dataset: { name: 'qa', version: '1' }, a: { agent_ref: 'a@v1' }, b: { agent_ref: 'a@v2' } }],
     ['purge', () => api.purge({ confirm: 'PURGE', scope: 'runs' }), '/api/settings/purge', { confirm: 'PURGE', scope: 'runs' }],
     ['seedDemo', () => api.seedDemo(), '/api/demo/seed', {}],
   ])('%s → POST %s as JSON with the client header', async (_name, call, url, body) => {
@@ -147,6 +151,12 @@ describe('paged lists', () => {
     fetchMock.mockResolvedValueOnce(page([{ experiment_id: 'e1' }], '3'))
     expect(await api.listExperiments({ limit: 20, offset: 0 })).toEqual({ items: [{ experiment_id: 'e1' }], total: 3 })
     expect(lastCall().url).toBe('/api/experiments?limit=20&offset=0')
+  })
+
+  it('finds the ablations of one comparison, reading the total from X-Total-Count', async () => {
+    fetchMock.mockResolvedValueOnce(page([{ ablation_id: 'a1' }], '2'))
+    expect(await api.listAblations({ experiment_id: 'e 1', limit: 1 })).toEqual({ items: [{ ablation_id: 'a1' }], total: 2 })
+    expect(lastCall().url).toBe('/api/ablations?experiment_id=e+1&limit=1')
   })
 
   it('accepts an {items, total} body, and says when the total is unknown', async () => {
