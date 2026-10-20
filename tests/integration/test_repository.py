@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event, text
 
+from agentscope.domain.ablations import Ablation
 from agentscope.domain.agents import AgentConfig
 from agentscope.domain.datasets import Dataset, EvalCase, ExpectedAnswer
 from agentscope.domain.evaluation import (
@@ -43,6 +44,7 @@ from agentscope.domain.experiments import (
 )
 from agentscope.domain.tools import FaultKind, FaultSpec, ModelFaultKind, ModelFaultSpec
 from agentscope.domain.traces import RunStatus, SpanKind, SpanRecord, SpanStatus, TraceRecord
+from agentscope.experiments.ablation import ablatable_dimensions, attribute, plan_variants
 from agentscope.storage.db import create_db_engine, upgrade
 from agentscope.storage.liveness import owner_alive, process_owner, this_host
 from agentscope.storage.models import SuiteRunRow
@@ -76,6 +78,7 @@ ALL_TABLES = [
     "case_results",
     "check_results",
     "experiments",
+    "ablations",
 ]
 
 
@@ -215,8 +218,10 @@ def make_dataset(version: str = "1", task: str = "In what year did the bridge op
     )
 
 
-def make_header(*, version: str = "v2", label: str = "nightly") -> SuiteHeader:
-    agent = config(version)
+def make_header(
+    *, version: str = "v2", label: str = "nightly", agent: AgentConfig | None = None
+) -> SuiteHeader:
+    agent = agent or config(version)
     return SuiteHeader(
         suite_id=str(uuid.uuid4()),
         label=label,
@@ -265,10 +270,16 @@ def finished(header: SuiteHeader, cases: list[CaseResult]) -> SuiteResult:
 
 
 def run_suite(
-    repo: Repository, *, version: str = "v2", passed: bool = True, label: str = "nightly"
+    repo: Repository,
+    *,
+    version: str = "v2",
+    passed: bool = True,
+    label: str = "nightly",
+    agent: AgentConfig | None = None,
+    ablation_id: str | None = None,
 ) -> SuiteResult:
-    header = make_header(version=version, label=label)
-    repo.create_suite(header)
+    header = make_header(version=version, label=label, agent=agent)
+    repo.create_suite(header, ablation_id=ablation_id)
     trace = make_trace()
     repo.save_trace(trace, suite_id=header.suite_id)
     result = finished(header, [make_case("bridge", trace, passed=passed)])
@@ -637,6 +648,100 @@ def test_find_experiment_by_its_two_suites(repo: Repository) -> None:
     assert repo.find_experiment("not-a-uuid", b.suite_id) is None
 
 
+# --- ablations --------------------------------------------------------------------------
+
+
+def save_ablation(
+    repo: Repository,
+    a: SuiteResult,
+    b: SuiteResult,
+    experiment_id: str | None = None,
+    created_at: datetime = NOW,
+) -> tuple[Ablation, list[str]]:
+    """An ablation of A and B whose variant suites are stored linked to it, as services
+    store them; returns it with the variant suite ids."""
+    ablation_id = str(uuid.uuid4())
+    fields = ablatable_dimensions(a.agent_config, b.agent_config)
+    evaluated = [
+        (variant, run_suite(repo, agent=variant.config, ablation_id=ablation_id))
+        for variant in plan_variants(a.agent_config, b.agent_config, fields)
+    ]
+    ablation = attribute(
+        a,
+        b,
+        evaluated,
+        name=f"why {SECRET}",
+        ablation_id=ablation_id,
+        experiment_id=experiment_id,
+        created_at=created_at,
+    )
+    repo.save_ablation(ablation)
+    return ablation, [suite.suite_id for _, suite in evaluated]
+
+
+def test_ablation_round_trip_is_redacted(repo: Repository) -> None:
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    comparison = make_comparison(a, b)
+    repo.save_experiment(comparison)
+    ablation, variants = save_ablation(repo, a, b, comparison.experiment_id)
+    assert ablation.dimensions == ["prompt"]
+    assert len(variants) == 2
+
+    stored = repo.get_ablation(ablation.ablation_id)
+    assert stored is not None
+    assert SECRET not in stored.model_dump_json()
+    assert stored == ablation.model_copy(update={"name": stored.name})
+    assert repo.get_ablation("not-a-uuid") is None
+    assert repo.get_ablation(str(uuid.uuid4())) is None
+    assert repo.latest_ablation_for_experiment(comparison.experiment_id) == stored
+    assert repo.latest_ablation_for_experiment(str(uuid.uuid4())) is None
+
+    items, total = repo.list_ablations()
+    assert total == 1
+    item = items[0]
+    assert (item.ablation_id, item.experiment_id, item.a_ref, item.b_ref) == (
+        ablation.ablation_id,
+        comparison.experiment_id,
+        "research_assistant@v1",
+        "research_assistant@v2",
+    )
+    assert (item.dimensions, item.deterministic) == (["prompt"], True)
+    assert (item.total_effect_pp, item.interaction_pp) == (100.0, 0.0)
+    assert repo.list_ablations(experiment_id=comparison.experiment_id)[1] == 1
+    assert repo.list_ablations(experiment_id=str(uuid.uuid4())) == ([], 0)
+    assert repo.list_ablations(experiment_id="not-a-uuid") == ([], 0)
+    assert repo.list_ablations(limit=1, offset=1) == ([], 1)
+
+
+def test_variant_suites_are_hidden_unless_asked_for(repo: Repository) -> None:
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    _, variants = save_ablation(repo, a, b)
+    assert {s.suite_id for s in repo.list_suites()[0]} == {a.suite_id, b.suite_id}
+    listed, total = repo.list_suites(include_ablations=True)
+    assert total == 4
+    assert {s.suite_id for s in listed} >= set(variants)
+    # Variants are not agent versions anyone chose: failure analysis never picks them.
+    assert set(repo.latest_suite_ids()) == {a.suite_id, b.suite_id}
+    for suite_id in variants:
+        assert repo.get_suite(suite_id) is not None  # still a normal, readable suite
+
+
+def test_an_experiment_deleted_alone_unlinks_its_ablation(repo: Repository) -> None:
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    comparison = make_comparison(a, b)
+    repo.save_experiment(comparison)
+    ablation, _ = save_ablation(repo, a, b, comparison.experiment_id)
+    with repo.session() as session, session.begin():
+        session.execute(text("DELETE FROM experiments"))
+    stored = repo.get_ablation(ablation.ablation_id)
+    assert stored is not None
+    assert stored.experiment_id is None
+    assert repo.list_ablations()[0][0].experiment_id is None
+
+
 # --- crash recovery ---------------------------------------------------------------------
 
 
@@ -803,6 +908,7 @@ def test_inventory(repo: Repository) -> None:
         "case_results": 1,
         "check_results": 2,
         "experiments": 0,
+        "ablations": 0,
     }
     assert inventory.size_bytes is not None
     assert inventory.size_bytes > 0
@@ -834,12 +940,60 @@ def test_purge_evaluations_cascades(repo: Repository) -> None:
         "case_results": 2,
         "check_results": 4,
         "experiments": 1,
+        "ablations": 0,
     }
     assert repo.get_suite(a.suite_id) is None
     assert repo.get_experiment(comparison.experiment_id) is None
     assert repo.get_trace(adhoc.run_id) is not None
     assert result.size_bytes_before is not None
     assert result.size_bytes_after is not None
+
+
+def test_purging_evaluations_takes_ablations_and_their_variants(repo: Repository) -> None:
+    a, b, adhoc, comparison = _populate(repo)
+    ablation, variants = save_ablation(repo, a, b, comparison.experiment_id)
+    result = repo.purge("evaluations")
+    # A and B, their experiment and ablation (cascaded), and the two variant suites.
+    assert (result.deleted["suite_runs"], result.deleted["runs"]) == (4, 4)
+    assert (result.deleted["experiments"], result.deleted["ablations"]) == (1, 1)
+    assert repo.get_ablation(ablation.ablation_id) is None
+    assert all(repo.get_suite(suite_id) is None for suite_id in variants)
+    assert repo.get_trace(adhoc.run_id) is not None
+
+
+def test_purging_experiments_takes_ablations_and_their_variants(repo: Repository) -> None:
+    a, b, _, comparison = _populate(repo)
+    ablation, variants = save_ablation(repo, a, b, comparison.experiment_id)
+    later = run_suite(repo, version="v3")
+    _, kept = save_ablation(repo, b, later, created_at=NOW + timedelta(days=1))
+    result = repo.purge("experiments", before=NOW + timedelta(hours=1))
+    assert (result.deleted["experiments"], result.deleted["ablations"]) == (1, 1)
+    assert result.deleted["suite_runs"] == len(variants)
+    assert repo.get_ablation(ablation.ablation_id) is None
+    assert all(repo.get_suite(suite_id) is None for suite_id in variants)
+    # A, B and the newer ablation with its variants stay.
+    assert all(repo.get_suite(s) is not None for s in (a.suite_id, b.suite_id, *kept))
+    assert repo.list_ablations()[1] == 1
+    assert repo.purge("experiments").deleted["suite_runs"] == len(kept)
+
+
+def test_a_variant_suite_that_is_another_ablations_side_goes_with_it(repo: Repository) -> None:
+    """Deleting an ablation's variant suites cascades to an ablation built on one of them
+    (here one too new for `before`), whose own variants must then go as well."""
+    a = run_suite(repo, version="v1", passed=False)
+    b = run_suite(repo, version="v2")
+    c = run_suite(repo, version="v3")
+    _, variants = save_ablation(repo, a, b)
+    variant = repo.get_suite(variants[0])
+    assert variant is not None
+    second, nested = save_ablation(repo, variant, c, created_at=NOW + timedelta(days=1))
+    assert nested
+    result = repo.purge("experiments", before=NOW + timedelta(hours=1))
+    assert result.deleted["ablations"] == 2
+    assert result.deleted["suite_runs"] == len(variants) + len(nested)
+    assert repo.get_ablation(second.ablation_id) is None
+    remaining = repo.list_suites(include_ablations=True)[0]
+    assert {s.suite_id for s in remaining} == {a.suite_id, b.suite_id, c.suite_id}
 
 
 def test_purge_runs_keeps_verdicts(repo: Repository) -> None:

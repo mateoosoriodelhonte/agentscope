@@ -168,6 +168,10 @@ class SuiteRunRow(Base):
     # suites whose process is gone or silent are marked interrupted (see storage/liveness.py).
     owner: Mapped[str | None] = mapped_column(String(300))
     heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Set on an ablation's variant suites, which lists hide by default. Not a foreign key:
+    # a variant suite exists (running) before its ablation is stored, so the repository
+    # deletes the variants of a deleted ablation itself.
+    ablation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
 
     cases: Mapped[list[CaseResultRow]] = relationship(
         back_populates="suite",
@@ -242,3 +246,32 @@ class ExperimentRow(Base):
     fixes: Mapped[int] = mapped_column(Integer)
     confounded: Mapped[bool] = mapped_column(Boolean)
     deterministic: Mapped[bool] = mapped_column(Boolean)
+
+
+class AblationRow(Base):
+    __tablename__ = "ablations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    name: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    # The comparison it explains, when it was started from one (unlinked if that goes alone).
+    experiment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("experiments.id", ondelete="SET NULL"), index=True
+    )
+    dataset_name: Mapped[str] = mapped_column(String(64))
+    dataset_version: Mapped[str] = mapped_column(String(64))
+    dataset_hash: Mapped[str] = mapped_column(String(80))
+    a_suite_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("suite_runs.id", ondelete="CASCADE")
+    )
+    b_suite_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("suite_runs.id", ondelete="CASCADE")
+    )
+    # Denormalized for the list view, so it never loads the ablation documents.
+    a_ref: Mapped[str] = mapped_column(String(130))
+    b_ref: Mapped[str] = mapped_column(String(130))
+    deterministic: Mapped[bool] = mapped_column(Boolean)
+    total_effect_pp: Mapped[float] = mapped_column(Float)
+    interaction_pp: Mapped[float] = mapped_column(Float)
+    dimensions: Mapped[list[str]] = mapped_column(JSONType)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONType)  # the full Ablation
