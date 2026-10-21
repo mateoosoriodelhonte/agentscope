@@ -1,7 +1,7 @@
 """Request and response bodies for the HTTP API — the contract the dashboard is built on.
 
-Long-running work (runs, evaluations, experiments, demo seeding) is started with a POST
-that returns 202 and a job id; clients poll `GET /api/jobs/{job_id}` and then fetch the
+Long-running work (runs, evaluations, experiments, ablations, demo seeding) is started with a
+POST that returns 202 and a job id; clients poll `GET /api/jobs/{job_id}` and then fetch the
 result resource named in the job.
 """
 
@@ -60,7 +60,7 @@ class ProviderStatus(StrictModel):
 
 # --- jobs --------------------------------------------------------------------------------
 
-JobKind = Literal["run", "evaluation", "experiment", "demo_seed"]
+JobKind = Literal["run", "evaluation", "experiment", "ablation", "demo_seed"]
 JobState = Literal["queued", "running", "succeeded", "failed"]
 
 
@@ -78,7 +78,7 @@ class JobStatus(StrictModel):
     resource_id: str
     created_at: datetime
     finished_at: datetime | None = None
-    progress: int = 0  # cases completed (evaluations/experiments)
+    progress: int = 0  # cases completed (evaluations/experiments/ablations)
     total: int = 0
     error: str | None = None
 
@@ -191,6 +191,17 @@ class ExperimentCreate(StrictModel):
     b: AgentSelector | None = None
     suite_a: str | None = None
     suite_b: str | None = None
+
+
+class AblationCreate(StrictModel):
+    """Explain a stored comparison (`experiment_id`, reusing its A and B suites) or two
+    agent versions run now on one dataset (`dataset` + `a` + `b`)."""
+
+    name: str = Field(default="", max_length=200)
+    experiment_id: str | None = None
+    dataset: DatasetRef | None = None
+    a: AgentSelector | None = None
+    b: AgentSelector | None = None
 
 
 class ExperimentListItem(StrictModel):

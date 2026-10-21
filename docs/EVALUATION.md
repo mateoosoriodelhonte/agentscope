@@ -324,7 +324,8 @@ from the model's output are clipped in messages, so an oversized output stays a 
 rather than a crash. The dashboard uses the span ids to select and outline the evidence in
 the trace.
 
-`agentscope eval`, `agentscope compare` and the API always enable all ten checks.
+`agentscope eval`, `agentscope compare`, `agentscope ablate` and the API always enable all ten
+checks.
 `Services.run_suite` and `SuiteRunner.run` accept a subset (not exposed by the CLI or the
 API); the enabled set is recorded on the suite (`checks_enabled`), and at least one check must
 be enabled.
@@ -478,6 +479,179 @@ Comparing two stored suites through the API (`POST /api/experiments` with `suite
 instead of a new one (201). `agentscope compare` and the API's run mode evaluate both sides
 afresh, so they always store two new suites and a new comparison.
 
+## Ablation attribution
+
+A confounded comparison says what changed but not which change mattered. An ablation
+(`src/agentscope/experiments/ablation.py`, run by `Services.plan_ablation` and
+`execute_ablation`) evaluates the same dataset version again with one dimension changed at a
+time, in both directions:
+
+- **forward, A + d**: A with only B's value for dimension d. Is d alone enough?
+- **backward, B − d**: B with only A's value for d. Does B still need d?
+- **forward pairs, A + d1 + d2**: A with B's values for two dimensions, for every pair, when 2
+  to 6 dimensions changed (`MAX_PAIRWISE_DIMENSIONS`) and pairs are not turned off (the CLI's
+  `--no-pairs`). With more than 6, or turned off, `pairs_skipped` is true; with a single
+  dimension there is no pair to skip. Pairs locate changes that only work together.
+
+With k dimensions that is 2k + k(k−1)/2 variant suites (2k without pairs), plus A and B when
+they are not reused: the five dimensions of research v1 → v2 take 20 variant suites. Started
+from a stored experiment (`agentscope ablate --experiment ID`, `POST /api/ablations` with
+`experiment_id`, **Attribute the change** on the dashboard's Compare page), the comparison's
+own A and B suites are reused with the stored dataset version they evaluated.
+
+### What can be ablated
+
+A dimension is ablated by copying, whole, the top-level `AgentConfig` fields that express
+it:
+
+| Dimension | Field |
+|---|---|
+| `prompt` | `prompt_version` |
+| `model` | `model` |
+| `tool_schema` | `tool_schema_version` |
+| `graph` | `graph` |
+| `retry` | `retry` (all of its sub-fields together) |
+| `isolation` | `isolate_untrusted` |
+| `tools` | `tools` |
+| `limits` | `limits` |
+
+Dimensions are listed in configuration order: the order the configuration diff lists their
+fields. Version, label and description never count as differences. Everything else in the
+comparison's configuration diff cannot be changed by a field on its own, so it is reported
+in `not_ablated` and never ablated: the agent itself (dimension `other`), resolved content
+that changed under the same field (`resolved.*`), the AgentScope version and packaged tool
+data (`environment.*`), and an otherwise unexplained `effective_config_hash`. The warnings of
+the comparison of A and B are carried over.
+
+A variant is a configuration of its own, named after what it is: `v1-with-isolation`,
+`v2-without-isolation`, `v1-with-isolation-prompt`, labelled `A + isolation`,
+`B - isolation`, `A + isolation + prompt`. Names are valid versions (the base version is cut,
+never the suffix, to fit 64 characters) and never repeat A's, B's or another variant's (a
+counter is appended if needed).
+
+### Refusals and skipped variants
+
+Everything below is decided before any suite runs:
+
+- **Refused** (`AblationRefused`; CLI exit 2, API 422): a reused suite evaluated other dataset
+  content than the dataset version being used (every suite of an ablation must evaluate the
+  same dataset version; for a stored experiment, A, B and the stored version must share one
+  content hash) or is not a completed evaluation of its configuration, A and B differ in no
+  field that can be changed on its own (`nothing to ablate`), or they differ in more than 8
+  dimensions (`MAX_ABLATION_DIMENSIONS`). An experiment whose dataset version is not stored
+  (it was evaluated from a file) must have that version imported first (CLI exit 2, API
+  404). An unknown experiment is invalid input for the CLI (exit 2) and 404 in the API.
+- **Skipped with a warning**: a variant the catalog, the provider list or the dataset's lint
+  rejects (as a suite of it would be), and a pair whose single-dimension variant from A was
+  skipped, since its interaction could not be measured. A dimension with no remaining variant
+  is not ablated and appears in `not_ablated`. A dimension left with only its B − d variant is
+  ablated, but its solo effect is missing from `sum_of_solo_effects_pp`, so a warning says
+  the interaction includes it. With no single-dimension variant left, the ablation is
+  refused.
+
+### What each number means
+
+Every count is over the **compared cases**: cases A and B share, with unchanged content
+(`case_hash`) and an agent verdict on both sides (no harness error). Their number is `n`.
+A variant's `passed` and `total` count those cases only. A case a variant could not judge (a
+harness or provider error) counts as not passed in `passed`, the effect, `gained` and `lost`
+alike, adds a warning, and is counted in its `harness_errors`.
+
+| Number | Definition |
+|---|---|
+| `total_effect_pp` | pass rate of B − pass rate of A |
+| forward `effect_pp` | pass rate of A + d − pass rate of A |
+| forward `gained` / `lost` | cases failing in A that pass in A + d / passing in A that do not pass in A + d |
+| backward `effect_pp` | pass rate of B − pass rate of B − d: what d contributes inside B |
+| backward `gained` / `lost` | cases passing in B that do not pass in B − d (B depends on d) / failing in B that pass in B − d (d hurts them inside B) |
+| pair `effect_pp` | pass rate of A + d1 + d2 − pass rate of A |
+| pair `interaction_pp` | pair effect − forward effect of d1 − forward effect of d2 |
+| `sum_of_solo_effects_pp` | the sum of the forward effects |
+| `interaction_pp` | `total_effect_pp` − `sum_of_solo_effects_pp`: the part of the change no dimension makes alone; positive when dimensions only work together, negative when they cancel out |
+
+All of them are percentage points, never relative percentages. They are computed as exact
+fractions of whole cases and converted to floats once, when the result is built, so every
+effect is exactly `100 × (gained − lost) / n` and an interaction is exactly the difference
+it names, with no rounding noise (over 7 cases, `300/7 + 100/7 − 400/7` is 0 exactly, where
+float arithmetic gives `-7.1e-15`).
+
+Forward and backward effects answer different questions and can disagree: a dimension can
+add nothing alone from A and still be needed by B, when it only works together with another.
+
+### Per-case attribution
+
+`cases` lists only the cases whose verdict differs between A and B (`regression` or `fix`):
+
+- `sufficient`: dimensions d for which A + d already has B's verdict;
+- `necessary`: dimensions d for which B − d is back to A's verdict;
+- `needs_combination`: no single dimension is sufficient;
+- `sufficient_pairs`: when no single dimension is, the evaluated pairs whose variant has B's
+  verdict. A case that needs a combination but lists no pair needs more than two dimensions,
+  or a pair that was not evaluated;
+- `runs`: the run id of the case in each suite, keyed `a`, `b`, `forward:<dimension>`,
+  `backward:<dimension>` and `pair:<dimension>+<dimension>` (pair dimensions in configuration
+  order), so every verdict can be opened as a trace.
+
+A variant without a verdict on a case (a harness error) is never evidence for or against a
+dimension: it makes no dimension sufficient or necessary for that case.
+
+### Research v1 → v2
+
+`agentscope ablate --dataset research-assistant@1 --a research_assistant@v1 --b
+research_assistant@v2` on the built-in research dataset with the fake model compared all
+29 cases (A passed 5, B 21; 16 fixes, no regressions). Five dimensions changed, and the
+ablation evaluated 20 variant suites:
+
+| Dimension | A + d | Effect alone from A | B − d | Contribution inside B | Sufficient for | Necessary for |
+|---|---|---|---|---|---|---|
+| `graph` | 5/29 | +0.0 pp | 20/29 | +3.4 pp | 0 | 1 |
+| `isolation` | 5/29 | +0.0 pp | 12/29 | +31.0 pp | 0 | 9 |
+| `prompt` | 5/29 | +0.0 pp | 12/29 | +31.0 pp | 0 | 9 |
+| `retry` | 8/29 | +10.3 pp | 17/29 | +13.8 pp | 3 | 4 |
+| `tool_schema` | 8/29 | +10.3 pp | 21/29 | +0.0 pp | 3 | 0 |
+
+The total is +55.2 pp, the solo effects add up to +20.7 pp, and the interaction is +34.5 pp.
+Of the ten pairs, only `isolation + prompt` interacts: it passes 17/29 (+41.4 pp alone from
+A, all of it interaction), and it is the sufficient pair for the nine injection cases that
+neither dimension fixes alone. The instruction-hierarchy prompt and untrusted-content
+isolation only work together, which is exactly the documented rule of the `scripted-naive`
+profile ([AGENT_RUNTIME.md](AGENT_RUNTIME.md#the-fake-model)): it ignores an embedded
+instruction only when the output is delimited **and** the prompt has the clause. One fix
+(`model-schema-violation`) is lost when either `graph` or `retry` is removed from B, yet
+neither alone nor any pair fixes it from A: it needs more than two dimensions. The demo seed
+stores this ablation for `Demo: research v1 vs v2`, reusing its suites.
+
+### Caveats
+
+- **Determinism**: `deterministic` is true only when A, B and every variant ran on the fake
+  provider; otherwise a warning says the effects may be noise. There are no repeated runs, so
+  a non-deterministic ablation measures one sample per case and configuration. With the fake
+  model, effects show what the scripted profiles do with each configuration, not what a
+  language model would.
+- **Environment**: variants run with the AgentScope that runs the ablation. When reused A or
+  B suites were recorded by another AgentScope version, with other tool data or check
+  engine, a warning names what differs, because the effects then include that change.
+- **One sample of each direction**: an ablation attributes verdict changes under this
+  dataset, not general causes; a dimension that is neither sufficient nor necessary for a
+  case can still matter in combination with dimensions beyond a pair.
+
+### Storage
+
+Variant suites are stored as they run, as ordinary suites linked to their ablation
+(`suite_runs.ablation_id`), so their traces open like any other. The evaluation list, the
+run list, the overview's suite and run counts, recent suites and runs and pass-rate series,
+and the failure analysis's default selection leave them and their runs out
+(`GET /api/evaluations?include_ablations=true` and `GET /api/runs?include_ablations=true` list
+them; the runs of one variant suite are listed with `GET /api/runs?suite_id=...`). The ablation itself
+(`ablations` table, the full `Ablation` document) is stored once every variant finished. An
+ablation job or command with a case that could not be judged in any of its suites (A, B,
+reused or not, or a variant) still stores the ablation, then fails (job `failed`, CLI exit
+3). An ablation that does not finish (an exception, a job
+cancelled at shutdown, an interrupted command) deletes the variant suites it stored, with
+their runs; only when its process dies outright are they left behind, still hidden, until
+purging evaluations removes them. Purging experiments also purges ablations, and a purged
+ablation takes its variant suites with it.
+
 ## Reproducibility
 
 - `config_hash`: SHA-256 of the canonical JSON of the configuration (label and description
@@ -499,8 +673,9 @@ afresh, so they always store two new suites and a new comparison.
 ## What is measured, and what is not
 
 Measured: deterministic verdicts of the ten checks per case, the metrics above, per-case and
-per-check flips between suites, and runtime containment (unauthorized executions counted
-apart from attempts).
+per-check flips between suites, the effect of each configuration dimension changed alone (and
+in pairs) on those verdicts, and runtime containment (unauthorized executions counted apart
+from attempts).
 
 Not measured:
 

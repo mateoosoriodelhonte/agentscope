@@ -45,6 +45,7 @@ from agentscope.storage.types import UTCDateTime
 
 TABLES_0002 = {"datasets", "suite_runs", "case_results", "check_results", "experiments"}
 LIVENESS_0003 = {"owner", "heartbeat_at"}
+TABLES_0004 = {"ablations"}
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.postgres)])
@@ -139,7 +140,7 @@ def test_upgrade_and_drift(engine: Engine) -> None:
     assert upgrade(engine) == head_revision()
     assert upgrade(engine) == head_revision()  # idempotent fast path
     tables = set(inspect(engine).get_table_names())
-    assert {"runs", "spans", "alembic_version"} | TABLES_0002 <= tables
+    assert {"runs", "spans", "alembic_version"} | TABLES_0002 | TABLES_0004 <= tables
     _assert_no_drift(engine)
 
 
@@ -211,9 +212,9 @@ def _columns(engine: Engine, table: str) -> set[str]:
     return {column["name"] for column in inspect(engine).get_columns(table)}
 
 
-def test_0003_adds_owner_and_heartbeat_and_keeps_data(engine: Engine) -> None:
-    _migrate(engine, command.upgrade, "0002")
-    # The ORM models already have the new columns, so the old schema is written with SQL.
+def _insert_old_suite(engine: Engine) -> None:
+    """A suite row with only the columns every revision since 0002 has. The ORM models
+    already have later columns, so it is written with SQL."""
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -225,6 +226,11 @@ def test_0003_adds_owner_and_heartbeat_and_keeps_data(engine: Engine) -> None:
             ).bindparams(bindparam("now", type_=UTCDateTime())),
             {"id": uuid.uuid4().hex, "true": True, "now": datetime.now(UTC)},
         )
+
+
+def test_0003_adds_owner_and_heartbeat_and_keeps_data(engine: Engine) -> None:
+    _migrate(engine, command.upgrade, "0002")
+    _insert_old_suite(engine)
     for table in ("suite_runs", "runs"):
         assert not _columns(engine, table) & LIVENESS_0003
 
@@ -243,6 +249,32 @@ def test_0003_adds_owner_and_heartbeat_and_keeps_data(engine: Engine) -> None:
         assert not _columns(engine, table) & LIVENESS_0003
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM suite_runs")).scalar() == 1
+
+
+def test_0004_adds_ablations_and_keeps_suites(engine: Engine) -> None:
+    _migrate(engine, command.upgrade, "0003")
+    _insert_old_suite(engine)
+    assert not set(inspect(engine).get_table_names()) & TABLES_0004
+    assert "ablation_id" not in _columns(engine, "suite_runs")
+
+    upgrade(engine)
+    assert set(inspect(engine).get_table_names()) >= TABLES_0004
+    assert "ablation_id" in _columns(engine, "suite_runs")
+    indexed = {index["name"] for index in inspect(engine).get_indexes("suite_runs")}
+    assert "ix_suite_runs_ablation_id" in indexed
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT count(*), count(ablation_id) FROM suite_runs")
+        ).one() == (1, 0)
+    _assert_no_drift(engine)
+
+    _migrate(engine, command.downgrade, "0003")
+    assert not set(inspect(engine).get_table_names()) & TABLES_0004
+    assert "ablation_id" not in _columns(engine, "suite_runs")
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM suite_runs")).scalar() == 1
+    assert upgrade(engine) == head_revision()
+    _assert_no_drift(engine)
 
 
 def test_a_database_from_a_newer_release_is_refused(engine: Engine) -> None:

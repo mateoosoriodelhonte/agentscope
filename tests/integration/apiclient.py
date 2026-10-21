@@ -16,8 +16,9 @@ def post(client: TestClient, path: str, body: Any = None) -> httpx.Response:
     return client.post(path, json={} if body is None else body, headers=MUTATION)
 
 
-def wait_for_job(client: TestClient, job_id: str, timeout_s: float = 60) -> dict[str, Any]:
-    """Poll GET /api/jobs/{id} until the job finishes, as the dashboard does."""
+def wait_for_job(client: TestClient, job_id: str, timeout_s: float = 180) -> dict[str, Any]:
+    """Poll GET /api/jobs/{id} until the job finishes, as the dashboard does. The deadline
+    is generous: shared CI runners are several times slower than a laptop."""
     deadline = time.monotonic() + timeout_s
     while True:
         response = client.get(f"/api/jobs/{job_id}")

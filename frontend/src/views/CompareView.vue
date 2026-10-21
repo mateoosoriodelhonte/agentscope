@@ -4,9 +4,12 @@ import { RouterLink } from 'vue-router'
 import { api, MAX_PAGE } from '@/api/client'
 import { describeError } from '@/api/errors'
 import type { Comparison, SuiteListItem, SuiteResult } from '@/api/types'
+import { ablatableDimensions } from '@/components/compare/attribution'
+import AttributionPanel from '@/components/compare/AttributionPanel.vue'
 import CheckRateBars from '@/components/compare/CheckRateBars.vue'
 import ConfigDiff from '@/components/compare/ConfigDiff.vue'
 import { CHECK_PREFIX } from '@/components/compare/deltas'
+import { DIMENSION_ORDER } from '@/components/compare/dimensions'
 import FlipList from '@/components/compare/FlipList.vue'
 import MetricDeltaTable from '@/components/compare/MetricDeltaTable.vue'
 import TraceDiff from '@/components/compare/TraceDiff.vue'
@@ -41,6 +44,9 @@ const { state: query, set } = useQueryState({
   experiment: param.string(),
   case: param.string(),
   checks: param.enum(['chart', 'table'] as const),
+  /** The attributed dimension shown in detail, and how the effects are shown. */
+  dimension: param.enum(DIMENSION_ORDER),
+  effects: param.enum(['chart', 'table'] as const),
   /** Narrows the suite pickers to one dataset name. */
   dataset: param.string(),
   /** Page of the recent comparisons. */
@@ -193,7 +199,7 @@ const mismatch = computed(() => {
   return Boolean(a && b && a.dataset_hash !== b.dataset_hash)
 })
 function compareSuites(): void {
-  void set({ a: pickA.value, b: pickB.value, experiment: null, case: null }, { push: true })
+  void set({ a: pickA.value, b: pickB.value, experiment: null, case: null, dimension: null }, { push: true })
 }
 
 /** The listed suites, plus the current picks when narrowing the list left them out. */
@@ -234,17 +240,19 @@ async function runExperiment(): Promise<void> {
       b: { agent_ref: runB.value },
     }),
   )
-  if (done) await set({ experiment: done.resource_id, a: null, b: null, case: null }, { push: true })
+  if (done) await set({ experiment: done.resource_id, a: null, b: null, case: null, dimension: null }, { push: true })
 }
 
 function changeSelection(): void {
-  void set({ experiment: null, a: null, b: null, case: null }, { push: true })
+  void set({ experiment: null, a: null, b: null, case: null, dimension: null }, { push: true })
 }
 
 const data = computed(() => comparison.data.value)
 const metricRows = computed(() => (data.value?.metric_deltas ?? []).filter((d) => !d.metric.startsWith(CHECK_PREFIX)))
 const checkRows = computed(() => (data.value?.metric_deltas ?? []).filter((d) => d.metric.startsWith(CHECK_PREFIX)))
 const selected = computed(() => data.value?.cases.find((c) => c.case_id === query.value.case) ?? null)
+/** Attribution needs a difference a configuration field expresses: one it can change alone. */
+const attributable = computed(() => (data.value ? ablatableDimensions(data.value.config_diff).length > 0 : false))
 const diffRuns = useResource(
   async (signal) => {
     const c = selected.value
@@ -442,7 +450,17 @@ agentscope eval --dataset research-assistant --agent research_assistant@v2</pre>
           {{ warning }}
         </p>
 
-        <ConfigDiff :diff="data.config_diff" :confounded="data.confounded" />
+        <ConfigDiff :diff="data.config_diff" :confounded="data.confounded" :attributable="attributable" />
+
+        <AttributionPanel
+          v-if="attributable"
+          :key="data.experiment_id"
+          :comparison="data"
+          :expanded="query.dimension"
+          :view="query.effects ?? 'chart'"
+          @expand="set({ dimension: $event })"
+          @update:view="set({ effects: $event === 'chart' ? null : $event })"
+        />
 
         <section class="section" aria-labelledby="deltas-title">
           <h2 id="deltas-title" class="section-title">Metrics</h2>

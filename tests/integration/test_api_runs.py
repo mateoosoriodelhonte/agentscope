@@ -171,7 +171,7 @@ def test_failed_run_job_reports_a_redacted_error(
     ],
 )
 @pytest.mark.parametrize(
-    "path", ["/api/runs", "/api/evaluations", "/api/datasets", "/api/demo/seed"]
+    "path", ["/api/runs", "/api/evaluations", "/api/ablations", "/api/datasets", "/api/demo/seed"]
 )
 def test_cross_site_mutations_are_rejected(
     client: TestClient, headers: dict[str, str], status: int, path: str

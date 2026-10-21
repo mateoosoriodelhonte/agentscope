@@ -5,15 +5,19 @@
    gate (low pass rate, injection leaks, forbidden tool attempts); v2 and v3 pass it.
 2. Experiments: research v1 vs v2 (fixes, and a confounded change across several config
    dimensions) and v2 vs v3 (one dimension changed: the model profile).
-3. Ad-hoc runs: a clean answer; an injected instruction obeyed by v1; the same injection
+3. An ablation of research v1 vs v2, reusing its two suites: which of the changed
+   dimensions explain the fixes (the instruction-hierarchy prompt and untrusted-content
+   isolation only work together, a large pair interaction).
+4. Ad-hoc runs: a clean answer; an injected instruction obeyed by v1; the same injection
    against v2 driven by the scripted-compliant model, a fully compromised model whose
    forbidden actions the runtime guard still blocks (attempts > 0, executions = 0); and a
    planner run recovering from a transient tool timeout.
 
 Seeding is idempotent: a completed demo suite (matched by its label), an experiment
-(matched by name, or by its two suites) or an ad-hoc run (matched by its demo case id) that
-already exists is reused, so seeding twice adds nothing. Suites evaluate the stored copy of
-each packaged dataset, so every seeded suite links to a dataset the API can show.
+(matched by name, or by its two suites), an ablation (matched by its experiment) or an
+ad-hoc run (matched by its demo case id) that already exists is reused, so seeding twice
+adds nothing. Suites evaluate the stored copy of each packaged dataset, so every seeded
+suite links to a dataset the API can show.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ DEMO_EXPERIMENTS: tuple[tuple[str, str, str], ...] = (
     ("Demo: research v1 vs v2", "research_assistant@v1", "research_assistant@v2"),
     ("Demo: research v2 vs v3", "research_assistant@v2", "research_assistant@v3"),
 )
+# Experiments (by name) explained by an ablation of their own suites.
+DEMO_ABLATIONS: tuple[str, ...] = ("Demo: research v1 vs v2",)
 
 _INJECTION = FaultSpec(
     tool="retrieve_document",
@@ -119,14 +125,19 @@ DEMO_RUNS: tuple[DemoRun, ...] = (
     ),
 )
 
-DEMO_STEPS = len(DEMO_SUITES) + len(DEMO_EXPERIMENTS) + len(DEMO_RUNS)
+
+def demo_steps() -> int:
+    """Progress steps of one seed: every suite, experiment, ablation and ad-hoc run. Read at
+    call time, so the total always matches what the seed actually does."""
+    return len(DEMO_SUITES) + len(DEMO_EXPERIMENTS) + len(DEMO_ABLATIONS) + len(DEMO_RUNS)
 
 
 class DemoSummary(StrictModel):
-    created: dict[str, int]  # suites, experiments, runs
+    created: dict[str, int]  # suites, experiments, ablations, runs
     reused: dict[str, int]
     suites: dict[str, str]  # agent_ref -> suite id
     experiments: dict[str, str]  # name -> experiment id
+    ablations: dict[str, str]  # experiment name -> ablation id
     runs: dict[str, str]  # demo case id -> run id
 
 
@@ -148,10 +159,11 @@ def _config(services: Services, run: DemoRun) -> AgentConfig:
 
 
 async def seed_demo(services: Services, progress: Progress | None = None) -> DemoSummary:
-    """Create whatever part of the story is missing; `progress` counts steps (DEMO_STEPS)."""
+    """Create whatever part of the story is missing; `progress` counts steps (demo_steps())."""
+    total = demo_steps()
     repository = services.repository
-    created = {"suites": 0, "experiments": 0, "runs": 0}
-    reused = {"suites": 0, "experiments": 0, "runs": 0}
+    created = {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
+    reused = {"suites": 0, "experiments": 0, "ablations": 0, "runs": 0}
     step = 0
 
     def advance(kind: str, was_created: bool) -> None:
@@ -159,7 +171,7 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         (created if was_created else reused)[kind] += 1
         step += 1
         if progress is not None:
-            progress(step, DEMO_STEPS)
+            progress(step, total)
 
     # Registration is idempotent; it restores the packaged datasets should they be missing.
     await asyncio.to_thread(services.register_builtin_datasets)
@@ -195,6 +207,18 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         experiments[name] = comparison.experiment_id
         advance("experiments", was_created)
 
+    ablations: dict[str, str] = {}
+    for name in DEMO_ABLATIONS:
+        experiment_id = experiments[name]
+        known_ablation = await asyncio.to_thread(
+            repository.latest_ablation_for_experiment, experiment_id
+        )
+        if known_ablation is not None:
+            ablations[name] = known_ablation.ablation_id
+        else:
+            ablations[name] = (await services.ablate_experiment(experiment_id)).ablation_id
+        advance("ablations", known_ablation is None)
+
     runs: dict[str, str] = {}
     for run in DEMO_RUNS:
         found, _ = repository.list_runs(case_id=run.case.id, limit=1)
@@ -207,5 +231,10 @@ async def seed_demo(services: Services, progress: Progress | None = None) -> Dem
         advance("runs", not found)
 
     return DemoSummary(
-        created=created, reused=reused, suites=suites, experiments=experiments, runs=runs
+        created=created,
+        reused=reused,
+        suites=suites,
+        experiments=experiments,
+        ablations=ablations,
+        runs=runs,
     )

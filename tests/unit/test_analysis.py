@@ -36,6 +36,8 @@ def test_default_selection_is_the_latest_suite_per_agent(
 ) -> None:
     services, summary = seeded
     analysis = failure_analysis(services.repository)
+    # The demo ablation's variant suites are not agent versions anyone chose: never picked.
+    assert services.repository.list_suites(include_ablations=True)[1] == 5 + 20
     assert set(analysis.suites_considered) == set(summary.suites.values())
     narrowed = failure_analysis(services.repository, agent_refs=[V2])
     assert narrowed.suites_considered == [summary.suites[V2]]
@@ -111,6 +113,7 @@ def test_overview(seeded: tuple[Services, DemoSummary]) -> None:
     providers = [ProviderStatus(name="fake", enabled=True, deterministic=True, reachable=True)]
     view = overview(services.repository, providers)
     runs = services.repository.list_runs(limit=1)[1]
+    # Counts, recent suites and pass-rate series leave out the 20 ablation variant suites.
     assert view.counts == {
         "runs": runs,
         "suites": 5,
@@ -125,3 +128,27 @@ def test_overview(seeded: tuple[Services, DemoSummary]) -> None:
         assert series.points[0].dataset.endswith("@1")
     assert view.latest_gate is not None
     assert view.providers == providers
+
+
+def test_variant_runs_stay_out_of_run_lists_unless_asked(
+    seeded: tuple[Services, DemoSummary],
+) -> None:
+    services, _ = seeded
+    repository = services.repository
+    variant_suites = {
+        s.suite_id for s in repository.list_suites(include_ablations=True, limit=200)[0]
+    } - {s.suite_id for s in repository.list_suites(limit=200)[0]}
+    assert variant_suites, "the demo seed ablates research v1 vs v2"
+    shown, total = repository.list_runs(limit=200)
+    everything, total_with_variants = repository.list_runs(include_ablations=True, limit=200)
+    assert total < total_with_variants
+    assert not any(run.suite_id in variant_suites for run in shown)
+    assert any(run.suite_id in variant_suites for run in everything)
+    # Asking for one variant suite's runs still lists them.
+    one = next(iter(variant_suites))
+    assert repository.list_runs(suite_id=one, limit=1)[1] > 0
+    # The overview never shows them.
+    providers = [ProviderStatus(name="fake", enabled=True, deterministic=True, reachable=True)]
+    view = overview(repository, providers)
+    assert view.counts["runs"] == total
+    assert not any(run.suite_id in variant_suites for run in view.recent_runs)

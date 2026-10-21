@@ -9,17 +9,17 @@ This document describes AgentScope 1.0.0 (V1) as implemented in `src/agentscope`
 |---|---|---|
 | Bootstrap | `src/agentscope/_bootstrap.py` | Imported first by the package. Forces LangSmith/LangChain tracing off, removes LangSmith keys and `OTEL_EXPORTER_OTLP_*`, `OTEL_SPAN_*`, `OTEL_ATTRIBUTE_*`, `OTEL_TRACES_EXPORTER`, `OTEL_SDK_DISABLED` from the process environment, and sets the `httpx`/`httpcore` loggers to WARNING. |
 | Settings | `src/agentscope/config.py` | `AGENTSCOPE_*` environment variables (pydantic-settings, no `.env` file is ever read). The only source of network destinations. |
-| Domain contracts | `src/agentscope/domain/` | Pydantic models shared by every layer: agent configuration, tools and faults, traces, datasets, evaluation results, comparisons. All reject unknown fields and non-finite floats. |
+| Domain contracts | `src/agentscope/domain/` | Pydantic models shared by every layer: agent configuration, tools and faults, traces, datasets, evaluation results, comparisons, ablations. All reject unknown fields and non-finite floats. |
 | Runtime | `src/agentscope/runtime/` | The LangGraph state machine (`graph.py`), the run loop with timeouts and the `TraceRecord` it returns (`runner.py`), the decision protocol (`protocol.py`), prompt building and untrusted-content rendering (`prompts.py`), the permission guard and heuristic content scanner (`guards.py`), model-fault injection (`model_faults.py`). |
 | Agents | `src/agentscope/agents/` | `AgentDefinition`s: toolset, output model, prompt texts, built-in versions, and the deterministic brain the fake model uses. Two agents: `research_assistant`, `task_planner`. |
 | Providers | `src/agentscope/providers/` | The fake provider, Ollama, and an opt-in OpenAI-compatible provider; the egress policy (also the source of the OTLP endpoint) and the only factory for provider HTTP clients (`http.py`); provider status probes. |
 | Tools | `src/agentscope/tools/` | Simulated tools over packaged JSON data, the registry (versioned schemas), the executor (validation, fault injection, timeout, output checks), and the per-run fault plan (calls counted per tool). |
 | Tracing | `src/agentscope/tracing/` | One process-wide tracer provider and per-run span collection (`recorder.py`), redaction (`redaction.py`), attribute names (`semconv.py`), optional OTLP export (`export.py`). |
 | Evaluation | `src/agentscope/evaluation/` | The ten checks, per-case evaluation, metrics, gates, baselines and the environment fingerprint. Imports only `agentscope.domain`, `agentscope.evaluation`, `jsonschema`, `pydantic` and the standard library. |
-| Experiments | `src/agentscope/experiments/compare.py` | Case-by-case comparison of two suite results. |
+| Experiments | `src/agentscope/experiments/` | Case-by-case comparison of two suite results (`compare.py`), and ablation attribution (`ablation.py`): plans the variant configurations that change one or two dimensions at a time and attributes a change from their suite results. Both are pure: they run and store nothing. |
 | Datasets | `src/agentscope/datasets/` | The hardened loader, the linter, canonical export, and the two built-in datasets. |
 | Suite runner | `src/agentscope/suite_runner.py` | Runs a dataset's cases sequentially against one configuration and aggregates verdicts; classifies harness errors (`judge_case`). Never touches storage or the API (callers persist through its `on_case` hook). |
-| Services | `src/agentscope/services.py` | Wires runtime, evaluation and storage together; the single engine used by both the CLI and the API. Hands back redacted copies of everything it returns; heartbeats running suites, recovers interrupted work, and purges while keeping the built-in datasets. |
+| Services | `src/agentscope/services.py` | Wires runtime, evaluation and storage together; the single engine used by both the CLI and the API. Hands back redacted copies of everything it returns; heartbeats running suites, plans and runs ablations, recovers interrupted work, and purges while keeping the built-in datasets. |
 | Storage | `src/agentscope/storage/` | SQLAlchemy 2 ORM models, portable column types, engine setup and SQLite hardening, Alembic migrations, liveness of in-flight work (`liveness.py`), and the repository: the only writer, which redacts every model before saving. |
 | Jobs | `src/agentscope/jobs.py` | In-process background jobs for long API operations. |
 | API | `src/agentscope/api/` | FastAPI application, security middleware (`security.py`), routes, request and response schemas (`schemas.py`, the contract the dashboard is built on). |
@@ -174,6 +174,10 @@ flowchart TD
     GT -->|no| RES[SuiteResult]
     GATE --> RES
     RES --> CMP[compare: two SuiteResults case by case]
+    CMP -->|confounded: several dimensions changed| PLAN[plan_ablation: variants A + d, B - d,<br/>A + d1 + d2, each checked like a suite]
+    PLAN -->|nothing to ablate, too many dimensions,<br/>other dataset content: exit 2 / HTTP 422| STOP
+    PLAN --> VAR[One variant suite at a time,<br/>stored and linked to the ablation]
+    VAR --> ATT[attribute: exact effects, interactions,<br/>sufficient and necessary dimensions per flipped case]
 ```
 
 - Input problems (wrong agent, unknown configuration, disabled provider, lint errors, no
@@ -186,16 +190,24 @@ flowchart TD
   `effective_config_hash`, and an environment fingerprint with the check engine version and
   per-component hashes of the resolved prompt, tool schemas, output schema, graph and fake
   brain, which comparisons use to name what changed.
+- An ablation (`Services.plan_ablation`, then `execute_ablation`) explains a comparison: A
+  and B are reused when it starts from a stored experiment (whose stored dataset version must
+  still have the content hash they evaluated) and evaluated first otherwise; every variant is
+  checked like a suite before anything runs (an invalid one is skipped with a warning), and
+  the variants then run one at a time, with progress counted over the cases of every suite
+  still to run. `experiments.ablation.attribute` builds the `Ablation` from the suite results,
+  which the repository stores at the end.
 
 Details: [docs/EVALUATION.md](docs/EVALUATION.md).
 
 ## Storage schema
 
-Tables are defined in `src/agentscope/storage/models.py` and created by three Alembic
+Tables are defined in `src/agentscope/storage/models.py` and created by four Alembic
 revisions: `0001` runs and spans; `0002` datasets, suites, case and check results,
 experiments; `0003` the nullable `owner` and `heartbeat_at` columns on `runs` and
-`suite_runs` (added in place, no table rebuild; rows written before it have no owner).
-Alembic also keeps its own `alembic_version` table.
+`suite_runs` (added in place, no table rebuild; rows written before it have no owner);
+`0004` the `ablations` table and the nullable, indexed `suite_runs.ablation_id` (also added
+in place). Alembic also keeps its own `alembic_version` table.
 
 ```mermaid
 erDiagram
@@ -205,6 +217,9 @@ erDiagram
     runs |o--o{ case_results : "run_id (set null)"
     case_results ||--o{ check_results : "case_result_id (cascade)"
     suite_runs ||--o{ experiments : "suite_a_id / suite_b_id (cascade)"
+    suite_runs ||--o{ ablations : "a_suite_id / b_suite_id (cascade)"
+    experiments |o--o{ ablations : "experiment_id (set null)"
+    ablations |o..o{ suite_runs : "ablation_id (no foreign key)"
 
     runs {
         uuid id PK
@@ -285,6 +300,7 @@ erDiagram
         text error
         string owner
         datetime heartbeat_at
+        uuid ablation_id
     }
     case_results {
         bigint id PK
@@ -315,6 +331,19 @@ erDiagram
         bool confounded
         bool deterministic
     }
+    ablations {
+        uuid id PK
+        text name
+        uuid experiment_id FK
+        string dataset_hash
+        uuid a_suite_id FK
+        uuid b_suite_id FK
+        bool deterministic
+        float total_effect_pp
+        float interaction_pp
+        json dimensions
+        json result
+    }
 ```
 
 The diagram lists the main columns; `models.py` has all of them. Portability rules
@@ -338,6 +367,22 @@ running work, because read-only commands start the same way.
 
 List pages and their totals come from one statement (a `count(*) OVER ()` window), so a row
 committed between two queries can never make a page longer than its total.
+
+An ablation's variant suites are ordinary suites (their runs and traces open like any other)
+with `ablation_id` set. The suite list and the run list leave them and their runs out unless
+asked (`include_ablations`, or listing the runs of one variant suite by `suite_id`); the
+overview (its suite and run counts, recent suites and runs, pass-rate series and latest gate)
+and the failure analysis's default selection always do.
+`ablation_id` is not a foreign
+key: a variant suite is created, `running`, before its ablation is stored, which happens only
+once every variant finished. The repository therefore cascades itself: a purge that deletes
+ablations (scope `experiments`, or a deleted A or B suite cascading through
+`a_suite_id`/`b_suite_id`) then deletes their variant suites, repeating while that cascades
+to further ablations. An ablation that does not finish (an exception, a cancelled job, an
+interrupted command) deletes the variant suites it stored
+(`Repository.discard_ablation_variants`, which does nothing once the ablation is stored);
+only a process that dies outright leaves them, still hidden, until purging evaluations
+deletes them.
 
 ### Liveness and recovery
 
@@ -364,7 +409,8 @@ marked row gets its finish time, so a late writer is refused (`record_case` and
 `finish_suite` reject a finished suite) instead of reviving it.
 
 Recovery runs from `Services.recover_interrupted`, called by the API at startup and every
-minute, and by the CLI commands that start work (`run`, `eval`, `compare`, `demo seed`);
+minute, and by the CLI commands that start work (`run`, `eval`, `compare`, `ablate`,
+`demo seed`);
 `agentscope db upgrade` runs it too. Other commands (`traces`, `datasets`, `agents`,
 `db info`, `db purge`) never do.
 
@@ -380,10 +426,12 @@ Routes (`src/agentscope/api/routes/`):
 | `POST /api/runs` | Start a run (202 + job). Built-in `agent_ref` or a full `config`; optional `expected` makes it an ad-hoc case. The task must be 1 to 4000 characters without NUL or unpaired surrogates. |
 | `GET /api/datasets`, `GET /api/datasets/{name}/{version}`, `.../export` | Stored datasets; detail, whose `dataset` is the canonical export document, so it can be posted back unchanged (for example to fork a version); canonical export. |
 | `POST /api/datasets`, `POST /api/datasets/validate` | Import (201, 409 conflict, 422 invalid) and lint without importing; the raw JSON document is the body. |
-| `GET /api/evaluations`, `GET /api/evaluations/{id}`, `.../export` | Suite list (filters `agent_ref`, `dataset`, `status`; `limit` 1 to 200, default 50, and `offset`; a bare array with the total matching count in the `X-Total-Count` header) and detail. |
+| `GET /api/evaluations`, `GET /api/evaluations/{id}`, `.../export` | Suite list (filters `agent_ref`, `dataset`, `status`; ablation variant suites only with `include_ablations=true`; `limit` 1 to 200, default 50, and `offset`; a bare array with the total matching count in the `X-Total-Count` header) and detail. |
 | `POST /api/evaluations` | Start a suite (202 + job). |
 | `GET /api/experiments`, `GET /api/experiments/{id}` | Comparisons (`limit`/`offset` and `X-Total-Count` as above). |
 | `POST /api/experiments` | `suite_a` + `suite_b`: compare two completed suites now (201), or return the stored comparison of the same ordered pair (200); 404 for an unknown suite, 409 for one that is not completed. `dataset` + `a` + `b`: run both sides (202 + job). |
+| `GET /api/ablations`, `GET /api/ablations/{id}` | Ablations, newest first (filter `experiment_id`; `limit`/`offset` and `X-Total-Count` as above), and the full `Ablation`. |
+| `POST /api/ablations` | `experiment_id`: explain that stored comparison with its own A and B suites; `dataset` + `a` + `b`: evaluate both sides first (202 + job of kind `ablation`, whose `resource_id` is the ablation id). Everything that can be refused is answered before a job starts: 404 for an unknown experiment or dataset, 422 for an unusable agent, nothing to ablate, more than 8 dimensions or suites of different dataset content. |
 | `GET /api/overview`, `GET /api/failures` | Read-only aggregations over stored verdicts (the overview also probes providers). |
 | `GET /api/jobs/{id}` | Job state and progress. |
 | `GET /api/settings`, `POST /api/settings/purge` | Redacted effective settings, storage inventory, egress list and privacy statements; purge (body `{"confirm": "PURGE", "scope": ..., "before": ...}`; the built-in datasets are kept). A 409 carries a `code`: `jobs_running` (refused, nothing deleted) or `purge_incomplete` (rows deleted, `result` attached, old contents still on disk). |
@@ -400,8 +448,9 @@ and without echoing the submitted values.
 beyond that `POST` answers 429. It keeps the 200 most recent finished jobs. Jobs exist only in
 the server's memory: after a restart their ids answer 404, while whatever they stored stays,
 and suites a dead process left `running` are marked `error` ("interrupted") by recovery.
-Evaluation and experiment jobs end `failed` (`UnjudgedCasesError: N of M cases could not be
-judged ...`) when any case is a harness error; the suite or comparison is stored all the same.
+Evaluation, experiment and ablation jobs end `failed` (`UnjudgedCasesError: N of M cases could
+not be judged ...`) when any case is a harness error; the suite, comparison or ablation is
+stored all the same.
 Shutdown cancels and awaits unfinished jobs. Clients poll `GET /api/jobs/{id}` and then fetch
 the resource named in `resource_id`.
 
@@ -446,6 +495,7 @@ are described in [SECURITY.md](SECURITY.md#container-mode) and
 | Three check states, with missing data always a failure. | A single `skipped` state. | `skipped` conflated "no expectation" with "could not evaluate", so a crashed run could pass. |
 | Gates compare rationals parsed from the written decimal. | Float comparison. | In floats, a drop from 4/10 to 3/10 is 10.000000000000004 pp and fails a 10 pp limit. |
 | Canonical JSON baselines without ids, timestamps or durations, written only by `--write-baseline`. | Comparing against the last stored run. | Baseline changes show up as reviewable diffs, and regenerating from unchanged inputs gives identical bytes. |
+| Ablations change each dimension alone in both directions (A + d, B − d) and in forward pairs (up to 6 dimensions); what single dimensions do not explain is reported as the interaction. | A full factorial design (2^k suites); Shapley values. | 2k + k(k−1)/2 variant suites stay affordable (20 for the five dimensions of research v1 → v2, where a full factorial needs 30 besides A and B), both directions answer "is it enough alone?" and "is it still needed?", and pair interactions locate dimensions that only work together without spreading the remainder over dimensions by a formula. |
 | Cases run sequentially; jobs limited to 2 running and 16 queued. | Concurrent case execution. | Deterministic order and output; fake runs are fast and a local model gains little from concurrency. |
 | In-memory jobs. | A persistent job queue. | A single local process needs no broker; what a job stores is persisted as it goes, and suites whose process died are marked by recovery. |
 | An owner (`host:pid:incarnation`) and a heartbeat on running suites; recovery marks only rows whose owner is gone or, when that cannot be checked, silent for 5 minutes. | Marking every `running` row at startup. | The CLI and the server share one database: blind marking turned another process's live suite into an error whenever any command started. |

@@ -201,14 +201,14 @@ API. Container mode refuses `--allowed-host` unless remote mode is on; for netwo
   `postgresql://user:password@127.0.0.1:5432/agentscope`), that database is used instead;
   `postgresql://` and `postgres://` are rewritten to `postgresql+psycopg://`, which needs the
   `postgres` extra.
-- Commands that open the engine (`serve`, `run`, `eval`, `compare`, `datasets`, `traces`,
-  `agents`, `demo`, `db purge`) upgrade the schema to the latest revision first and register
-  the built-in datasets. `agentscope db info` never migrates; it shows the location (password
-  masked), the revision and row counts. `agentscope db upgrade` migrates explicitly.
+- Commands that open the engine (`serve`, `run`, `eval`, `compare`, `ablate`, `datasets`,
+  `traces`, `agents`, `demo`, `db purge`) upgrade the schema to the latest revision first and
+  register the built-in datasets. `agentscope db info` never migrates; it shows the location
+  (password masked), the revision and row counts. `agentscope db upgrade` migrates explicitly.
 - Work whose process died (a killed `agentscope eval`, a crashed server) is marked
-  `interrupted` by the commands that start work (`run`, `eval`, `compare`, `demo seed`), by
-  `db upgrade`, and by `agentscope serve` at startup and every minute. Other commands never
-  touch it, and work still running in another process is never marked
+  `interrupted` by the commands that start work (`run`, `eval`, `compare`, `ablate`,
+  `demo seed`), by `db upgrade`, and by `agentscope serve` at startup and every minute. Other
+  commands never touch it, and work still running in another process is never marked
   ([ARCHITECTURE.md](../ARCHITECTURE.md#liveness-and-recovery)).
 - To start over, purge (`agentscope db purge --yes`) or point `AGENTSCOPE_DATA_DIR` at another
   directory. See [PRIVACY.md](../PRIVACY.md#retention-and-purge).
@@ -266,7 +266,8 @@ from the process environment, with one warning naming them (never their values).
 | `agentscope run` | `--task/-t TEXT` (required, 1 to 4000 characters), `--agent/-a A[@V]` (default `research_assistant`, the latest version), `--fault tool:kind[:on_call]` (repeatable), `--expect VALUE`, `--expect-field PATH` (default `answer`), `--match exact\|normalized\|contains\|numeric` (default `numeric` for number fields, else `normalized`; `one_of` is refused), `--save/--no-save`, `--json` |
 | `agentscope eval` | `--dataset/-d PATH\|NAME[@VERSION]` (required), `--agent/-a A@V` or `--config FILE`, `--check`, `--thresholds FILE`, `--baseline FILE`, `--write-baseline FILE`, `--output/-o FILE`, `--json`, `--save/--no-save`, `--label TEXT` |
 | `agentscope compare` | `--dataset/-d ...` (required), `--a A@V`, `--b A@V` (required), `--json`, `--output/-o FILE`, `--fail-on-regression` |
-| `agentscope traces list` / `show RUN_ID` | `list`: `--limit N` (1 to 200, default 20), `--agent NAME`, `--json`; `show`: `--json` |
+| `agentscope ablate` | either `--experiment/-e ID` (a stored experiment, reusing its suites and the stored dataset version it evaluated) or `--dataset/-d PATH\|NAME[@VERSION]` with `--a A@V` and `--b A@V`; `--pairs/--no-pairs` (default: pairs, up to 6 dimensions), `--json`, `--output/-o FILE`, `--save/--no-save`. Exit 0, 2 (invalid input, nothing to ablate) or 3 (a case could not be judged) |
+| `agentscope traces list` / `show RUN_ID` | `list`: `--limit N` (1 to 200, default 20), `--agent NAME`, `--include-ablations` (also list runs of ablation variants), `--json`; `show`: `--json` |
 | `agentscope datasets list\|validate PATH\|import PATH\|export REF` | `--json` on list, validate and import; `export`: `--output/-o DIR` |
 | `agentscope agents list` | `--json` |
 | `agentscope db upgrade\|info\|purge` | `info`: `--json`; `purge`: `--scope all\|runs\|evaluations\|experiments\|datasets`, `--before ISO`, `--yes` (required), `--json` |
@@ -298,6 +299,7 @@ line with exit 2. Exit codes are listed in the [README](../README.md#cli).
 | A warning that configured secret values are too short or too simple to redact | A configured key, token or database password is too short or too plain to be matched by value without hitting ordinary words (see [TRACING.md](TRACING.md#redaction-at-write-time)). It is still redacted in URLs and `name=value` text; use a long random value to have it redacted everywhere. |
 | Provider panel says Ollama is unreachable | Start Ollama or set `AGENTSCOPE_OLLAMA_URL`; or ignore it if you only use the fake model. A missing model is reported with the `ollama pull` command to run yourself. |
 | `eval` or `compare` exits 3 with harness errors `provider_error` | The model provider was unreachable or failed; the cases were not judged and no baseline is written. Check the provider settings and run again. |
+| `ablate --experiment ID` exits 2 with `which is not stored` | The experiment's suites evaluated a dataset file that was never imported. Import that exact version (`agentscope datasets import PATH`) and ablate again, or ablate with `--dataset PATH --a A@V --b A@V`. |
 | `rows were deleted, but another connection is reading the database` (purge exit 3, API 409 `purge_incomplete`) | Another AgentScope process held the SQLite database open. Stop it and purge again to finish erasing. |
 | `409 jobs are still running; nothing was deleted` on purge (`jobs_running`) | Wait for running jobs to finish, then purge. |
 | A test fails with a socket error | The test tried to reach a non-loopback host; tests must use loopback servers or `httpx.MockTransport`. |

@@ -128,7 +128,7 @@ def failed_checks(case: CaseResult) -> list[str]:
     return (["harness_error"] if case.harness_error is not None else []) + failed
 
 
-def _written(write: Callable[[], object]) -> bool:
+def written(write: Callable[[], object]) -> bool:
     """Run a file write after the work is done. A failure (the destination vanished since it
     was checked) is reported, and the result is still printed rather than lost."""
     try:
@@ -221,14 +221,14 @@ def eval_command(
     if write_baseline is not None:
         if code is Exit.ERROR:
             err.print(safe("baseline not written: the suite has harness errors", "yellow"))
-        elif not _written(lambda: store_baseline(build_baseline(result), write_baseline)):
+        elif not written(lambda: store_baseline(build_baseline(result), write_baseline)):
             code = Exit.ERROR
     document = {
         "suite": result.model_dump(mode="json"),
         "gate": result.gate.model_dump(mode="json") if result.gate else None,
         "exit_code": int(code),
     }
-    if output is not None and not _written(lambda: write_json(output, document)):
+    if output is not None and not written(lambda: write_json(output, document)):
         code = Exit.ERROR
         document["exit_code"] = int(code)
     if as_json:
@@ -352,7 +352,7 @@ def compare_command(
     else:
         code = Exit.OK
     document = {"comparison": comparison.model_dump(mode="json"), "exit_code": int(code)}
-    if output is not None and not _written(lambda: write_json(output, document)):
+    if output is not None and not written(lambda: write_json(output, document)):
         code = Exit.ERROR
         document["exit_code"] = int(code)
     if as_json:
@@ -406,7 +406,12 @@ def _render_comparison(comparison: Comparison, simulated: Sequence[str] = ()) ->
         console.print(safe(f"warning: {warning}", "yellow"))
 
     if comparison.config_diff:
-        note = " (confounded: attribution not possible)" if comparison.confounded else ""
+        note = (
+            " (confounded: no single change can be credited from this comparison alone;"
+            " `agentscope ablate` attributes it)"
+            if comparison.confounded
+            else ""
+        )
         console.print(safe(f"config changes{note}:", "bold"))
         for diff in comparison.config_diff:
             console.print(

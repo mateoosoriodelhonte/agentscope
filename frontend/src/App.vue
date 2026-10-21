@@ -72,6 +72,9 @@ void useRouter()
   min-height: 0;
 }
 .content {
+  /* The containing block of absolutely positioned content (.visually-hidden captions), so
+     content below the fold scrolls here instead of making the whole document scroll. */
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;

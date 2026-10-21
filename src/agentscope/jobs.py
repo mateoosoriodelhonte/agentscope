@@ -1,5 +1,5 @@
-"""In-process background jobs for long-running API work: runs, evaluations, experiments and
-demo seeding.
+"""In-process background jobs for long-running API work: runs, evaluations, experiments,
+ablations and demo seeding.
 
 Jobs live in this process's memory only, so a restart forgets them. What a job creates is
 persisted as it goes, and suites whose process died are marked as errors by the server's

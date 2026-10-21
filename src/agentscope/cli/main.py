@@ -16,6 +16,7 @@ from pydantic import JsonValue, ValidationError
 from rich.text import Text
 
 from agentscope import __version__
+from agentscope.cli.ablate import ablate_command
 from agentscope.cli.common import SIMULATED, Exit, concise, console, err, fail, open_services
 from agentscope.cli.database import db_app
 from agentscope.cli.evaluate import compare_command, eval_command
@@ -44,6 +45,7 @@ app.add_typer(db_app, name="db", no_args_is_help=True)
 app.add_typer(demo_app, name="demo", no_args_is_help=True)
 app.command("eval")(eval_command)
 app.command("compare")(compare_command)
+app.command("ablate")(ablate_command)
 
 
 # Remote mode refuses shorter API tokens.
@@ -282,10 +284,15 @@ def _print_trace_summary(trace: TraceRecord, evaluation: CaseResult | None) -> N
 def traces_list(
     limit: Annotated[int, typer.Option(min=1, max=200)] = 20,
     agent: str | None = None,
+    include_ablations: Annotated[
+        bool, typer.Option("--include-ablations", help="Also list runs of ablation variants")
+    ] = False,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """List recent runs."""
-    items, total = open_services().repository.list_runs(agent=agent, limit=limit)
+    """List recent runs (runs of ablation variants only with --include-ablations)."""
+    items, total = open_services().repository.list_runs(
+        agent=agent, include_ablations=include_ablations, limit=limit
+    )
     if as_json:
         emit_json({"total": total, "items": [i.model_dump(mode="json") for i in items]})
         return

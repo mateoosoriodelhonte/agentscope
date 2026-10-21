@@ -8,6 +8,7 @@ import pytest
 from apiclient import post, run_job, wait_for_job
 from fastapi.testclient import TestClient
 
+from agentscope import demo
 from agentscope.datasets.packaged import load_builtin_dataset
 from agentscope.services import Services
 
@@ -215,7 +216,10 @@ def test_failures_overview_and_providers(client: TestClient) -> None:
     assert providers[1]["enabled"] is False  # Ollama is disabled in these tests: no probe
 
 
-def test_demo_seed_job(client: TestClient) -> None:
+def test_demo_seed_job(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The job's plumbing, without the 20-suite ablation (tests/unit/test_demo.py seeds the
+    # full story; tests/integration/test_api_ablations.py covers the ablation endpoints).
+    monkeypatch.setattr(demo, "DEMO_ABLATIONS", ())
     first = post(client, "/api/demo/seed")
     assert first.status_code == 202
     accepted = first.json()
@@ -230,6 +234,7 @@ def test_demo_seed_job(client: TestClient) -> None:
     suites = client.get("/api/evaluations").json()
     assert len(suites) == 5
     assert len(client.get("/api/experiments").json()) == 2
+    assert client.get("/api/ablations").json() == []
 
 
 def test_lists_page_with_a_total_count_header(client: TestClient) -> None:
